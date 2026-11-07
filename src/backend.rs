@@ -38,6 +38,45 @@ impl LaunchConfig {
     pub fn base_url(&self) -> String {
         format!("http://{}:{}", self.host, self.port)
     }
+
+    fn file() -> PathBuf {
+        glib::user_config_dir().join("comfy-gnome").join("launch.ini")
+    }
+
+    /// Last splash settings (defaults + auto-detected folder if none saved).
+    pub fn load() -> Self {
+        let mut c = Self { comfy_dir: find_comfy_dir(), ..Self::default() };
+        let kf = glib::KeyFile::new();
+        if kf.load_from_file(Self::file(), glib::KeyFileFlags::NONE).is_err() {
+            return c;
+        }
+        let s = |k: &str| kf.string("launch", k).ok().map(|v| v.to_string()).filter(|v| !v.is_empty());
+        c.script = s("script").map(PathBuf::from).filter(|p| p.exists());
+        if let Some(d) = s("comfy_dir").map(PathBuf::from).filter(|p| is_comfy_dir(p)) {
+            c.comfy_dir = Some(d);
+        }
+        c.args = s("args").unwrap_or_default();
+        c.host = s("host").unwrap_or(c.host);
+        c.port = kf.integer("launch", "port").ok().and_then(|p| u16::try_from(p).ok()).unwrap_or(c.port);
+        c.suppress_browser = kf.boolean("launch", "suppress_browser").unwrap_or(true);
+        c
+    }
+
+    pub fn save(&self) {
+        let kf = glib::KeyFile::new();
+        let p = |o: &Option<PathBuf>| o.as_ref().map(|p| p.display().to_string()).unwrap_or_default();
+        kf.set_string("launch", "script", &p(&self.script));
+        kf.set_string("launch", "comfy_dir", &p(&self.comfy_dir));
+        kf.set_string("launch", "args", &self.args);
+        kf.set_string("launch", "host", &self.host);
+        kf.set_integer("launch", "port", self.port.into());
+        kf.set_boolean("launch", "suppress_browser", self.suppress_browser);
+        let f = Self::file();
+        let _ = std::fs::create_dir_all(f.parent().unwrap());
+        if let Err(e) = kf.save_to_file(&f) {
+            eprintln!("saving {}: {e}", f.display());
+        }
+    }
 }
 
 /// True if `dir` looks like a ComfyUI checkout.

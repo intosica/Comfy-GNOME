@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 //! Splash / launch-configuration screen.
 
-use crate::backend::{self, LaunchConfig, DEFAULT_HOST, DEFAULT_PORT};
+use crate::backend::{self, LaunchConfig, DEFAULT_HOST};
 use adw::{gio, gtk, prelude::*};
 use std::cell::RefCell;
 use std::path::PathBuf;
@@ -9,8 +9,9 @@ use std::rc::Rc;
 
 pub fn build(window: &adw::ApplicationWindow, on_start: impl Fn(LaunchConfig) + 'static) -> gtk::Widget {
     let on_start = Rc::new(on_start);
-    let script: Rc<RefCell<Option<PathBuf>>> = Rc::default();
-    let comfy_dir: Rc<RefCell<Option<PathBuf>>> = Rc::new(RefCell::new(backend::find_comfy_dir()));
+    let saved = LaunchConfig::load();
+    let script: Rc<RefCell<Option<PathBuf>>> = Rc::new(RefCell::new(saved.script.clone()));
+    let comfy_dir: Rc<RefCell<Option<PathBuf>>> = Rc::new(RefCell::new(saved.comfy_dir.clone()));
 
     let icon_button = |icon: &str, tip: &str| {
         gtk::Button::builder().icon_name(icon).tooltip_text(tip).valign(gtk::Align::Center).css_classes(["flat"]).build()
@@ -40,11 +41,11 @@ pub fn build(window: &adw::ApplicationWindow, on_start: impl Fn(LaunchConfig) + 
     script_row.add_suffix(&browse);
     script_row.set_activatable_widget(Some(&browse));
 
-    let args_row = adw::EntryRow::builder().title("Extra Arguments (e.g. --lowvram --listen)").build();
-    let host_row = adw::EntryRow::builder().title("Host").text(DEFAULT_HOST).build();
+    let args_row = adw::EntryRow::builder().title("Extra Arguments (e.g. --lowvram --listen)").text(&saved.args).build();
+    let host_row = adw::EntryRow::builder().title("Host").text(&saved.host).build();
     let port_row = adw::SpinRow::builder()
         .title("Port")
-        .adjustment(&gtk::Adjustment::new(DEFAULT_PORT as f64, 1.0, 65535.0, 1.0, 10.0, 0.0))
+        .adjustment(&gtk::Adjustment::new(saved.port as f64, 1.0, 65535.0, 1.0, 10.0, 0.0))
         .build();
 
     let launch_group = adw::PreferencesGroup::builder()
@@ -57,7 +58,7 @@ pub fn build(window: &adw::ApplicationWindow, on_start: impl Fn(LaunchConfig) + 
     let suppress_row = adw::SwitchRow::builder()
         .title("Block Browser Launch")
         .subtitle("Stop launch scripts from opening Thorium, Chromium, xdg-open…")
-        .active(true)
+        .active(saved.suppress_browser)
         .build();
     launch_group.add(&suppress_row);
 
@@ -153,6 +154,7 @@ pub fn build(window: &adw::ApplicationWindow, on_start: impl Fn(LaunchConfig) + 
             });
         });
     }
+    refresh();
     {
         let script = script.clone();
         clear.connect_clicked(move |_| {
@@ -175,12 +177,19 @@ pub fn build(window: &adw::ApplicationWindow, on_start: impl Fn(LaunchConfig) + 
             }
         }
     };
+    let current = move || make_cfg(script.borrow().clone(), comfy_dir.borrow().clone(), args_row.text().to_string());
     {
-        let (on_start, make_cfg) = (on_start.clone(), make_cfg.clone());
-        skip_btn.connect_clicked(move |_| on_start(make_cfg(None, None, String::new())));
+        let (on_start, current) = (on_start.clone(), current.clone());
+        skip_btn.connect_clicked(move |_| {
+            let cfg = current();
+            cfg.save();
+            on_start(LaunchConfig { script: None, comfy_dir: None, args: String::new(), ..cfg })
+        });
     }
     launch_btn.connect_clicked(move |_| {
-        on_start(make_cfg(script.borrow().clone(), comfy_dir.borrow().clone(), args_row.text().to_string()))
+        let cfg = current();
+        cfg.save();
+        on_start(cfg)
     });
 
     toolbar.upcast()

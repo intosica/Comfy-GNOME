@@ -2,7 +2,9 @@
 // Comfy-GNOME — native GTK4/Libadwaita frontend for ComfyUI.
 // Canvas design adapted from Helvum (c) Tom A. Wagner, GPL-3.0-only.
 
+mod api;
 mod backend;
+mod registry;
 mod canvas;
 mod splash;
 mod workspace;

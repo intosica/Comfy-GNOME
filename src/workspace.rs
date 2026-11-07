@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 //! Main workspace shell: header bar, sidebar (workflows/queue), canvas, log panel.
 
-use crate::{backend, canvas};
+use crate::{api, backend, canvas, registry};
 use adw::{gio, glib, gtk, prelude::*};
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -15,6 +15,8 @@ pub struct Workspace {
     title: adw::WindowTitle,
     log: gtk::TextView,
     proc: Rc<RefCell<Option<backend::Backend>>>,
+    pub client: Rc<RefCell<Option<api::Client>>>,
+    pub registry: Rc<RefCell<registry::Registry>>,
 }
 
 fn placeholder(icon: &str, title: &str, desc: &str) -> adw::StatusPage {
@@ -92,7 +94,14 @@ impl Workspace {
             .build();
         toggle.bind_property("active", &split, "show-sidebar").bidirectional().sync_create().build();
 
-        Self { root: split.upcast(), title, log, proc: Rc::default() }
+        Self {
+            root: split.upcast(),
+            title,
+            log,
+            proc: Rc::default(),
+            client: Rc::default(),
+            registry: Rc::default(),
+        }
     }
 
     /// Stop a backend we launched (Drop kills its process group). Call on window close:
@@ -141,6 +150,7 @@ impl Workspace {
                 Ok(status) => {
                     me.append_log(&format!("Connected: {status}"));
                     me.title.set_subtitle(&format!("Connected · {}", cfg.base_url()));
+                    me.on_connected(api::Client::new(&cfg.host, cfg.port));
                 }
                 Err(e) => {
                     if attempt % 5 == 0 { me.append_log(&format!("Backend not reachable yet: {e}")); }
@@ -150,6 +160,65 @@ impl Workspace {
                 }
             }
         });
+    }
+}
+
+impl Workspace {
+    /// Backend is up: load node definitions and start the event stream.
+    fn on_connected(&self, client: api::Client) {
+        *self.client.borrow_mut() = Some(client.clone());
+
+        let me = self.clone();
+        let c = client.clone();
+        glib::spawn_future_local(async move {
+            let t = std::time::Instant::now();
+            match gio::spawn_blocking(move || c.get("/object_info")).await {
+                Ok(Ok(v)) => {
+                    let reg = registry::Registry::from_object_info(&v);
+                    me.append_log(&format!(
+                        "Loaded {} node types in {} categories ({} ms)",
+                        reg.nodes.len(),
+                        reg.by_category().len(),
+                        t.elapsed().as_millis()
+                    ));
+                    *me.registry.borrow_mut() = reg;
+                }
+                Ok(Err(e)) => me.append_log(&format!("[object_info] {e}")),
+                Err(_) => me.append_log("[object_info] worker panicked"),
+            }
+        });
+
+        let (tx, rx) = async_channel::unbounded();
+        client.spawn_ws(tx);
+        let me = self.clone();
+        glib::spawn_future_local(async move {
+            while let Ok(ev) = rx.recv().await {
+                me.on_ws_event(ev);
+            }
+        });
+    }
+
+    fn on_ws_event(&self, ev: api::WsEvent) {
+        use api::WsEvent::*;
+        match ev {
+            Connected => self.append_log("[ws] connected"),
+            Disconnected(why) => self.append_log(&format!("[ws] disconnected: {why} (retrying)")),
+            Status { queue_remaining } => self.append_log(&format!("[ws] queue: {queue_remaining} remaining")),
+            Progress { value, max, node } => {
+                self.title.set_subtitle(&format!("Running node {} · {value}/{max}", node.unwrap_or_default()))
+            }
+            Executing { node: None, prompt_id } => {
+                self.append_log(&format!("[ws] prompt {} finished", prompt_id.unwrap_or_default()))
+            }
+            Executing { node: Some(n), .. } => self.append_log(&format!("[ws] executing node {n}")),
+            ExecutionStart { prompt_id } => self.append_log(&format!("[ws] prompt {prompt_id} started")),
+            ExecutionError { message } => self.append_log(&format!("[ws] ERROR {message}")),
+            Preview(bytes) => self.append_log(&format!("[ws] preview frame ({} bytes)", bytes.len())),
+            Other { kind, data } => {
+                let d = data.to_string();
+                self.append_log(&format!("[ws] {kind} {}", &d[..d.floor_char_boundary(160)]))
+            }
+        }
     }
 }
 
