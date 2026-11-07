@@ -103,6 +103,9 @@ pub struct Subgraph {
     pub graph: Graph,
     pub inputs: Vec<SubgraphIo>,
     pub outputs: Vec<SubgraphIo>,
+    /// Canvas rects [x, y, w, h] of the boundary input / output pseudo-nodes.
+    pub input_node: Option<[f64; 4]>,
+    pub output_node: Option<[f64; 4]>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -130,6 +133,8 @@ impl Workflow {
                         graph: parse_graph(s)?,
                         inputs: parse_io(&s["inputs"]),
                         outputs: parse_io(&s["outputs"]),
+                        input_node: rect(&s["inputNode"]["bounding"]),
+                        output_node: rect(&s["outputNode"]["bounding"]),
                     },
                 ))
             })
@@ -159,6 +164,12 @@ fn id_of(v: &Value) -> Option<String> {
     }
 }
 
+fn rect(v: &Value) -> Option<[f64; 4]> {
+    let b = v.as_array()?;
+    let f = |i: usize| b.get(i).and_then(Value::as_f64).unwrap_or(0.0);
+    Some([f(0), f(1), f(2), f(3)])
+}
+
 fn pair(v: &Value) -> Option<(f64, f64)> {
     // [x, y] or {"0": x, "1": y} (very old files)
     Some((v[0].as_f64().or_else(|| v["0"].as_f64())?, v[1].as_f64().or_else(|| v["1"].as_f64())?))
@@ -178,11 +189,9 @@ fn parse_graph(v: &Value) -> Option<Graph> {
         .into_iter()
         .flatten()
         .filter_map(|g| {
-            let b = g["bounding"].as_array()?;
-            let f = |i: usize| b.get(i).and_then(Value::as_f64).unwrap_or(0.0);
             Some(Group {
                 title: g["title"].as_str().unwrap_or_default().to_owned(),
-                bounding: [f(0), f(1), f(2), f(3)],
+                bounding: rect(&g["bounding"])?,
                 color: g["color"].as_str().map(str::to_owned),
             })
         })

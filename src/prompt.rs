@@ -85,7 +85,7 @@ fn link_target(v: &Value) -> Option<&str> {
 }
 
 /// Widget name → value for a node, as the frontend would serialize it.
-fn widget_map(node: &Node, def: &NodeDef) -> Map<String, Value> {
+pub fn widget_map(node: &Node, def: &NodeDef) -> Map<String, Value> {
     if let Some(m) = extension_widgets(node, def) {
         return m;
     }

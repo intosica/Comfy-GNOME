@@ -21,20 +21,45 @@ const TITLE_H: f64 = 30.0;
 const SLOT_H: f64 = 20.0;
 const GRID: f64 = 20.0;
 
+#[derive(Default)]
 pub struct Node {
+    /// Workflow node id (opaque to the canvas; reported back on activation).
+    pub id: String,
     pub title: String,
     pub pos: (f64, f64),
     pub size: (f64, f64),
     pub inputs: Vec<String>,
     pub outputs: Vec<String>,
+    /// (name, value) rows drawn below the slots. Read-only in Phase 2.
+    pub widgets: Vec<(String, String)>,
+    pub color: Option<u32>,
+    pub bgcolor: Option<u32>,
+    /// litegraph mode: 2 = muted, 4 = bypassed.
+    pub mode: i64,
+    pub collapsed: bool,
+    /// Subgraph instance: drawn with a marker, double-click opens it.
+    pub subgraph: bool,
+}
+
+pub struct Group {
+    pub title: String,
+    pub rect: [f64; 4],
+    pub color: Option<u32>,
 }
 
 impl Node {
+    fn body_h(&self) -> f64 {
+        if self.collapsed { 0.0 } else { self.size.1 }
+    }
     fn contains(&self, (x, y): (f64, f64)) -> bool {
-        x >= self.pos.0 && x <= self.pos.0 + self.size.0 && y >= self.pos.1 - TITLE_H && y <= self.pos.1 + self.size.1
+        x >= self.pos.0 && x <= self.pos.0 + self.size.0 && y >= self.pos.1 - TITLE_H && y <= self.pos.1 + self.body_h()
     }
     /// `pos` is the top-left of the body; the title bar sits above it (litegraph convention).
     fn slot_pos(&self, output: bool, i: usize) -> (f64, f64) {
+        if self.collapsed {
+            let x = if output { self.pos.0 + self.size.0 } else { self.pos.0 };
+            return (x, self.pos.1 - TITLE_H / 2.0);
+        }
         let x = if output { self.pos.0 + self.size.0 } else { self.pos.0 };
         (x, self.pos.1 + (i as f64 + 0.7) * SLOT_H)
     }
@@ -55,6 +80,7 @@ struct State {
     /// Paint order, back to front. Indices into `nodes`; links stay index-stable.
     order: Vec<usize>,
     links: Vec<Link>,
+    groups: Vec<Group>,
     drag: Option<Drag>,
     pointer: (f64, f64),
 }
@@ -63,17 +89,70 @@ struct State {
 pub struct Canvas {
     pub area: gtk::DrawingArea,
     state: Rc<RefCell<State>>,
+    on_activate: Rc<RefCell<Option<Box<dyn Fn(&str)>>>>,
 }
 
 impl Canvas {
     pub fn new() -> Self {
         let area = gtk::DrawingArea::builder().hexpand(true).vexpand(true).focusable(true).build();
-        let c = Self { area, state: Rc::default() };
+        let c = Self { area, state: Rc::default(), on_activate: Rc::default() };
         c.setup_draw();
         c.setup_input();
         c
     }
 
+    /// Replace the whole scene and fit it into view.
+    pub fn set_graph(&self, nodes: Vec<Node>, links: Vec<Link>, groups: Vec<Group>) {
+        let mut s = self.state.borrow_mut();
+        s.order = (0..nodes.len()).collect();
+        s.nodes = nodes;
+        s.links = links;
+        s.groups = groups;
+        s.drag = None;
+        drop(s);
+        self.fit_view();
+    }
+
+    pub fn view(&self) -> (f64, (f64, f64)) {
+        let v = self.state.borrow().view;
+        (v.zoom, v.offset)
+    }
+
+    /// Restore a saved viewport (`extra.ds` in workflow files).
+    pub fn set_view(&self, zoom: f64, offset: (f64, f64)) {
+        let mut s = self.state.borrow_mut();
+        s.view = View { zoom: zoom.clamp(transform::ZOOM_MIN, transform::ZOOM_MAX), offset };
+        drop(s);
+        self.area.queue_draw();
+    }
+
+    /// Double-click on a node (by id).
+    pub fn connect_activate(&self, f: impl Fn(&str) + 'static) {
+        *self.on_activate.borrow_mut() = Some(Box::new(f));
+    }
+
+    /// Zoom/pan so every node is visible (falls back to reset when empty).
+    pub fn fit_view(&self) {
+        let (w, h) = (self.area.width() as f64, self.area.height() as f64);
+        let mut s = self.state.borrow_mut();
+        let mut b = [f64::MAX, f64::MAX, f64::MIN, f64::MIN];
+        for n in &s.nodes {
+            b = [b[0].min(n.pos.0), b[1].min(n.pos.1 - TITLE_H), b[2].max(n.pos.0 + n.size.0), b[3].max(n.pos.1 + n.body_h())];
+        }
+        if s.nodes.is_empty() || w < 10.0 || h < 10.0 {
+            s.view = View { zoom: 1.0, offset: (40.0, 60.0) };
+        } else {
+            let m = 40.0;
+            let zoom = ((w - 2.0 * m) / (b[2] - b[0])).min((h - 2.0 * m) / (b[3] - b[1])).clamp(transform::ZOOM_MIN, 1.0);
+            let cx = (b[0] + b[2]) / 2.0;
+            let cy = (b[1] + b[3]) / 2.0;
+            s.view = View { zoom, offset: (w / 2.0 - cx * zoom, h / 2.0 - cy * zoom) };
+        }
+        drop(s);
+        self.area.queue_draw();
+    }
+
+    #[allow(dead_code)]
     pub fn add_node(&self, node: Node) -> usize {
         let mut s = self.state.borrow_mut();
         s.nodes.push(node);
@@ -84,6 +163,7 @@ impl Canvas {
         i
     }
 
+    #[allow(dead_code)]
     pub fn add_link(&self, l: Link) {
         self.state.borrow_mut().links.push(l);
         self.area.queue_draw();
@@ -94,25 +174,6 @@ impl Canvas {
         self.area.queue_draw();
     }
 
-    /// Phase 1 validation content: two nodes and one wire.
-    pub fn add_demo_nodes(&self) {
-        let a = self.add_node(Node {
-            title: "Load Checkpoint".into(),
-            pos: (0.0, 0.0),
-            size: (240.0, 80.0),
-            inputs: vec![],
-            outputs: vec!["MODEL".into(), "CLIP".into(), "VAE".into()],
-        });
-        let b = self.add_node(Node {
-            title: "KSampler".into(),
-            pos: (360.0, 40.0),
-            size: (220.0, 110.0),
-            inputs: vec!["model".into(), "positive".into(), "negative".into(), "latent_image".into()],
-            outputs: vec!["LATENT".into()],
-        });
-        self.add_link((a, 0, b, 0));
-        self.reset_view();
-    }
 
     fn setup_draw(&self) {
         let state = self.state.clone();
@@ -141,6 +202,24 @@ impl Canvas {
             gtk::glib::Propagation::Stop
         });
         self.area.add_controller(scroll);
+
+        // Double-click: activate (open subgraph).
+        let click = gtk::GestureClick::builder().button(gdk::BUTTON_PRIMARY).build();
+        let (st, cb) = (self.state.clone(), self.on_activate.clone());
+        click.connect_pressed(move |_, n, x, y| {
+            if n != 2 {
+                return;
+            }
+            let id = {
+                let s = st.borrow();
+                let c = s.view.to_canvas((x, y));
+                s.order.iter().rev().map(|&i| &s.nodes[i]).find(|n| n.contains(c)).map(|n| n.id.clone())
+            };
+            if let (Some(id), Some(f)) = (id, cb.borrow().as_ref()) {
+                f(&id);
+            }
+        });
+        self.area.add_controller(click);
 
         // Primary drag: move node under pointer, else pan. Middle drag: always pan.
         for button in [gdk::BUTTON_PRIMARY, gdk::BUTTON_MIDDLE] {
@@ -194,6 +273,28 @@ fn rgb(cr: &gtk::cairo::Context, hex: u32) {
     );
 }
 
+fn rgba(cr: &gtk::cairo::Context, hex: u32, a: f64) {
+    cr.set_source_rgba(
+        ((hex >> 16) & 0xff) as f64 / 255.0,
+        ((hex >> 8) & 0xff) as f64 / 255.0,
+        (hex & 0xff) as f64 / 255.0,
+        a,
+    );
+}
+
+/// "#rrggbb" / "#rgb" (litegraph node/group colors). Alpha suffixes are ignored.
+pub fn parse_color(s: &str) -> Option<u32> {
+    let h = s.strip_prefix('#')?;
+    match h.len() {
+        3 | 4 => {
+            let v = u32::from_str_radix(&h[..3], 16).ok()?;
+            Some(((v >> 8) & 0xf) * 0x110000 + ((v >> 4) & 0xf) * 0x1100 + (v & 0xf) * 0x11)
+        }
+        6 | 8 => u32::from_str_radix(&h[..6], 16).ok(),
+        _ => None,
+    }
+}
+
 fn rounded_rect(cr: &gtk::cairo::Context, x: f64, y: f64, w: f64, h: f64, r: f64) {
     cr.new_sub_path();
     cr.arc(x + w - r, y + r, r, -PI / 2.0, 0.0);
@@ -235,22 +336,49 @@ fn draw(cr: &gtk::cairo::Context, s: &State, w: f64, h: f64) {
         cr.stroke().ok();
     }
 
-    // Links under nodes (litegraph order).
+    let (vx0, vy0) = v.to_canvas((0.0, 0.0));
+    let (vx1, vy1) = v.to_canvas((w, h));
+    let visible = |x: f64, y: f64, w: f64, h: f64| x + w >= vx0 && x <= vx1 && y + h >= vy0 && y <= vy1;
+    cr.select_font_face("Sans", gtk::cairo::FontSlant::Normal, gtk::cairo::FontWeight::Normal);
+
+    // Groups (behind everything).
+    for g in &s.groups {
+        let [x, y, gw, gh] = g.rect;
+        if !visible(x, y, gw, gh) { continue; }
+        let c = g.color.unwrap_or(0x3f789e);
+        rgba(cr, c, 0.25);
+        cr.rectangle(x, y, gw, gh);
+        cr.fill().ok();
+        rgba(cr, c, 0.6);
+        cr.rectangle(x, y, gw, 34.0);
+        cr.fill().ok();
+        rgb(cr, 0xdddddd);
+        cr.set_font_size(22.0);
+        cr.move_to(x + 8.0, y + 25.0);
+        cr.show_text(&g.title).ok();
+    }
+
+    // Links under nodes (litegraph order). Culled by their bounding box.
     rgb(cr, 0x99aa99);
     cr.set_line_width(3.0);
     for &(a, ao, b, bi) in &s.links {
-        link_path(cr, s.nodes[a].slot_pos(true, ao), s.nodes[b].slot_pos(false, bi));
+        let (o, i) = (s.nodes[a].slot_pos(true, ao), s.nodes[b].slot_pos(false, bi));
+        let half = (o.0 - i.0).abs() / 2.0;
+        if visible(o.0.min(i.0) - half, o.1.min(i.1) - 30.0, (o.0 - i.0).abs() + 2.0 * half, (o.1 - i.1).abs() + 30.0) {
+            link_path(cr, o, i);
+        }
     }
     cr.stroke().ok();
 
-    cr.select_font_face("Sans", gtk::cairo::FontSlant::Normal, gtk::cairo::FontWeight::Normal);
-    cr.set_font_size(13.0);
+    let detail = v.zoom >= 0.4; // skip text when too small to read
     for &i in &s.order {
         let n = &s.nodes[i];
         let (x, y) = n.pos;
-        let (nw, nh) = n.size;
+        let (nw, nh) = (n.size.0, n.body_h());
+        if !visible(x, y - TITLE_H, nw, nh + TITLE_H) { continue; }
+        let alpha = if n.mode == 2 { 0.4 } else { 1.0 };
         rounded_rect(cr, x, y - TITLE_H, nw, nh + TITLE_H, 8.0);
-        rgb(cr, 0x353535);
+        rgba(cr, if n.mode == 4 { 0x9a3a9a } else { n.bgcolor.unwrap_or(0x353535) }, alpha);
         cr.fill_preserve().ok();
         let dragging = matches!(s.drag, Some(Drag::Node { idx, .. }) if idx == i);
         rgb(cr, if dragging { 0xffffff } else { 0x111111 });
@@ -261,17 +389,35 @@ fn draw(cr: &gtk::cairo::Context, s: &State, w: f64, h: f64) {
         cr.save().ok();
         rounded_rect(cr, x, y - TITLE_H, nw, nh + TITLE_H, 8.0);
         cr.clip();
-        rgb(cr, 0x333333);
+        rgba(cr, if n.mode == 4 { 0x7a2a7a } else { n.color.unwrap_or(0x333333) }, alpha);
         cr.rectangle(x, y - TITLE_H, nw, TITLE_H);
         cr.fill().ok();
-        cr.restore().ok();
-        rgb(cr, 0x999999);
+        if !detail {
+            cr.restore().ok();
+            continue;
+        }
+        cr.set_font_size(13.0);
+        rgb(cr, 0xbbbbbb);
         cr.move_to(x + 28.0, y - TITLE_H / 2.0 + 5.0);
         cr.show_text(&n.title).ok();
-        cr.arc(x + 14.0, y - TITLE_H / 2.0, 5.0, 0.0, 2.0 * PI);
-        cr.fill().ok();
+        cr.restore().ok();
+        rgb(cr, 0x999999);
+        if n.subgraph {
+            // two stacked squares = "contains a graph"
+            cr.rectangle(x + 8.0, y - TITLE_H / 2.0 - 6.0, 8.0, 8.0);
+            cr.rectangle(x + 12.0, y - TITLE_H / 2.0 - 2.0, 8.0, 8.0);
+            cr.set_line_width(1.5);
+            cr.stroke().ok();
+        } else {
+            cr.arc(x + 14.0, y - TITLE_H / 2.0, 5.0, 0.0, 2.0 * PI);
+            cr.fill().ok();
+        }
+        if n.collapsed { continue; }
 
         // Slots
+        cr.save().ok();
+        cr.rectangle(x, y, nw, nh);
+        cr.clip();
         cr.set_font_size(12.0);
         for (out, labels) in [(false, &n.inputs), (true, &n.outputs)] {
             for (si, label) in labels.iter().enumerate() {
@@ -285,7 +431,23 @@ fn draw(cr: &gtk::cairo::Context, s: &State, w: f64, h: f64) {
                 cr.show_text(label).ok();
             }
         }
-        cr.set_font_size(13.0);
+        // Widget rows (read-only values)
+        let mut wy = y + n.inputs.len().max(n.outputs.len()) as f64 * SLOT_H + 4.0;
+        for (name, val) in &n.widgets {
+            if wy + 20.0 > y + nh { break; }
+            rounded_rect(cr, x + 10.0, wy, nw - 20.0, 20.0, 6.0);
+            rgb(cr, 0x222222);
+            cr.fill().ok();
+            rgb(cr, 0x888888);
+            cr.move_to(x + 18.0, wy + 14.0);
+            cr.show_text(name).ok();
+            rgb(cr, 0xdddddd);
+            let tw = cr.text_extents(val).map(|e| e.width()).unwrap_or(0.0);
+            cr.move_to((x + nw - 18.0 - tw).max(x + nw / 2.0), wy + 14.0);
+            cr.show_text(val).ok();
+            wy += 24.0;
+        }
+        cr.restore().ok();
     }
     cr.restore().ok();
 

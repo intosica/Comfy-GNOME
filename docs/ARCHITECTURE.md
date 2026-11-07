@@ -72,3 +72,44 @@ adds `<resource-base-path>/icons` (derived from the app id) to the icon theme. N
 ## Threading
 GTK main thread owns all UI and state. Blocking I/O goes through `gio::spawn_blocking` (Phase 1) and will move to a
 dedicated backend thread + `async_channel` in Phase 2 (Helvum's GTK↔worker message pattern).
+
+## Session 2 additions
+
+### Modules
+```
+src/api.rs        REST + WS client (blocking ureq/tungstenite on gio::spawn_blocking)
+src/registry.rs   /object_info → NodeDef/Kind (incl. v3 COMBO + COMFY_DYNAMICCOMBO_V3)
+src/workflow.rs   saved workflow JSON (0.4 tuple links, subgraph defs, groups, extra.ds)
+src/prompt.rs     workflow → API prompt (graphToPrompt port, subgraph flattening)
+src/graph_view.rs workflow graph → canvas scene (nodes/links/groups)
+```
+Data flows one way: `workflow::Workflow` (parse) → `prompt::build` (execute) and
+`graph_view::scene` (draw). Nothing in `workflow.rs`/`prompt.rs` touches GTK.
+
+### Coordinates and viewport
+Canvas space is litegraph space: node `pos` is the top-left of the **body**, the title bar
+occupies `[pos.y-30, pos.y]`. `screen = canvas * zoom + offset` (`src/canvas/transform.rs`).
+Saved workflows carry the viewport as `extra.ds = {scale, offset:[x, y]}`; we restore it on
+load (zoom clamped to 0.1..4.0) instead of fitting, which reproduces what the user saw in the
+browser. "Fit" and "Reset" buttons cover the rest.
+
+### Rendering budget
+- Node geometry comes from the file; heights are *grown* (`max(saved, slots*20 + widgets*24 + 8)`)
+  because extension widgets may have been added since the file was saved. Never shrunk.
+- Everything is culled against the visible canvas rect: nodes, groups and each link's
+  bounding box (control points stay inside `x ± half_distance`, `y - 30`).
+- All text is skipped below 0.4 zoom (cairo toy API, ~13 px). No pango yet.
+- Widget values are drawn as read-only pills from `prompt::widget_map`, i.e. exactly the
+  values that would be sent to the backend.
+
+### Prompt conversion invariants (learned from real captures)
+1. Node ids are strings; subgraph execution ids are `<host path>:<node id>`.
+2. A subgraph instance is not emitted; its inner nodes are, using the host's prefix.
+3. Links from `-10` continue at the host's input with the same **name** (not index); an
+   unlinked host input with a `widget` provides a promoted value.
+4. Muted (2) nodes emit nothing and their outgoing links vanish; bypassed (4) nodes pass the
+   value through a type-compatible input.
+5. Widget values map **positionally** onto widget-capable inputs, plus UI-only slots
+   (control_after_generate, upload buttons, autocomplete metadata) that are skipped.
+6. Arrays are wrapped as `{"__value__": [...]}` or the backend reads them as links.
+7. Anything unknown to `/object_info` is dropped with a warning (frontend "virtual" nodes).

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 //! Main workspace shell: header bar, sidebar (workflows/queue), canvas, log panel.
 
-use crate::{api, backend, canvas, registry};
+use crate::{api, backend, canvas, graph_view, prompt, registry, workflow};
 use adw::{gio, glib, gtk, prelude::*};
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -17,6 +17,21 @@ pub struct Workspace {
     proc: Rc<RefCell<Option<backend::Backend>>>,
     pub client: Rc<RefCell<Option<api::Client>>>,
     pub registry: Rc<RefCell<registry::Registry>>,
+    canvas: canvas::Canvas,
+    nav: Rc<RefCell<Nav>>,
+    wf_list: gtk::ListBox,
+    /// Sidebar row index → workflow file path (rows never reorder, only hide).
+    files: Rc<RefCell<Vec<String>>>,
+    crumb: gtk::Label,
+    back: gtk::Button,
+}
+
+/// Currently displayed workflow and the subgraph path drilled into.
+#[derive(Default)]
+struct Nav {
+    wf: Option<workflow::Workflow>,
+    file: Option<String>,
+    path: Vec<String>,
 }
 
 fn placeholder(icon: &str, title: &str, desc: &str) -> adw::StatusPage {
@@ -32,10 +47,36 @@ impl Workspace {
     pub fn new() -> Self {
         // Sidebar ----------------------------------------------------------------
         let side_stack = adw::ViewStack::new();
-        side_stack.add_titled_with_icon(
-            &placeholder("folder-symbolic", "Workflows", "Saved workflows appear here (Phase 3)"),
-            Some("workflows"), "Workflows", "folder-symbolic",
-        );
+        // Single, not None: GTK disables click activation entirely in NONE mode.
+        let wf_list = gtk::ListBox::builder().selection_mode(gtk::SelectionMode::Single).build();
+        let wf_scroller = gtk::ScrolledWindow::builder().child(&wf_list).vexpand(true).build();
+        let search = gtk::SearchEntry::builder().placeholder_text("Search workflows").hexpand(true).build();
+        let reload = gtk::Button::builder().icon_name("view-refresh-symbolic").tooltip_text("Reload list").build();
+        let wf_bar = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        wf_bar.set_margin_top(6);
+        wf_bar.set_margin_bottom(6);
+        wf_bar.set_margin_start(6);
+        wf_bar.set_margin_end(6);
+        wf_bar.append(&search);
+        wf_bar.append(&reload);
+        let wf_page = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        wf_page.append(&wf_bar);
+        wf_page.append(&wf_scroller);
+        // ponytail: client-side filter only; server-side search once lists get huge.
+        {
+            let list = wf_list.clone();
+            search.connect_search_changed(move |e| {
+                let q = e.text().to_lowercase();
+                list.set_filter_func(move |row| {
+                    q.is_empty()
+                        || row
+                            .child()
+                            .and_then(|c| c.downcast::<adw::ActionRow>().ok())
+                            .is_some_and(|r| r.title().to_lowercase().contains(&q))
+                });
+            });
+        }
+        side_stack.add_titled_with_icon(&wf_page, Some("workflows"), "Workflows", "folder-symbolic");
         side_stack.add_titled_with_icon(
             &placeholder("view-list-symbolic", "Queue", "Prompt queue appears here (Phase 2)"),
             Some("queue"), "Queue", "view-list-symbolic",
@@ -50,7 +91,6 @@ impl Workspace {
 
         // Canvas + log -----------------------------------------------------------
         let canvas = canvas::Canvas::new();
-        canvas.add_demo_nodes();
 
         let log = gtk::TextView::builder()
             .editable(false)
@@ -76,8 +116,24 @@ impl Workspace {
         let header = adw::HeaderBar::builder().title_widget(&title).show_start_title_buttons(false).build();
         let toggle = gtk::ToggleButton::builder().icon_name("sidebar-show-symbolic").active(true).tooltip_text("Toggle Sidebar").build();
         let reset = gtk::Button::builder().icon_name("zoom-original-symbolic").tooltip_text("Reset View").build();
+        let fit = gtk::Button::builder().icon_name("zoom-fit-best-symbolic").tooltip_text("Fit All Nodes").build();
+        let run = gtk::Button::builder()
+            .icon_name("media-playback-start-symbolic")
+            .tooltip_text("Queue Prompt (Ctrl+Enter)")
+            .css_classes(["suggested-action"])
+            .build();
         header.pack_start(&toggle);
+        let back = gtk::Button::builder().icon_name("go-previous-symbolic").tooltip_text("Leave subgraph").visible(false).build();
+        let crumb = gtk::Label::builder().ellipsize(gtk::pango::EllipsizeMode::Middle).css_classes(["dim-label"]).build();
+        header.pack_start(&back);
+        header.pack_start(&crumb);
+        header.pack_end(&run);
+        header.pack_end(&fit);
         header.pack_end(&reset);
+        {
+            let canvas = canvas.clone();
+            fit.connect_clicked(move |_| canvas.fit_view());
+        }
         {
             let canvas = canvas.clone();
             reset.connect_clicked(move |_| canvas.reset_view());
@@ -94,13 +150,207 @@ impl Workspace {
             .build();
         toggle.bind_property("active", &split, "show-sidebar").bidirectional().sync_create().build();
 
-        Self {
+        let ws = Self {
             root: split.upcast(),
             title,
             log,
             proc: Rc::default(),
             client: Rc::default(),
             registry: Rc::default(),
+            canvas,
+            nav: Rc::default(),
+            wf_list,
+            files: Rc::default(),
+            crumb,
+            back,
+        };
+        {
+            let me = ws.clone();
+            run.connect_clicked(move |_| me.queue_prompt());
+            let me = ws.clone();
+            let keys = gtk::ShortcutController::new();
+            keys.add_shortcut(gtk::Shortcut::new(
+                gtk::ShortcutTrigger::parse_string("<Control>Return"),
+                Some(gtk::CallbackAction::new(move |_, _| {
+                    me.queue_prompt();
+                    gtk::glib::Propagation::Stop
+                })),
+            ));
+            ws.root.add_controller(keys);
+        }
+        ws.setup_navigation();
+        ws
+    }
+
+    /// Convert the open workflow to an API prompt and queue it.
+    fn queue_prompt(&self) {
+        let Some(client) = self.client.borrow().clone() else {
+            self.append_log("[run] not connected");
+            return;
+        };
+        let nav = self.nav.borrow();
+        let Some(wf) = &nav.wf else {
+            drop(nav);
+            self.append_log("[run] no workflow open");
+            return;
+        };
+        let reg = self.registry.borrow();
+        if reg.nodes.is_empty() {
+            drop(reg);
+            self.append_log("[run] node definitions not loaded yet");
+            return;
+        }
+        let (api_prompt, warnings) = prompt::build(wf, &reg);
+        drop(reg);
+        let raw = wf.raw.clone();
+        let n = api_prompt.as_object().map_or(0, |o| o.len());
+        drop(nav);
+        for w in warnings {
+            self.append_log(&format!("[run] {w}"));
+        }
+        if n == 0 {
+            self.append_log("[run] prompt is empty (all nodes muted, bypassed or unknown)");
+            return;
+        }
+        self.append_log(&format!("[run] queueing {n} nodes…"));
+        let me = self.clone();
+        glib::spawn_future_local(async move {
+            match gio::spawn_blocking(move || client.queue_prompt(api_prompt, Some(raw))).await {
+                Ok(Ok(id)) => me.append_log(&format!("[run] queued prompt {id}")),
+                Ok(Err(e)) => me.append_log(&format!("[run] rejected: {e}")),
+                Err(_) => me.append_log("[run] worker panicked"),
+            }
+        });
+    }
+
+    fn setup_navigation(&self) {
+        let me = self.clone();
+        self.canvas.connect_activate(move |id| me.open_node(id));
+
+        // row-selected, not row-activated: libadwaita rows don't fire activation reliably,
+        // and this also gives keyboard navigation.
+        let me = self.clone();
+        self.wf_list.connect_row_selected(move |_, row| {
+            let Some(row) = row else { return };
+            let file = me.files.borrow().get(row.index() as usize).cloned();
+            if let Some(f) = file {
+                me.load_workflow(f);
+            }
+        });
+
+        let me = self.clone();
+        self.back.connect_clicked(move |_| {
+            me.nav.borrow_mut().path.pop();
+            me.render();
+        });
+
+        let me = self.clone();
+        self.wf_list.connect_map(move |_| me.refresh_workflows());
+    }
+
+    /// Fetch the user's workflow list (silent when not connected).
+    fn refresh_workflows(&self) {
+        let Some(client) = self.client.borrow().clone() else { return };
+        let me = self.clone();
+        glib::spawn_future_local(async move {
+            match gio::spawn_blocking(move || client.workflows()).await {
+                Ok(Ok(files)) => me.set_workflow_list(files),
+                Ok(Err(e)) => me.append_log(&format!("[workflows] {e}")),
+                Err(_) => me.append_log("[workflows] worker panicked"),
+            }
+        });
+    }
+
+    fn set_workflow_list(&self, mut files: Vec<String>) {
+        files.sort_by_key(|f| f.to_lowercase());
+        let mut list = self.files.borrow_mut();
+        list.clone_from(&files);
+        drop(list);
+        while let Some(row) = self.wf_list.row_at_index(0) {
+            self.wf_list.remove(&row);
+        }
+        for f in &files {
+            let row = match f.rsplit_once('/') {
+                // AdwActionRow titles are Pango markup: escape '&' in workflow names.
+                Some((dir, name)) => adw::ActionRow::builder()
+                    .title(glib::markup_escape_text(name.trim_end_matches(".json")))
+                    .subtitle(glib::markup_escape_text(dir))
+                    .build(),
+                None => adw::ActionRow::builder().title(glib::markup_escape_text(f.trim_end_matches(".json"))).build(),
+            };
+            row.set_tooltip_text(Some(f));
+            self.wf_list.append(&row);
+        }
+        self.append_log(&format!("{} workflows", files.len()));
+    }
+
+    fn load_workflow(&self, file: String) {
+        let Some(client) = self.client.borrow().clone() else { return };
+        let me = self.clone();
+        glib::spawn_future_local(async move {
+            let f = file.clone();
+            let text = gio::spawn_blocking(move || client.workflow_json(&f)).await;
+            let value = match text {
+                Ok(Ok(t)) => match serde_json::from_str(&t) {
+                    Ok(v) => v,
+                    Err(e) => return me.append_log(&format!("[workflow] {file}: {e}")),
+                },
+                Ok(Err(e)) => return me.append_log(&format!("[workflow] {file}: {e}")),
+                Err(_) => return me.append_log("[workflow] worker panicked"),
+            };
+            let wf = match workflow::Workflow::from_json(value) {
+                Ok(w) => w,
+                Err(e) => return me.append_log(&format!("[workflow] {file}: {e}")),
+            };
+            me.append_log(&format!(
+                "Opened {file}: {} nodes, {} links, {} subgraphs",
+                wf.root.nodes.len(),
+                wf.root.links.len(),
+                wf.subgraphs.len()
+            ));
+            *me.nav.borrow_mut() = Nav { wf: Some(wf), file: Some(file), path: Vec::new() };
+            me.render();
+        });
+    }
+
+    /// Double-click: drill into a subgraph instance.
+    fn open_node(&self, id: &str) {
+        let nav = self.nav.borrow();
+        let Some(wf) = &nav.wf else { return };
+        let graph = nav.path.last().and_then(|p| wf.subgraphs.get(p)).map(|s| &s.graph).unwrap_or(&wf.root);
+        let Some(node) = graph.node(id) else { return };
+        if !wf.subgraphs.contains_key(&node.ty) {
+            return;
+        }
+        let ty = node.ty.clone();
+        drop(nav);
+        self.nav.borrow_mut().path.push(ty);
+        self.render();
+    }
+
+    fn render(&self) {
+        let nav = self.nav.borrow();
+        let Some(wf) = &nav.wf else { return };
+        let def = nav.path.last().and_then(|p| wf.subgraphs.get(p));
+        let graph = def.map(|s| &s.graph).unwrap_or(&wf.root);
+        let (nodes, links, groups) = graph_view::scene(wf, graph, def, &self.registry.borrow());
+        // Root graph: restore the viewport the web frontend saved (`extra.ds`).
+        let saved_view = (nav.path.is_empty())
+            .then(|| wf.raw["extra"]["ds"].as_object())
+            .flatten()
+            .and_then(|ds| {
+                let scale = ds.get("scale")?.as_f64()?;
+                let off = ds.get("offset")?.as_array()?;
+                Some((scale, (off.first()?.as_f64()?, off.get(1)?.as_f64()?)))
+            });
+        let mut trail = vec![nav.file.as_deref().unwrap_or_default().to_owned()];
+        trail.extend(nav.path.iter().map(|p| wf.subgraphs[p].name.clone()));
+        self.crumb.set_text(&trail.join(" › "));
+        self.back.set_visible(!nav.path.is_empty());
+        drop(nav);
+        self.canvas.set_graph(nodes, links, groups);
+        if let Some((zoom, off)) = saved_view {
+            self.canvas.set_view(zoom, off);
         }
     }
 
@@ -188,6 +438,8 @@ impl Workspace {
             }
         });
 
+        self.refresh_workflows();
+
         let (tx, rx) = async_channel::unbounded();
         client.spawn_ws(tx);
         let me = self.clone();
@@ -214,6 +466,8 @@ impl Workspace {
             ExecutionStart { prompt_id } => self.append_log(&format!("[ws] prompt {prompt_id} started")),
             ExecutionError { message } => self.append_log(&format!("[ws] ERROR {message}")),
             Preview(bytes) => self.append_log(&format!("[ws] preview frame ({} bytes)", bytes.len())),
+            // DaSiWa monitor pushes ~1 msg/s; not log material (Phase 3 draws it instead).
+            Other { kind, .. } if kind == "dasiwa.system_monitor" => {}
             Other { kind, data } => {
                 let d = data.to_string();
                 self.append_log(&format!("[ws] {kind} {}", &d[..d.floor_char_boundary(160)]))

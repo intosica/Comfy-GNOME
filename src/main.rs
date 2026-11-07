@@ -4,6 +4,7 @@
 
 mod api;
 mod backend;
+mod graph_view;
 mod prompt;
 mod registry;
 mod workflow;

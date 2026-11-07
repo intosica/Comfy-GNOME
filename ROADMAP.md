@@ -11,24 +11,31 @@ Each phase ends with a runnable build, updated `AGENT-HANDOFF.md`, and screensho
 - [x] Workspace: sidebar (Workflows/Queue placeholders), canvas, bottom log panel
 - [x] Immediate-mode cairo canvas: zoom-at-pointer, pan, node drag + raise, Bezier wires, unit-tested transform
 
-## Phase 2 — Backend Protocol
-- [ ] Persist splash config (last folder/script/args/host/port)
-- [ ] HTTP client (`/object_info`, `/prompt`, `/queue`, `/history`, `/view`, `/upload/image`, `/interrupt`) on a worker thread
-- [ ] WebSocket `/ws?clientId=` (status, progress, executing, executed, binary preview frames) → GTK via `async_channel`
-- [ ] Node definition registry from `/object_info` (types, inputs, widgets, categories)
+## Phase 2 — Backend Protocol (mostly done, session 2)
+- [x] Persist splash config (last folder/script/args/host/port) — keyfile in `~/.config/comfy-gnome/launch.ini`
+- [x] HTTP client (`/object_info`, `/prompt`, `/queue`, `/history`, `/view`, `/interrupt`, `/userdata`) on worker threads (`ureq`)
+- [x] WebSocket `/ws?clientId=` (status, progress, executing, binary preview frames) → GTK via `async_channel`
+- [x] Node definition registry from `/object_info` (types, inputs, widgets, categories, v3 dynamic combos)
+- [x] Saved-workflow JSON parsing (0.4 + subgraphs) and workflow → API prompt conversion (`graphToPrompt` port),
+      validated against 60 real prompts from output PNGs (exact 30/60, 805/821 nodes)
+- [x] Workflows sidebar (`/userdata`), open a workflow, restore its saved viewport, drill into subgraphs
+- [x] Run button (+Ctrl+Enter): queue the open workflow, log `prompt_id`, errors surface in the log
 - [ ] Queue sidebar: live queue, progress, cancel/interrupt
-- Crate candidates: `ureq` or `reqwest` (blocking) + `tungstenite`, `serde_json`
+- [ ] Previews/gallery (WS preview frames + `executed.output.images` via `/view`)
 
 ## Phase 3 — Real Graph Editing
-- [ ] Load/save ComfyUI workflow JSON (UI format, litegraph `nodes`/`links`/`groups`) and API format export
+- [x] Load ComfyUI workflow JSON (UI format, litegraph `nodes`/`links`/`groups`) — read-only rendering
+- [ ] Save / edit workflows (drag links between slots, move nodes writes back, undo)
 - [ ] Slot type colors, link creation/removal by dragging between slots, type checking
 - [ ] Node add menu/search (from `/object_info`), delete, multi-select, rubber-band, copy/paste
-- [ ] Workflows sidebar (user dir + `/userdata` API), undo/redo
+- [x] Workflows sidebar (user dir + `/userdata` API) — listing + open only
+- [ ] Node library sidebar tab (search `/object_info`, insert nodes), undo/redo
 - [ ] Pango text rendering, spatial index for hit-testing, viewport culling
 
 ## Phase 4 — Widgets & Execution
 - [ ] In-node widgets: number/slider, combo, text/multiline, toggle, seed control (drawn on canvas, GTK popovers for editing)
-- [ ] Queue Prompt, execution highlighting, per-node progress, errors overlay
+- [x] Queue Prompt, per-node progress in the log/header
+- [ ] Execution highlighting on the canvas, errors overlay
 - [ ] Image preview/output nodes, LoadImage upload, gallery panel
 
 ## Phase 5 — Performance & Polish

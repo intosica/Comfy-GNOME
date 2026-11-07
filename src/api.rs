@@ -55,6 +55,20 @@ impl Client {
         Ok(serde_json::from_str(&text).unwrap_or(Value::Null))
     }
 
+    /// `GET /api/userdata?dir=workflows&recurse=true&split=false&full_info=true`.
+    pub fn workflows(&self) -> Result<Vec<String>, String> {
+        let v = self.get("/api/userdata?dir=workflows&recurse=true&split=false&full_info=true")?;
+        Ok(v.as_array().into_iter().flatten().filter_map(|e| e["path"].as_str().map(str::to_owned)).collect())
+    }
+
+    /// `GET /api/userdata/workflows/<path>`: the saved workflow JSON.
+    pub fn workflow_json(&self, file: &str) -> Result<String, String> {
+        // The server route is a single `{file}` segment: "workflows/x.json" must be
+        // percent-encoded whole (a literal '/' after /userdata/ is a 404).
+        let url = format!("{}/api/userdata/{}", self.base, percent_encode(&format!("workflows/{file}")));
+        self.agent.get(&url).call().map_err(err)?.into_string().map_err(|e| e.to_string())
+    }
+
     /// `POST /prompt` with an API-format prompt. Returns `prompt_id`.
     #[allow(dead_code)] // Phase 2.4
     pub fn queue_prompt(&self, prompt: Value, workflow: Option<Value>) -> Result<String, String> {
@@ -102,6 +116,19 @@ fn err(e: ureq::Error) -> String {
 }
 
 /// Random-enough session id (ComfyUI only needs it unique per client).
+/// Percent-encode everything but RFC 3986 unreserved characters (workflow files may
+/// contain spaces, '#'? no, and non-ASCII).
+fn percent_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => out.push(b as char),
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
 fn client_id() -> String {
     let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
     format!("comfy-gnome-{:x}{:x}", t.as_nanos(), std::process::id())
@@ -175,11 +202,28 @@ mod tests {
         let ev = parse_binary(&[0, 0, 0, 1, 0, 0, 0, 1, 0xff, 0xd8]);
         assert!(matches!(ev, Some(WsEvent::Preview(ref b)) if b == &[0xff, 0xd8]));
     }
+
+    #[test]
+    fn encodes_workflow_paths() {
+        assert_eq!(percent_encode("sub dir/a+b.json"), "sub%20dir%2Fa%2Bb.json");
+    }
 }
 
 /// Live check against a running ComfyUI: `cargo test -- --ignored live`.
 #[cfg(test)]
 mod live {
+    /// Posts a prompt whose only node type does not exist: the server must reject it,
+    /// so nothing is queued (safe against a backend that is doing real work).
+    #[test]
+    #[ignore]
+    fn live_rejects_unknown_node() {
+        let c = super::Client::new("127.0.0.1", 8188);
+        let before = c.get("/queue").unwrap();
+        let err = c.queue_prompt(serde_json::json!({"1": {"class_type": "NoSuchNodeXYZ", "inputs": {}}}), None);
+        assert!(err.unwrap_err().contains("400"), "expected 400");
+        assert_eq!(c.get("/queue").unwrap(), before, "queue unchanged");
+    }
+
     #[test]
     #[ignore]
     fn live_object_info_and_ws() {
