@@ -1,10 +1,10 @@
 {
-    "id": "io.github.gnomecomfyui.GnomeComfyUI",
+    "id": "io.github.comfygnome.ComfyGnome",
     "runtime": "org.gnome.Platform",
     "runtime-version": "50",
     "sdk": "org.gnome.Sdk",
     "sdk-extensions": ["org.freedesktop.Sdk.Extension.rust-stable"],
-    "command": "gnome-comfyui",
+    "command": "comfy-gnome",
     "finish-args": [
         "--share=ipc",
         "--share=network",
@@ -17,16 +17,16 @@
     "build-options": {
         "append-path": "/usr/lib/sdk/rust-stable/bin",
         "build-args": ["--share=network"],
-        "env": { "CARGO_HOME": "/run/build/gnome-comfyui/cargo" }
+        "env": { "CARGO_HOME": "/run/build/comfy-gnome/cargo" }
     },
     "modules": [
         {
-            "name": "gnome-comfyui",
+            "name": "comfy-gnome",
             "buildsystem": "simple",
             "build-commands": [
                 "cargo build --release --locked",
-                "install -Dm755 target/release/gnome-comfyui /app/bin/gnome-comfyui",
-                "install -Dm644 data/io.github.gnomecomfyui.GnomeComfyUI.desktop /app/share/applications/io.github.gnomecomfyui.GnomeComfyUI.desktop"
+                "install -Dm755 target/release/comfy-gnome /app/bin/comfy-gnome",
+                "install -Dm644 data/io.github.comfygnome.ComfyGnome.desktop /app/share/applications/io.github.comfygnome.ComfyGnome.desktop"
             ],
             "sources": [{ "type": "dir", "path": ".." }]
         }

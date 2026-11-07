@@ -1,4 +1,4 @@
-# Translation Notes (Helvum → GNOME-ComfyUI)
+# Translation Notes (Helvum → Comfy-GNOME)
 
 Helvum (`/home/montel/Documents/helvum-main`, GPL-3.0-only, © Tom A. Wagner et al.) was the reference.
 Visual constants come from ComfyUI_frontend 1.60.0 litegraph (`/home/montel/Documents/ComfyUI_frontend-1.60.0`, GPL-3.0).
@@ -16,14 +16,14 @@ Visual constants come from ComfyUI_frontend 1.60.0 litegraph (`/home/montel/Docu
 - Flatpak: `build-aux/org.pipewire.Helvum.json` — GNOME runtime, rust-stable extension, `--socket=fallback-x11`.
 
 ## What we took
-| Helvum | GNOME-ComfyUI |
+| Helvum | Comfy-GNOME |
 |---|---|
 | Link Bezier: `half = |ox-ix|/2`, `off = max(0, 25-|oy-iy|)` if `ox > ix`; ctrl `(ox+half, oy-off)`, `(ix-half, iy-off)` | `canvas::link_path` (identical) |
 | Zoom-around-pointer math | `transform::View::zoom_at` (clamp 0.1–4.0 instead of 0.3–4.0) |
 | Drag-picks-topmost-node, grab offset in canvas units | `Canvas::setup_input` primary drag |
 | Middle drag = pan | same, plus primary drag on empty space pans (ComfyUI behaviour) |
 | GTK↔worker thread message enums | planned for Phase 2 backend thread |
-| Flatpak manifest shape, `fallback-x11` | `build-aux/io.github.gnomecomfyui.GnomeComfyUI.json` |
+| Flatpak manifest shape, `fallback-x11` | `build-aux/io.github.comfygnome.ComfyGnome.json` |
 
 ## What we deliberately did not take
 - Widget-per-node / `Scrollable` + adjustments: replaced by an immediate-mode DrawingArea (see ARCHITECTURE).

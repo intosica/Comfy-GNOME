@@ -2,13 +2,14 @@
 
 ## Layout
 ```
-src/main.rs            adw::Application, window, Stack(splash → workspace)
+src/main.rs            resources, adw::Application, window, Stack(splash → workspace), stop backend on close
 src/splash.rs          launch configuration page → LaunchConfig
-src/backend.rs         LaunchConfig, probe(), spawn_script() (+ browser shims), Backend::stop()
+src/backend.rs         LaunchConfig, find_comfy_dir(), probe(), spawn() (+ browser shims), Backend (Drop = stop)
 src/workspace.rs       OverlaySplitView: sidebar | header + Paned(canvas / log)
 src/canvas/mod.rs      Canvas: DrawingArea, State, input controllers, cairo drawing
 src/canvas/transform.rs View: zoom/pan math (unit-tested)
-build-aux/*.json       Flatpak manifest;  data/*.desktop
+build.rs               compiles data/resources.gresource.xml (bundled Adwaita symbolic icons)
+build-aux/*.json       Flatpak manifest;  data/*.desktop;  run.sh launcher
 ```
 
 ## Rendering choice
@@ -44,16 +45,29 @@ lifted by `max(0, 25 - |dy|)` when the wire goes backwards.
 ## Backend process
 - **Skip**: no process; just poll `GET /system_stats` (std `TcpStream`, raw HTTP/1.0, off-thread via
   `gio::spawn_blocking`) every 2 s until 200.
-- **Launch Script**: `sh -c 'cd "$1" && shift && PATH=<shims>:$PATH exec setsid "$0" "$@"' script dir args…`
-  run with `gio::Subprocess` (stdout+stderr merged, read line-by-line async on the main loop into the log).
-  - Working dir = script's directory (user scripts assume it).
-  - `setsid` → own process group; `Backend::stop()` sends SIGTERM to `-pgid`, so python children die too.
+- **Launch ComfyUI** — two modes, one code path (`backend::spawn`), run with `gio::SubprocessLauncher`
+  (stdout+stderr merged, read line-by-line async on the main loop into the log; ANSI escapes stripped):
+  - **Folder** (default; auto-detected by `find_comfy_dir`, validated by `main.py` + `comfy/`):
+    `sh -c 'cd "$1" && shift && <activate venv|.venv> PYTHONUNBUFFERED=1 PATH=<shims>:$PATH exec setsid python main.py "$@"' python DIR --port N args…`
+    (`--port` from the splash goes before user args so theirs win).
+  - **Script** (optional, overrides folder): same wrapper with `exec setsid SCRIPT "$@"`, cwd = script's directory.
+  - `setsid` → own process group; `Backend` `Drop` sends SIGTERM to `-pgid` (python + script children die; scripts'
+    cleanup traps run). Triggered from `window.connect_close_request` (destroy signals don't fire on app quit).
+  - `PR_SET_PDEATHSIG=SIGTERM` in the child (set via `set_child_setup`) covers app crashes / `kill -9`.
+  - `PYTHONUNBUFFERED=1` or the log only updates every few KiB.
   - **Browser blocking**: user scripts open Thorium/Chromium/xdg-open after starting ComfyUI. With the
     switch on, a shim dir under `$XDG_RUNTIME_DIR` is prepended to `PATH`: browser names → `exec sleep infinity`
     (scripts that run the browser in the foreground and kill ComfyUI when it exits keep waiting), openers
     (`xdg-open`, `gio`, …) → `exit 0`. Only works for bare-name invocations, not absolute paths.
-  - Flatpak: prefixed with `flatpak-spawn --host --watch-bus`; shim dir is `$XDG_RUNTIME_DIR/app/<APP_ID>`,
-    which is the same path on the host.
+  - Flatpak: prefixed with `flatpak-spawn --host --watch-bus` so the host's python/venv/CUDA are used (seamless
+    with native); shim dir is `$XDG_RUNTIME_DIR/app/<APP_ID>`, which is the same path on the host.
+    `--filesystem=home` makes picked paths real host paths.
+
+## Icons
+The user's icon theme (`gnome`) lacks most `*-symbolic` icons, so the Adwaita SVGs used by the app (and
+libadwaita's `document-edit-symbolic`) are compiled into the binary (`build.rs` → gresource). GTK automatically
+adds `<resource-base-path>/icons` (derived from the app id) to the icon theme. New icon = copy SVG into
+`data/icons/scalable/actions/` + add a line to `data/resources.gresource.xml`.
 
 ## Threading
 GTK main thread owns all UI and state. Blocking I/O goes through `gio::spawn_blocking` (Phase 1) and will move to a

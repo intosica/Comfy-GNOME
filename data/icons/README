@@ -1,0 +1,2 @@
+Symbolic icons copied from the Adwaita icon theme (GNOME Project), CC-BY-SA 3.0 / LGPL-3.0.
+Bundled because non-Adwaita themes (e.g. "gnome") lack them. Add new ones here + data/resources.gresource.xml.

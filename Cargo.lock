@@ -48,6 +48,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "comfy-gnome"
+version = "0.1.0"
+dependencies = [
+ "glib-build-tools",
+ "gtk4",
+ "libadwaita",
+ "libc",
+]
+
+[[package]]
 name = "equivalent"
 version = "1.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -234,6 +244,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "glib-build-tools"
+version = "0.21.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "86aebe63bb050d4918cb1d629880cb35fcba7ccda6f6fc0ec1beffdaa1b9d5c3"
+dependencies = [
+ "gio",
+]
+
+[[package]]
 name = "glib-macros"
 version = "0.21.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -254,14 +273,6 @@ checksum = "2d95e1a3a19ae464a7286e14af9a90683c64d70c02532d88d87ce95056af3e6c"
 dependencies = [
  "libc",
  "system-deps",
-]
-
-[[package]]
-name = "gnome-comfyui"
-version = "0.1.0"
-dependencies = [
- "gtk4",
- "libadwaita",
 ]
 
 [[package]]

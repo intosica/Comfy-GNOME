@@ -1,7 +1,7 @@
 [Desktop Entry]
-Name=GNOME-ComfyUI
+Name=Comfy-GNOME
 Comment=Native GTK frontend for ComfyUI
-Exec=gnome-comfyui
+Exec=comfy-gnome
 Icon=applications-graphics
 Terminal=false
 Type=Application

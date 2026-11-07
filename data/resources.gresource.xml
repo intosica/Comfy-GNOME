@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<gresources>
+  <gresource prefix="/io/github/comfygnome/ComfyGnome">
+    <file preprocess="xml-stripblanks">icons/scalable/actions/applications-graphics-symbolic.svg</file>
+    <file preprocess="xml-stripblanks">icons/scalable/actions/document-edit-symbolic.svg</file>
+    <file preprocess="xml-stripblanks">icons/scalable/actions/document-open-symbolic.svg</file>
+    <file preprocess="xml-stripblanks">icons/scalable/actions/edit-clear-symbolic.svg</file>
+    <file preprocess="xml-stripblanks">icons/scalable/actions/folder-symbolic.svg</file>
+    <file preprocess="xml-stripblanks">icons/scalable/actions/sidebar-show-symbolic.svg</file>
+    <file preprocess="xml-stripblanks">icons/scalable/actions/view-list-symbolic.svg</file>
+    <file preprocess="xml-stripblanks">icons/scalable/actions/zoom-original-symbolic.svg</file>
+  </gresource>
+</gresources>

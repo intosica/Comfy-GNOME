@@ -1,5 +1,5 @@
 [package]
-name = "gnome-comfyui"
+name = "comfy-gnome"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.80"
@@ -10,6 +10,10 @@ readme = "README.md"
 [dependencies]
 adw = { version = "0.8", package = "libadwaita", features = ["v1_5"] }
 gtk = { version = "0.10", package = "gtk4", features = ["v4_14"] }
+libc = "0.2"
+
+[build-dependencies]
+glib-build-tools = "0.21"
 
 [profile.release]
 lto = "thin"

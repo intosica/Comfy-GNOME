@@ -70,7 +70,7 @@ impl Workspace {
         paned.set_position(560);
 
         // Header -----------------------------------------------------------------
-        let title = adw::WindowTitle::new("GNOME-ComfyUI", "Not connected");
+        let title = adw::WindowTitle::new("Comfy-GNOME", "Not connected");
         let header = adw::HeaderBar::builder().title_widget(&title).show_start_title_buttons(false).build();
         let toggle = gtk::ToggleButton::builder().icon_name("sidebar-show-symbolic").active(true).tooltip_text("Toggle Sidebar").build();
         let reset = gtk::Button::builder().icon_name("zoom-original-symbolic").tooltip_text("Reset View").build();
@@ -92,17 +92,19 @@ impl Workspace {
             .build();
         toggle.bind_property("active", &split, "show-sidebar").bidirectional().sync_create().build();
 
-        let ws = Self { root: split.upcast(), title, log, proc: Rc::default() };
-        let proc = ws.proc.clone();
-        ws.root.connect_destroy(move |_| {
-            if let Some(p) = proc.borrow_mut().take() { p.stop(); }
-        });
-        ws
+        Self { root: split.upcast(), title, log, proc: Rc::default() }
+    }
+
+    /// Stop a backend we launched (Drop kills its process group). Call on window close:
+    /// child widgets never get "destroy" in GTK4, and PDEATHSIG alone can't make a script
+    /// blocked on a foreground command run its cleanup trap.
+    pub fn stop_backend(&self) {
+        self.proc.borrow_mut().take();
     }
 
     pub fn append_log(&self, line: &str) {
         let buf = self.log.buffer();
-        buf.insert(&mut buf.end_iter(), line.trim_end_matches('\n'));
+        buf.insert(&mut buf.end_iter(), &strip_ansi(line.trim_end_matches('\n')));
         buf.insert(&mut buf.end_iter(), "\n");
         let extra = buf.line_count() - MAX_LOG_LINES;
         if extra > 0 {
@@ -116,10 +118,10 @@ impl Workspace {
     }
 
     pub fn start(&self, cfg: backend::LaunchConfig) {
-        if let Some(script) = &cfg.script {
-            self.append_log(&format!("$ {} {}", script.display(), cfg.args));
+        if let Some(what) = cfg.script.as_ref().or(cfg.comfy_dir.as_ref()) {
+            self.append_log(&format!("$ {} {}", what.display(), cfg.args));
             let me = self.clone();
-            match backend::spawn_script(script, &cfg.args, cfg.suppress_browser, move |l| me.append_log(l)) {
+            match backend::spawn(&cfg, move |l| me.append_log(l)) {
                 Ok(p) => *self.proc.borrow_mut() = Some(p),
                 Err(e) => self.append_log(&format!("[launch failed] {e}")),
             }
@@ -148,5 +150,31 @@ impl Workspace {
                 }
             }
         });
+    }
+}
+
+/// Drop ANSI CSI escape sequences (`ESC [ … final-byte`), e.g. colored log levels.
+// ponytail: strips colors instead of rendering them; map SGR to TextTags if wanted.
+fn strip_ansi(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut it = s.chars().peekable();
+    while let Some(c) = it.next() {
+        if c == '\x1b' && it.peek() == Some(&'[') {
+            it.next();
+            for c in it.by_ref() {
+                if ('@'..='~').contains(&c) { break; }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn strip_ansi() {
+        assert_eq!(super::strip_ansi("\x1b[32m[INFO]\x1b[0m hi \x1b[1;31mX"), "[INFO] hi X");
     }
 }

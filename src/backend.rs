@@ -15,8 +15,11 @@ pub const DEFAULT_PORT: u16 = 8188;
 
 #[derive(Debug, Clone)]
 pub struct LaunchConfig {
-    /// `None` = don't launch anything, connect to an already-running backend.
+    /// User launch script. Takes priority over `comfy_dir`.
     pub script: Option<PathBuf>,
+    /// ComfyUI checkout: launched directly (`[venv] python main.py --port N args`).
+    /// Both `None` = don't launch anything, connect to an already-running backend.
+    pub comfy_dir: Option<PathBuf>,
     /// Extra arguments, shell-quoted (parsed with g_shell_parse_argv).
     pub args: String,
     pub host: String,
@@ -27,7 +30,7 @@ pub struct LaunchConfig {
 
 impl Default for LaunchConfig {
     fn default() -> Self {
-        Self { script: None, args: String::new(), host: DEFAULT_HOST.into(), port: DEFAULT_PORT, suppress_browser: true }
+        Self { script: None, comfy_dir: None, args: String::new(), host: DEFAULT_HOST.into(), port: DEFAULT_PORT, suppress_browser: true }
     }
 }
 
@@ -35,6 +38,20 @@ impl LaunchConfig {
     pub fn base_url(&self) -> String {
         format!("http://{}:{}", self.host, self.port)
     }
+}
+
+/// True if `dir` looks like a ComfyUI checkout.
+pub fn is_comfy_dir(dir: &std::path::Path) -> bool {
+    dir.join("main.py").is_file() && dir.join("comfy").is_dir()
+}
+
+/// First existing ComfyUI checkout in the usual places.
+pub fn find_comfy_dir() -> Option<PathBuf> {
+    let home = glib::home_dir();
+    ["ComfyUI", "Documents/ComfyUI", "comfyui", "Documents/comfyui", "src/ComfyUI"]
+        .iter()
+        .map(|p| home.join(p))
+        .find(|p| is_comfy_dir(p))
 }
 
 /// Blocking GET /system_stats. Run off the main thread (gio::spawn_blocking).
@@ -74,13 +91,13 @@ const OPENER_SHIMS: &[&str] = &["xdg-open", "sensible-browser", "x-www-browser",
 fn browser_shim_dir() -> std::io::Result<PathBuf> {
     use std::os::unix::fs::PermissionsExt;
     let base = glib::user_runtime_dir();
-    let dir = if in_flatpak() { base.join("app").join(crate::APP_ID) } else { base.join("gnome-comfyui") }
+    let dir = if in_flatpak() { base.join("app").join(crate::APP_ID) } else { base.join("comfy-gnome") }
         .join("browser-shim");
     std::fs::create_dir_all(&dir)?;
     for (names, body) in [(BROWSER_SHIMS, "exec sleep infinity"), (OPENER_SHIMS, "exit 0")] {
         for name in names {
             let f = dir.join(name);
-            std::fs::write(&f, format!("#!/bin/sh\n# GNOME-ComfyUI: browser launch suppressed\n{body}\n"))?;
+            std::fs::write(&f, format!("#!/bin/sh\n# Comfy-GNOME: browser launch suppressed\n{body}\n"))?;
             std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o755))?;
         }
     }
@@ -91,9 +108,16 @@ pub struct Backend {
     pub proc: gio::Subprocess,
 }
 
+impl Drop for Backend {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
 impl Backend {
     /// Kill the whole process group (the script plus the python it spawned).
     pub fn stop(&self) {
+        eprintln!("DEBUG stop pid={:?}", self.proc.identifier());
         if let Some(pid) = self.proc.identifier() {
             let _ = std::process::Command::new("kill").args(["-TERM", "--", &format!("-{pid}")]).status();
         }
@@ -101,47 +125,65 @@ impl Backend {
     }
 }
 
-/// Spawn the user's launch script, streaming merged stdout/stderr lines to `on_line`
-/// on the GTK main loop.
+/// Launch ComfyUI per `cfg` (script or folder; caller checks one is set), streaming
+/// merged stdout/stderr lines to `on_line` on the GTK main loop.
 ///
-/// Runs as `sh -c 'PATH=<shim>:$PATH exec setsid "$0" "$@"' script args…` so that
-/// the script gets its own process group (killable as a unit) and, if
-/// `suppress_browser`, any browser it tries to open is a no-op. Inside Flatpak
-/// the same command is run on the host via `flatpak-spawn --host`.
-pub fn spawn_script(
-    script: &std::path::Path,
-    args: &str,
-    suppress_browser: bool,
-    on_line: impl Fn(&str) + 'static,
-) -> Result<Backend, glib::Error> {
+/// Runs as `sh -c '<cd + optional venv> PATH=<shim>:$PATH exec setsid <cmd> "$@"' …`
+/// so the process gets its own group (killable as a unit) and, if `suppress_browser`,
+/// any browser a script tries to open is a no-op. Inside Flatpak the same command
+/// runs on the host via `flatpak-spawn --host`, so host python/venv/CUDA are used.
+pub fn spawn(cfg: &LaunchConfig, on_line: impl Fn(&str) + 'static) -> Result<Backend, glib::Error> {
+    let suppress_browser = cfg.suppress_browser;
     let io_err = |e: std::io::Error| glib::Error::new(gio::IOErrorEnum::Failed, &e.to_string());
     let mut argv: Vec<std::ffi::OsString> = Vec::new();
     if in_flatpak() {
         argv.extend(["flatpak-spawn".into(), "--host".into(), "--watch-bus".into()]);
     }
-    let prefix = if suppress_browser {
+    // Unbuffered python, otherwise the log panel only updates every 4–8 KiB.
+    let mut prefix = String::from("PYTHONUNBUFFERED=1 ");
+    if suppress_browser {
         let d = browser_shim_dir().map_err(io_err)?;
-        format!("PATH='{}':\"$PATH\" ", d.display())
-    } else {
-        String::new()
+        prefix += &format!("PATH='{}':\"$PATH\" ", d.display());
+    }
+    // $0 = script (or "python"), $1 = working dir, rest = args.
+    let (body, arg0, workdir): (String, std::ffi::OsString, PathBuf) = match (&cfg.script, &cfg.comfy_dir) {
+        (Some(script), _) => (
+            format!("cd \"$1\" && shift && {prefix}exec setsid \"$0\" \"$@\""),
+            script.into(),
+            script.parent().unwrap_or(std::path::Path::new("/")).into(),
+        ),
+        (None, Some(dir)) => (
+            format!(
+                "cd \"$1\" && shift && \
+                 for v in venv .venv; do [ -f \"$v/bin/activate\" ] && . \"$v/bin/activate\" && break; done; \
+                 {prefix}exec setsid \"$(command -v python || command -v python3)\" main.py \"$@\""
+            ),
+            "python".into(),
+            dir.clone(),
+        ),
+        (None, None) => return Err(glib::Error::new(gio::IOErrorEnum::InvalidArgument, "nothing to launch")),
     };
-    let workdir = script.parent().unwrap_or(std::path::Path::new("/"));
-    argv.extend([
-        "sh".into(),
-        "-c".into(),
-        format!("cd \"$1\" && shift && {prefix}exec setsid \"$0\" \"$@\"").into(),
-        script.into(),
-        workdir.into(),
-    ]);
-    if !args.trim().is_empty() {
-        argv.extend(glib::shell_parse_argv(args)?.into_iter().map(Into::into));
+    argv.extend(["sh".into(), "-c".into(), body.into(), arg0, workdir.into()]);
+    if cfg.script.is_none() {
+        // Before user args so theirs win (argparse: last occurrence wins).
+        argv.extend(["--port".into(), cfg.port.to_string().into()]);
+    }
+    if !cfg.args.trim().is_empty() {
+        argv.extend(glib::shell_parse_argv(cfg.args.as_str())?.into_iter().map(Into::into));
     }
     let argv_ref: Vec<&std::ffi::OsStr> = argv.iter().map(|s| s.as_os_str()).collect();
 
-    let proc = gio::Subprocess::newv(
-        &argv_ref,
+    let launcher = gio::SubprocessLauncher::new(
         gio::SubprocessFlags::STDOUT_PIPE | gio::SubprocessFlags::STDERR_MERGE | gio::SubprocessFlags::STDIN_INHERIT,
-    )?;
+    );
+    // If we die without running stop() (crash, X connection loss), the kernel sends the
+    // child SIGTERM. The child is python itself in folder mode (exec chain), or the
+    // script (whose own cleanup trap then runs). Flatpak: --watch-bus covers this.
+    // SAFETY: prctl is async-signal-safe.
+    launcher.set_child_setup(|| unsafe {
+        libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM);
+    });
+    let proc = launcher.spawn(&argv_ref)?;
     let stdout = gio::DataInputStream::new(&proc.stdout_pipe().expect("stdout piped"));
     glib::spawn_future_local(async move {
         loop {
