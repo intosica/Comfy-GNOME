@@ -16,8 +16,14 @@ Verified on X11 (`GDK_BACKEND=x11`):
 - Skip → workspace, connection polling, node drag, zoom-at-pointer, bundled icons render under the user's `gnome` icon theme.
 Screenshots: `docs/screenshots/`.
 
-Not yet verified: Flatpak build/run (`./run.sh --flatpak`); script-mode window-close after the
-`connect_close_request` fix (only folder mode re-tested — same code path).
+Launchers (session 1 end): `launch-system.sh` (rebuilds release only if src/data/Cargo.* newer than the binary,
+desktop notification while building) and `launch-flatpak.sh [--rebuild]` (flatpak-builder --user --install).
+Menu entry `~/.local/share/applications/comfy-gnome-system.desktop` → launch-system.sh; Flatpak exports its own.
+App icon: `data/icons/hicolor/scalable/apps/io.github.comfygnome.ComfyGnome.svg` (original).
+Flatpak verified: builds, installs, runs, auto-detects the ComfyUI folder; `flatpak-spawn --host` reaches the host
+venv python from inside the sandbox. NOT yet verified: full launch-from-Flatpak click-through (user was using the
+desktop), script-mode window-close after the `connect_close_request` fix.
+Why the user "couldn't launch": old `run.sh` did a silent multi-minute first release build — looked like nothing happened.
 
 Env: rustc 1.95, GTK 4.14.5, libadwaita 1.5.0 (crates: libadwaita 0.8 `v1_5`, gtk4 0.10 `v4_14`, libc,
 build-dep glib-build-tools 0.21). Flatpak: GNOME 50 runtime + rust-stable 25.08 installed.
@@ -46,4 +52,4 @@ build-dep glib-build-tools 0.21). Flatpak: GNOME 50 runtime + rust-stable 25.08 
 2. Backend worker thread: `ureq` + `tungstenite` + `serde_json`, messages over `async_channel`.
 3. Fetch `/object_info`, build node registry; replace `add_demo_nodes`.
 4. Queue sidebar wired to `/queue` + WS `status`/`progress`.
-5. Run `./run.sh --flatpak` once and fix anything sandbox-specific.
+5. Click-through test of Launch ComfyUI inside the Flatpak (host spawn + close kills python).

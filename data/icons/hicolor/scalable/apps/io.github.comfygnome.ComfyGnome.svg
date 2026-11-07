@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- SPDX-License-Identifier: GPL-3.0-only — Comfy-GNOME app icon (original). -->
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
+  <rect x="8" y="12" width="112" height="104" rx="22" fill="#241f31"/>
+  <rect x="8" y="8" width="112" height="104" rx="22" fill="#3d3846"/>
+  <path d="M46 44 C 70 44, 58 84, 82 84" fill="none" stroke="#99aa99" stroke-width="6" stroke-linecap="round"/>
+  <rect x="18" y="26" width="40" height="34" rx="7" fill="#353535" stroke="#666" stroke-width="2"/>
+  <rect x="18" y="26" width="40" height="11" rx="5" fill="#57e389"/>
+  <rect x="70" y="66" width="40" height="34" rx="7" fill="#353535" stroke="#666" stroke-width="2"/>
+  <rect x="70" y="66" width="40" height="11" rx="5" fill="#62a0ea"/>
+  <circle cx="58" cy="46" r="5" fill="#99aa99"/>
+  <circle cx="70" cy="84" r="5" fill="#99aa99"/>
+</svg>

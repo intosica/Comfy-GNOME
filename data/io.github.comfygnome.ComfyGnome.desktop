@@ -2,7 +2,7 @@
 Name=Comfy-GNOME
 Comment=Native GTK frontend for ComfyUI
 Exec=comfy-gnome
-Icon=applications-graphics
+Icon=io.github.comfygnome.ComfyGnome
 Terminal=false
 Type=Application
 Categories=Graphics;GTK;

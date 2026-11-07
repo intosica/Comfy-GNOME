@@ -7,9 +7,10 @@ Status: Phase 1 (shell + splash + canvas prototype). See `ROADMAP.md` and `AGENT
 ## Run
 
 ```sh
-./run.sh            # native release build (GTK >= 4.14, libadwaita >= 1.5 dev packages, glib-compile-resources)
-./run.sh --debug    # native debug build
-./run.sh --flatpak  # Flatpak (GNOME 50 runtime + rust-stable SDK extension); built + installed on first run
+./launch-system.sh           # native release build (GTK >= 4.14, libadwaita >= 1.5 dev packages); rebuilds when sources change
+./launch-flatpak.sh          # Flatpak (GNOME 50 runtime + rust-stable SDK extension); built + installed on first run
+./launch-flatpak.sh --rebuild  # rebuild + reinstall the Flatpak after code changes
+cargo run                    # debug build for development
 ```
 
 On the splash screen pick your ComfyUI folder (auto-detected in `~/ComfyUI`, `~/Documents/ComfyUI`, …) and press

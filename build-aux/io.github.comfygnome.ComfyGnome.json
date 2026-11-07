@@ -3,7 +3,9 @@
     "runtime": "org.gnome.Platform",
     "runtime-version": "50",
     "sdk": "org.gnome.Sdk",
-    "sdk-extensions": ["org.freedesktop.Sdk.Extension.rust-stable"],
+    "sdk-extensions": [
+        "org.freedesktop.Sdk.Extension.rust-stable"
+    ],
     "command": "comfy-gnome",
     "finish-args": [
         "--share=ipc",
@@ -16,8 +18,12 @@
     ],
     "build-options": {
         "append-path": "/usr/lib/sdk/rust-stable/bin",
-        "build-args": ["--share=network"],
-        "env": { "CARGO_HOME": "/run/build/comfy-gnome/cargo" }
+        "build-args": [
+            "--share=network"
+        ],
+        "env": {
+            "CARGO_HOME": "/run/build/comfy-gnome/cargo"
+        }
     },
     "modules": [
         {
@@ -26,9 +32,22 @@
             "build-commands": [
                 "cargo build --release --locked",
                 "install -Dm755 target/release/comfy-gnome /app/bin/comfy-gnome",
-                "install -Dm644 data/io.github.comfygnome.ComfyGnome.desktop /app/share/applications/io.github.comfygnome.ComfyGnome.desktop"
+                "install -Dm644 data/io.github.comfygnome.ComfyGnome.desktop /app/share/applications/io.github.comfygnome.ComfyGnome.desktop",
+                "install -Dm644 data/icons/hicolor/scalable/apps/io.github.comfygnome.ComfyGnome.svg /app/share/icons/hicolor/scalable/apps/io.github.comfygnome.ComfyGnome.svg"
             ],
-            "sources": [{ "type": "dir", "path": ".." }]
+            "sources": [
+                {
+                    "type": "dir",
+                    "path": "..",
+                    "skip": [
+                        "target",
+                        ".flatpak-builder",
+                        "flatpak-build",
+                        ".git",
+                        ".pi"
+                    ]
+                }
+            ]
         }
     ]
 }

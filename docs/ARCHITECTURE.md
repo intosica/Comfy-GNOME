@@ -9,7 +9,7 @@ src/workspace.rs       OverlaySplitView: sidebar | header + Paned(canvas / log)
 src/canvas/mod.rs      Canvas: DrawingArea, State, input controllers, cairo drawing
 src/canvas/transform.rs View: zoom/pan math (unit-tested)
 build.rs               compiles data/resources.gresource.xml (bundled Adwaita symbolic icons)
-build-aux/*.json       Flatpak manifest;  data/*.desktop;  run.sh launcher
+build-aux/*.json       Flatpak manifest;  data/*.desktop;  launch-system.sh / launch-flatpak.sh
 ```
 
 ## Rendering choice
