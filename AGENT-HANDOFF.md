@@ -193,6 +193,12 @@ Shipped:
 
 Screenshots: `docs/screenshots/phase4-node-menu.png`, `phase4-bypass.png`, `phase4-add-node.png`.
 
+**Flatpak rebuilt and verified with these features** (`flatpak-builder --user --install --force-clean
+--install-deps-from=flathub flatpak-build build-aux/io.github.comfygnome.ComfyGnome.json`, ~1m45s): sandboxed app
+connects to the host backend, lists 158 workflows, opens one in a tab, canvas menu + node menu work, and `Enter` on
+the focused "Bypass Node" item turns the node magenta with the dashed passthrough. Nothing was saved, so the test
+workflow stayed untouched (md5 unchanged). `cargo test` = 10 passed / 3 ignored.
+
 ### Testing notes added in session 4
 - **The reload button (↻) is at (260, 79)** in the sidebar; the list is fetched on connect and on demand only, so a
   workflow uploaded with `curl` while the app runs is invisible until you press it. The search entry is at
