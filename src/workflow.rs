@@ -152,15 +152,17 @@ impl Workflow {
     pub fn to_json(&self) -> Value {
         let mut v = self.raw.clone();
         write_graph(&mut v, &self.root, false);
-        if let Some(defs) = v["definitions"]["subgraphs"].as_array_mut() {
-            for d in defs {
-                let Some(sg) = d["id"].as_str().and_then(|id| self.subgraphs.get(id)) else { continue };
-                write_graph(d, &sg.graph, true);
-                for (key, ios) in [("inputs", &sg.inputs), ("outputs", &sg.outputs)] {
-                    for (i, io) in d[key].as_array_mut().into_iter().flatten().enumerate() {
-                        if let Some(src) = ios.get(i) {
-                            io["linkIds"] = Value::from(src.link_ids.clone());
-                        }
+        // `v["definitions"]` would *insert* a null subtree, so look the definitions up
+        // without indexing: a workflow without subgraphs must keep its key set.
+        let defs = v.get_mut("definitions").and_then(|d| d.get_mut("subgraphs")).and_then(Value::as_array_mut);
+        for d in defs.into_iter().flatten() {
+            let Some(sg) = d.get("id").and_then(Value::as_str).and_then(|id| self.subgraphs.get(id)) else { continue };
+            write_graph(d, &sg.graph, true);
+            for (key, ios) in [("inputs", &sg.inputs), ("outputs", &sg.outputs)] {
+                let arr = d.get_mut(key).and_then(Value::as_array_mut);
+                for (i, io) in arr.into_iter().flatten().enumerate() {
+                    if let Some(src) = ios.get(i) {
+                        io["linkIds"] = Value::from(src.link_ids.clone());
                     }
                 }
             }
@@ -182,7 +184,10 @@ fn write_graph(s: &mut Value, g: &Graph, object_links: bool) {
         }
         for (i, ov) in nv["outputs"].as_array_mut().into_iter().flatten().enumerate() {
             if let Some(src) = n.outputs.get(i) {
-                ov["links"] = Value::from(src.links.clone());
+                // ComfyUI writes `null` for "nothing connected"; keep that instead of
+                // rewriting it to `[]` (minimal diff on save).
+                let was_null = ov.get("links").is_some_and(Value::is_null);
+                ov["links"] = if src.links.is_empty() && was_null { Value::Null } else { Value::from(src.links.clone()) };
             }
         }
     }
@@ -328,4 +333,27 @@ fn parse_io(v: &Value) -> Vec<SubgraphIo> {
             link_ids: io["linkIds"].as_array().into_iter().flatten().filter_map(Value::as_i64).collect(),
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Saving must not perturb coordinates: drag one node, write the file back, and
+    /// the untouched nodes must keep their exact `f64`s (serde_json needs
+    /// `float_roundtrip` for this — its default parser is off by an ulp on long
+    /// mantissas, which silently rewrote every node position on save).
+    #[test]
+    fn to_json_keeps_coordinates_bit_exact() {
+        let src = r#"{"version":0.4,"nodes":[
+            {"id":6,"type":"X","pos":[950.2978891664006,104.62510134174657],
+             "size":[315,98],"inputs":[],"outputs":[]},
+            {"id":7,"type":"Y","pos":[-44.260121259699716,776.6053367103586],
+             "size":[315,98],"inputs":[],"outputs":[]}],
+            "links":[],"groups":[]}"#;
+        let out = Workflow::from_str(src).expect("parse").to_json().to_string();
+        for want in ["104.62510134174657", "-44.260121259699716", "776.6053367103586", "950.2978891664006"] {
+            assert!(out.contains(want), "{want} lost in round trip:\n{out}");
+        }
+    }
 }

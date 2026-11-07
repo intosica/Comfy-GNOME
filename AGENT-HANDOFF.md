@@ -22,9 +22,15 @@ Launchers (session 1 end): `launch-system.sh` (rebuilds release only if src/data
 desktop notification while building) and `launch-flatpak.sh [--rebuild]` (flatpak-builder --user --install).
 Menu entry `~/.local/share/applications/comfy-gnome-system.desktop` → launch-system.sh; Flatpak exports its own.
 App icon: `data/icons/hicolor/scalable/apps/io.github.comfygnome.ComfyGnome.svg` (original).
-Flatpak verified: builds, installs, runs, auto-detects the ComfyUI folder; `flatpak-spawn --host` reaches the host
-venv python from inside the sandbox. NOT yet verified: full launch-from-Flatpak click-through (user was using the
-desktop), script-mode window-close after the `connect_close_request` fix.
+Flatpak verified (session 3, release build of the current tree): `flatpak-builder --user --install` succeeds
+(`docs/screenshots/flatpak-phase3.png`), the sandboxed app starts on X11, reads the host's saved launch config
+(`--filesystem=home`), connects to a running backend on `127.0.0.1:8188` (shared network), loads `/object_info`
+(4775 types) and the 159-workflow list, opens a workflow in a tab and **saves it back bit-identically**.
+`flatpak-spawn --host` reaches the host venv python from inside the sandbox. Still unverified: launching ComfyUI
+*from* the Flatpak when no backend is already running (untested because :8188 was busy), and window-close teardown
+in script mode.
+Rebuild after code changes: `./launch-flatpak.sh --rebuild` (or the raw `flatpak-builder` line above); it takes
+~3–4 min because it does a release build inside the sandbox.
 Why the user "couldn't launch": old `run.sh` did a silent multi-minute first release build — looked like nothing happened.
 
 Env: rustc 1.95, GTK 4.14.5, libadwaita 1.5.0 (crates: libadwaita 0.8 `v1_5`, gtk4 0.10 `v4_14`, libc,
@@ -121,9 +127,18 @@ build-dep glib-build-tools 0.21). Flatpak: GNOME 50 runtime + rust-stable 25.08 
   the original `raw` JSON (unknown fields survive), `api::save_workflow` POSTs it. Link endpoints are written as
   numbers again via `idv()` (ids that are not integers, e.g. `"39:7"`, stay strings). `extra.ds` is overwritten
   with the live viewport on save, like the web frontend.
-- **Round-trip proof**: opened a real 29-node workflow, saved it unchanged, then compared with a structural diff
-  (ignoring only formatting): **0 differences**, and `comfyui validate workflow` reports the identical
-  `converted_node_count: 21` plus the same single pre-existing error before and after. Use that MCP tool
+- **Round-trip proof**: opened a real 29-node workflow, saved it unchanged, then compared with a structural diff:
+  **0 differences**, and `comfyui validate workflow` reports the identical `converted_node_count: 21` plus the same
+  single pre-existing error before and after. Same test on a workflow that *has* a subgraph definition: identical.
+- **Three save-fidelity bugs found by that test (all fixed — do not regress them):**
+  1. serde_json's default float parser is off by one ulp on long mantissas, so every untouched node position was
+     silently rewritten (`104.62510134174657` → `…656`). Fixed with the **`float_roundtrip` feature** on serde_json
+     (`Cargo.toml`); regression test `workflow::tests::to_json_keeps_coordinates_bit_exact`.
+  2. `v["definitions"]["subgraphs"]` *inserts* a null subtree when the key is absent (serde_json `IndexMut`), so a
+     workflow without subgraphs grew `"definitions": {"subgraphs": null}`. Use `get_mut(...).and_then(Value::as_array_mut)`.
+  3. `sync` rebuilt `outputs[].links` in HashMap order (`[1717,1738]` → `[1738,1717]`) and `write_graph` rewrote
+     `links: null` as `[]`. Both now preserve ComfyUI's shape (ids sorted ascending, `null` kept when empty).
+  The save path is now *bit-faithful*: open → `Ctrl+S` → identical file. Use that MCP tool
   (`mcp comfyui_validate_workflow`, arg `workflow_path`) as an external oracle — it converts UI→API server-side,
   so it cross-checks `prompt.rs` and anything our save writes.
 - **Wires**: `hit_slot`/`hit_target` with radius `9/zoom` canvas units. Drag from an output → new link; drag from a

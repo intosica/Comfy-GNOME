@@ -183,6 +183,13 @@ pub fn sync(graph: &mut Graph, nodes: &[Node], links: &[Link]) {
             },
         );
     }
+    // ComfyUI stores an output's link ids in ascending order; keep it that way so a
+    // save produces no diff noise in the user's own files.
+    for n in &mut graph.nodes {
+        for o in &mut n.outputs {
+            o.links.sort_unstable();
+        }
+    }
     graph.links = wired;
 }
 

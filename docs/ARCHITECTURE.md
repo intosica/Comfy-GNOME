@@ -136,6 +136,14 @@ right comparison direction because `compatible()` is asymmetric (only the input 
 | shift+drag from connected output | link **de-anchored at that output**: the wire keeps hanging from the input it fed and now hunts for a new output (drop on nothing deletes it) |
 | drop on incompatible type | ignored (hover ring only on compatible targets) |
 
+**Saving is bit-faithful.** `Ctrl+S` runs `canvas → graph_view::sync → Workflow::to_json → POST /api/userdata`.
+`to_json` clones the workflow's original `raw` JSON and only splices positions/wiring/`ds` into it, so extension
+fields, unknown node properties and `definitions` survive untouched. Two invariants keep the file unchanged when
+nothing was edited: serde_json is built with **`float_roundtrip`** (its default float parser is off by an ulp on long
+mantissas and would rewrite every node position), and `write_graph` never invents keys — `definitions` is looked up
+with `get_mut`, an output's `links` stay sorted ascending, and `links: null` stays `null` instead of becoming `[]`.
+Verified by saving untouched copies of a 29-node workflow and of one with a subgraph definition: both compare equal.
+
 **Link colours** come from the litegraph palette (`LGraphCanvas.link_type_colors`, ported to
 `canvas::type_color`): MODEL `#b39ddb`, CLIP `#ffd500`, VAE `#ff6e6e`, CONDITIONING `#ffa931`,
 LATENT `#ff9cf9`, IMAGE `#64b5f6`, MASK `#81c784`, and a hashed fallback for unknown types.

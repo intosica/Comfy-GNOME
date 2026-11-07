@@ -29,8 +29,9 @@ Each phase ends with a runnable build, updated `AGENT-HANDOFF.md`, and screensho
 - [x] Load ComfyUI workflow JSON (UI format, litegraph `nodes`/`links`/`groups`)
 - [x] Workflow **tabs**: one `adw::TabView` per open workflow, switch/close (`Ctrl+W`), unsaved marker `•`
 - [x] Save (`Ctrl+S`) via `POST /api/userdata/<percent-encoded file>`; positions, wiring, `extra.ds` viewport
-      written back; unknown JSON fields preserved (verified: byte-identical round-trip on a real 29-node graph,
-      `converted_node_count` unchanged by `comfyui validate workflow`)
+      written back; unknown JSON fields preserved and **bit-faithful** (open → save → the file is unchanged, verified
+      on a real 29-node graph and on one with a subgraph definition; `converted_node_count` unchanged by
+      `comfyui validate workflow`; needs serde_json's `float_roundtrip`)
 - [x] Slot **type colours** (16-entry palette from `LGraphCanvas.link_type_colors`)
 - [x] Link editing: drag from an output/input to wire, drag off an input to unplug, **shift+drag** an output to
       de-anchor the far end (wire keeps hanging from its input, drop it on another output to re-source it), hover ring
