@@ -31,6 +31,9 @@ pub struct Workspace {
     monitor_detail: gtk::Label,
     monitor_btn: gtk::MenuButton,
     interrupt_btn: gtk::Button,
+    preview: gtk::Picture,
+    preview_caption: gtk::Label,
+    bottom: adw::ViewStack,
 }
 
 /// Currently displayed workflow and the subgraph path drilled into.
@@ -124,15 +127,41 @@ impl Workspace {
             .build();
         let log_scroller = gtk::ScrolledWindow::builder().child(&log).height_request(80).build();
 
+        let preview = gtk::Picture::builder()
+            .content_fit(gtk::ContentFit::Contain)
+            .can_shrink(true)
+            .hexpand(true)
+            .vexpand(true)
+            .build();
+        let preview_caption = gtk::Label::builder().ellipsize(gtk::pango::EllipsizeMode::Middle).css_classes(["dim-label", "caption"]).build();
+        let preview_page = gtk::Box::new(gtk::Orientation::Vertical, 4);
+        preview_page.set_margin_top(6);
+        preview_page.set_margin_bottom(6);
+        preview_page.append(&preview);
+        preview_page.append(&preview_caption);
+
+        let bottom = adw::ViewStack::new();
+        bottom.add_titled(&log_scroller, Some("log"), "Log");
+        bottom.add_titled(&preview_page, Some("preview"), "Preview");
+        let bottom_switcher = adw::ViewSwitcher::builder()
+            .stack(&bottom)
+            .policy(adw::ViewSwitcherPolicy::Narrow)
+            .halign(gtk::Align::Start)
+            .margin_start(6)
+            .build();
+        let bottom_page = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        bottom_page.append(&bottom_switcher);
+        bottom_page.append(&bottom);
+
         let paned = gtk::Paned::builder()
             .orientation(gtk::Orientation::Vertical)
             .start_child(&canvas.area)
-            .end_child(&log_scroller)
+            .end_child(&bottom_page)
             .resize_end_child(false)
             .shrink_end_child(false)
             .vexpand(true)
             .build();
-        paned.set_position(560);
+        paned.set_position(520);
 
         // Header -----------------------------------------------------------------
         let title = adw::WindowTitle::new("Comfy-GNOME", "Not connected");
@@ -150,7 +179,9 @@ impl Workspace {
         let crumb = gtk::Label::builder().ellipsize(gtk::pango::EllipsizeMode::Middle).css_classes(["dim-label"]).build();
         header.pack_start(&back);
         header.pack_start(&crumb);
-        let monitor = gtk::Label::new(None);
+        // Fixed width: the readout changes every second and would otherwise shove the
+        // toolbar buttons around under the pointer.
+        let monitor = gtk::Label::builder().width_chars(17).xalign(0.0).build();
         let mon_box = gtk::Box::new(gtk::Orientation::Horizontal, 6);
         mon_box.append(&gtk::Image::from_icon_name("utilities-system-monitor-symbolic"));
         mon_box.append(&monitor);
@@ -203,12 +234,17 @@ impl Workspace {
             monitor_detail: mon_detail.clone(),
             monitor_btn: mon_btn.clone(),
             interrupt_btn: interrupt.clone(),
+            preview,
+            preview_caption,
+            bottom,
         };
         {
             let me = ws.clone();
             run.connect_clicked(move |_| me.queue_prompt());
             let me = ws.clone();
             q_reload.connect_clicked(move |_| me.refresh_queue());
+            let me = ws.clone();
+            reload.connect_clicked(move |_| me.refresh_workflows());
             let me = ws.clone();
             interrupt.connect_clicked(move |_| me.interrupt());
             let me = ws.clone();
@@ -393,6 +429,19 @@ impl Workspace {
         }
         self.monitor_detail.set_text(&detail);
         self.monitor_btn.set_visible(true);
+    }
+
+    /// Decode image bytes (PNG/JPEG) and put them in the Preview tab.
+    fn show_image(&self, bytes: Vec<u8>, caption: &str) {
+        let bytes = glib::Bytes::from_owned(bytes);
+        match gtk::gdk::Texture::from_bytes(&bytes) {
+            Ok(tex) => {
+                self.preview.set_paintable(Some(&tex));
+                self.preview_caption.set_text(caption);
+                self.bottom.set_visible_child_name("preview");
+            }
+            Err(e) => self.append_log(&format!("[preview] {caption}: {e}")),
+        }
     }
 
     /// Interrupt whatever is running now.
@@ -639,7 +688,22 @@ impl Workspace {
                 self.append_log(&format!("[ws] ERROR {message}"));
                 self.refresh_queue();
             }
-            Preview(bytes) => self.append_log(&format!("[ws] preview frame ({} bytes)", bytes.len())),
+            Preview(bytes) => self.show_image(bytes, "live preview"),
+            Executed { node, images } => {
+                self.append_log(&format!("[ws] executed {}: {} images", node.unwrap_or_default(), images.len()));
+                if let Some(img) = images.into_iter().next() {
+                    let Some(client) = self.client.borrow().clone() else { return };
+                    let me = self.clone();
+                    let caption = format!("{}{}", img.subfolder, img.filename);
+                    glib::spawn_future_local(async move {
+                        match gio::spawn_blocking(move || client.view(&img)).await {
+                            Ok(Ok(bytes)) => me.show_image(bytes, &caption),
+                            Ok(Err(e)) => me.append_log(&format!("[preview] {e}")),
+                            Err(_) => me.append_log("[preview] worker panicked"),
+                        }
+                    });
+                }
+            }
             // DaSiWa monitor pushes ~1 msg/s: header readout, never the log.
             Other { kind, data } if kind == "dasiwa.system_monitor" => {
                 self.update_monitor(&data);

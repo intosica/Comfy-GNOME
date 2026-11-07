@@ -102,6 +102,11 @@ browser. "Fit" and "Reset" buttons cover the rest.
 - Widget values are drawn as read-only pills from `prompt::widget_map`, i.e. exactly the
   values that would be sent to the backend.
 
+### Images
+`gdk::Texture::from_bytes` decodes PNG/JPEG through gdk-pixbuf, so previews need no `image` crate and no temp
+files; the bytes come either from WS binary frames (type 1, 8-byte header dropped) or from `/view` after an
+`executed` event (which the server only sends to the client that queued the prompt).
+
 ### Prompt conversion invariants (learned from real captures)
 1. Node ids are strings; subgraph execution ids are `<host path>:<node id>`.
 2. A subgraph instance is not emitted; its inner nodes are, using the host's prefix.

@@ -89,8 +89,27 @@ build-dep glib-build-tools 0.21). Flatpak: GNOME 50 runtime + rust-stable 25.08 
   only stay pending for a moment, so for UI tests queue several tiny `EmptyImage → PreviewImage` prompts
   via curl (`POST /prompt`) instead of a real generation.
 
+## Session 2c — preview panel
+- Bottom pane is now an `adw::ViewStack` (`bottom`) with a Narrow `adw::ViewSwitcher`: **Log** and **Preview**.
+  Preview = `gtk::Picture` (Contain, can_shrink) + caption label; the image is decoded straight from bytes
+  with `gdk::Texture::from_bytes(&glib::Bytes::from_owned(..))` — no image crate, no temp files.
+- Two sources: WS binary `Preview` frames (kind 1, header already stripped) and `WsEvent::Executed{node, images}`
+  → `Client::view(&OutputImage)` → `/view?filename=&subfolder=&type=`. Arrival auto-switches the tab.
+- **Backend quirk: `executed` is only sent to the client_id that queued the prompt** (`send_sync(..., sid)`),
+  so previews of prompts started from the browser never reach us. Test previews by queueing from the app
+  (Ctrl+Enter / Run), not with curl.
+- Verified: `EmptyImage(256) → PreviewImage` test workflow queued from the app renders the white 256×256 image
+  with its `ComfyUI_temp_*.png` caption (`docs/screenshots/phase2-preview.png`). The test workflow lived at
+  `user/default/workflows/zz-preview-test.json` and was deleted again.
+- Bug found while testing: **the workflows reload button was created but never connected** (only `connect_map`
+  refreshed the list, so a workflow saved after start-up never appeared). Fixed — check both refresh buttons
+  when the list looks stale.
+- Bug: the monitor label's width changed every second, shifting every header button (clicks missed). Fixed with
+  `width_chars(17)` + `xalign(0)`; rerun the header-jitter check (two screenshots 1 s apart, compare the blue
+  Run button's x-range) after touching the header.
+
 ## Next steps (Phase 2 remainder → Phase 3)
-1. Previews: WS binary type 1 (JPEG/PNG) + type 4 (preview with metadata), `executed.output.images` → `/view`
+1. (done) previews; next: WS binary type 1 (JPEG/PNG) + type 4 (preview with metadata), `executed.output.images` → `/view`
    thumbnails in a bottom/gallery panel; parse `progress_state` instead of dumping raw JSON to the log.
 3. Node library (sidebar tab): search `/object_info`, drag/insert node → start real graph editing.
 4. Third-party UIs (research saved in `docs/research/custom-node-uis.md`): DaSiWa system monitor widget (WS

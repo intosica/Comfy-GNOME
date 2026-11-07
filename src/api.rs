@@ -24,6 +24,8 @@ pub enum WsEvent {
     ExecutionError { message: String },
     /// Binary preview frame (JPEG/PNG bytes, header stripped).
     Preview(Vec<u8>),
+    /// `executed`: output images of a finished node (`filename/subfolder/type` → `/view`).
+    Executed { node: Option<String>, images: Vec<OutputImage> },
     /// Anything else (custom-node events, executed, progress_state, …): raw type + data.
     Other { kind: String, data: Value },
 }
@@ -36,6 +38,15 @@ pub struct QueueItem {
     pub nodes: usize,
     /// Distinct class_types, first few (what the item will run).
     pub classes: String,
+}
+
+/// One entry of `executed.output.images`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct OutputImage {
+    pub filename: String,
+    pub subfolder: String,
+    /// "output" or "temp".
+    pub kind: String,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -69,6 +80,20 @@ impl Client {
         // Some endpoints (/interrupt, /queue) answer with an empty body.
         let text = r.into_string().map_err(|e| e.to_string())?;
         Ok(serde_json::from_str(&text).unwrap_or(Value::Null))
+    }
+
+    /// `GET /view?filename=…&subfolder=…&type=…` — raw image bytes of an output/preview.
+    pub fn view(&self, img: &OutputImage) -> Result<Vec<u8>, String> {
+        let path = format!(
+            "/view?filename={}&subfolder={}&type={}",
+            percent_encode(&img.filename),
+            percent_encode(&img.subfolder),
+            percent_encode(&img.kind)
+        );
+        let r = self.agent.get(&format!("{}{path}", self.base)).call().map_err(err)?;
+        let mut buf = Vec::new();
+        std::io::Read::read_to_end(&mut r.into_reader(), &mut buf).map_err(|e| e.to_string())?;
+        Ok(buf)
     }
 
     /// `GET /queue`.
@@ -210,6 +235,19 @@ pub fn parse_text(t: &str) -> Option<WsEvent> {
             node: s("node"),
         },
         "executing" => WsEvent::Executing { node: s("node"), prompt_id: s("prompt_id") },
+        "executed" => WsEvent::Executed {
+            node: s("node"),
+            images: d["output"]["images"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|i| OutputImage {
+                    filename: i["filename"].as_str().unwrap_or_default().to_owned(),
+                    subfolder: i["subfolder"].as_str().unwrap_or_default().to_owned(),
+                    kind: i["type"].as_str().unwrap_or("output").to_owned(),
+                })
+                .collect(),
+        },
         "execution_start" => WsEvent::ExecutionStart { prompt_id: s("prompt_id").unwrap_or_default() },
         "execution_error" => WsEvent::ExecutionError {
             message: format!(

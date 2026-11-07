@@ -22,7 +22,8 @@ Each phase ends with a runnable build, updated `AGENT-HANDOFF.md`, and screensho
 - [x] Run button (+Ctrl+Enter): queue the open workflow, log `prompt_id`, errors surface in the log
 - [x] Queue sidebar: live queue from `/queue` + WS status, per-item stop/remove, global interrupt
 - [x] DaSiWa system monitor readout in the header (WS `dasiwa.system_monitor`; hidden when absent)
-- [ ] Previews/gallery (WS preview frames + `executed.output.images` via `/view`)
+- [x] Preview panel (bottom tab): WS binary preview frames + `executed.output.images` via `/view`
+- [ ] Gallery/history of past outputs (only the newest image is shown today)
 
 ## Phase 3 — Real Graph Editing
 - [x] Load ComfyUI workflow JSON (UI format, litegraph `nodes`/`links`/`groups`) — read-only rendering
