@@ -2,8 +2,10 @@
 
 Native GTK4/Libadwaita frontend for [ComfyUI](https://github.com/comfyanonymous/ComfyUI), written in Rust. Targets Linux/X11.
 
-Status: Phases 1–2 complete, Phase 3 in progress — open saved workflows in tabs, colour-coded typed wires,
-edit the graph (move nodes, drag/detach/re-route links) and save straight back to the backend's `userdata`.
+Status: Phases 1–3 complete, Phase 4 next — open saved workflows in tabs, colour-coded typed wires, edit the graph
+(move, wire, de-anchor, multi-select, rubber band), add/duplicate/delete/collapse/retitle nodes, bypass and mute with
+ComfyUI's dashed passthrough, create/rename/recolour/drag/delete groups, drill into subgraphs, and save straight back
+to the backend's `userdata` (bit-faithful: an untouched open→save leaves the file identical).
 See `ROADMAP.md` and `AGENT-HANDOFF.md`.
 
 ## Run
