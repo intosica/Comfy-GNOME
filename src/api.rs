@@ -28,6 +28,22 @@ pub enum WsEvent {
     Other { kind: String, data: Value },
 }
 
+/// One `/queue` entry: `[number, prompt_id, prompt, extra_data, outputs]`.
+#[derive(Debug, Clone)]
+pub struct QueueItem {
+    pub number: i64,
+    pub prompt_id: String,
+    pub nodes: usize,
+    /// Distinct class_types, first few (what the item will run).
+    pub classes: String,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct Queue {
+    pub running: Vec<QueueItem>,
+    pub pending: Vec<QueueItem>,
+}
+
 #[derive(Clone)]
 pub struct Client {
     base: String,
@@ -53,6 +69,35 @@ impl Client {
         // Some endpoints (/interrupt, /queue) answer with an empty body.
         let text = r.into_string().map_err(|e| e.to_string())?;
         Ok(serde_json::from_str(&text).unwrap_or(Value::Null))
+    }
+
+    /// `GET /queue`.
+    pub fn queue(&self) -> Result<Queue, String> {
+        let v = self.get("/queue")?;
+        let list = |key: &str| -> Vec<QueueItem> {
+            let entries = v[key].as_array().cloned().unwrap_or_default();
+            entries
+                .iter()
+                .filter_map(|e| {
+                    let prompt = &e[2];
+                    let mut seen: Vec<&str> = Vec::new();
+                    for n in prompt.as_object().into_iter().flatten() {
+                        if let Some(t) = n.1["class_type"].as_str() {
+                            if !seen.contains(&t) {
+                                seen.push(t);
+                            }
+                        }
+                    }
+                    Some(QueueItem {
+                        number: e[0].as_i64().unwrap_or(0),
+                        prompt_id: e[1].as_str().unwrap_or_default().to_owned(),
+                        nodes: prompt.as_object().map_or(0, |o| o.len()),
+                        classes: seen.iter().take(3).copied().collect::<Vec<_>>().join(", "),
+                    })
+                })
+                .collect()
+        };
+        Ok(Queue { running: list("queue_running"), pending: list("queue_pending") })
     }
 
     /// `GET /api/userdata?dir=workflows&recurse=true&split=false&full_info=true`.

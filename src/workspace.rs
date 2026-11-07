@@ -24,6 +24,13 @@ pub struct Workspace {
     files: Rc<RefCell<Vec<String>>>,
     crumb: gtk::Label,
     back: gtk::Button,
+    queue_list: gtk::ListBox,
+    /// Serialised last `/queue` snapshot — skip rebuilding identical lists.
+    queue_key: Rc<RefCell<String>>,
+    monitor: gtk::Label,
+    monitor_detail: gtk::Label,
+    monitor_btn: gtk::MenuButton,
+    interrupt_btn: gtk::Button,
 }
 
 /// Currently displayed workflow and the subgraph path drilled into.
@@ -77,10 +84,26 @@ impl Workspace {
             });
         }
         side_stack.add_titled_with_icon(&wf_page, Some("workflows"), "Workflows", "folder-symbolic");
-        side_stack.add_titled_with_icon(
-            &placeholder("view-list-symbolic", "Queue", "Prompt queue appears here (Phase 2)"),
-            Some("queue"), "Queue", "view-list-symbolic",
-        );
+        let queue_list = gtk::ListBox::builder().selection_mode(gtk::SelectionMode::None).build();
+        let q_scroller = gtk::ScrolledWindow::builder().child(&queue_list).vexpand(true).build();
+        let interrupt = gtk::Button::builder().label("Interrupt").sensitive(false).build();
+        interrupt.add_css_class("destructive-action");
+        interrupt.set_tooltip_text(Some("Stop the prompt that is running now"));
+        let q_reload = gtk::Button::builder().icon_name("view-refresh-symbolic").tooltip_text("Reload queue").build();
+        let q_bar = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        q_bar.set_margin_top(6);
+        q_bar.set_margin_bottom(6);
+        q_bar.set_margin_start(6);
+        q_bar.set_margin_end(6);
+        q_bar.append(&interrupt);
+        let q_spacer = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        q_spacer.set_hexpand(true);
+        q_bar.append(&q_spacer);
+        q_bar.append(&q_reload);
+        let queue_page = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        queue_page.append(&q_bar);
+        queue_page.append(&q_scroller);
+        side_stack.add_titled_with_icon(&queue_page, Some("queue"), "Queue", "view-list-symbolic");
         let switcher = adw::ViewSwitcher::builder()
             .stack(&side_stack)
             .policy(adw::ViewSwitcherPolicy::Wide)
@@ -127,9 +150,20 @@ impl Workspace {
         let crumb = gtk::Label::builder().ellipsize(gtk::pango::EllipsizeMode::Middle).css_classes(["dim-label"]).build();
         header.pack_start(&back);
         header.pack_start(&crumb);
+        let monitor = gtk::Label::new(None);
+        let mon_box = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        mon_box.append(&gtk::Image::from_icon_name("utilities-system-monitor-symbolic"));
+        mon_box.append(&monitor);
+        let mon_btn = gtk::MenuButton::builder().child(&mon_box).always_show_arrow(false).tooltip_text("Backend system monitor (DaSiWa nodes)").build();
+        let mon_pop = gtk::Popover::new();
+        let mon_detail = gtk::Label::builder().xalign(0.0).wrap(true).build();
+        mon_pop.set_child(Some(&mon_detail));
+        mon_btn.set_popover(Some(&mon_pop));
+        mon_btn.set_visible(false);
         header.pack_end(&run);
         header.pack_end(&fit);
         header.pack_end(&reset);
+        header.pack_end(&mon_btn);
         {
             let canvas = canvas.clone();
             fit.connect_clicked(move |_| canvas.fit_view());
@@ -163,10 +197,20 @@ impl Workspace {
             files: Rc::default(),
             crumb,
             back,
+            queue_list,
+            queue_key: Rc::default(),
+            monitor,
+            monitor_detail: mon_detail.clone(),
+            monitor_btn: mon_btn.clone(),
+            interrupt_btn: interrupt.clone(),
         };
         {
             let me = ws.clone();
             run.connect_clicked(move |_| me.queue_prompt());
+            let me = ws.clone();
+            q_reload.connect_clicked(move |_| me.refresh_queue());
+            let me = ws.clone();
+            interrupt.connect_clicked(move |_| me.interrupt());
             let me = ws.clone();
             let keys = gtk::ShortcutController::new();
             keys.add_shortcut(gtk::Shortcut::new(
@@ -227,6 +271,9 @@ impl Workspace {
         let me = self.clone();
         self.canvas.connect_activate(move |id| me.open_node(id));
 
+        let me = self.clone();
+        self.queue_list.connect_map(move |_| me.refresh_queue());
+
         // row-selected, not row-activated: libadwaita rows don't fire activation reliably,
         // and this also gives keyboard navigation.
         let me = self.clone();
@@ -246,6 +293,120 @@ impl Workspace {
 
         let me = self.clone();
         self.wf_list.connect_map(move |_| me.refresh_workflows());
+    }
+
+    /// `GET /queue` → rebuild the sidebar list (cheap; called on every WS status event).
+    fn refresh_queue(&self) {
+        let Some(client) = self.client.borrow().clone() else { return };
+        let me = self.clone();
+        glib::spawn_future_local(async move {
+            match gio::spawn_blocking(move || client.queue()).await {
+                Ok(Ok(q)) => me.set_queue(q),
+                Ok(Err(e)) => me.append_log(&format!("[queue] {e}")),
+                Err(_) => me.append_log("[queue] worker panicked"),
+            }
+        });
+    }
+
+    fn set_queue(&self, q: api::Queue) {
+        let key = format!("{q:?}");
+        if *self.queue_key.borrow() == key {
+            return;
+        }
+        *self.queue_key.borrow_mut() = key;
+        while let Some(row) = self.queue_list.row_at_index(0) {
+            self.queue_list.remove(&row);
+        }
+        self.interrupt_btn.set_sensitive(!q.running.is_empty());
+        let client = self.client.borrow().clone();
+        for (running, item) in std::iter::once(true).zip(&q.running).chain(std::iter::once(false).zip(&q.pending)) {
+            let row = adw::ActionRow::builder()
+                .title(format!("{} #{}", if running { "Running" } else { "Pending" }, item.number))
+                .subtitle(format!(
+                    "{} · {} nodes · {}",
+                    &item.prompt_id[..item.prompt_id.len().min(8)],
+                    item.nodes,
+                    item.classes
+                ))
+                .build();
+            let btn = gtk::Button::builder()
+                .icon_name(if running { "media-playback-stop-symbolic" } else { "edit-delete-symbolic" })
+                .tooltip_text(if running { "Interrupt" } else { "Remove from queue" })
+                .valign(gtk::Align::Center)
+                .css_classes(["flat"])
+                .build();
+            let (me, id, running, c) = (self.clone(), item.prompt_id.clone(), running, client.clone());
+            btn.connect_clicked(move |_| {
+                let Some(c) = c.clone() else { return };
+                let (id, me) = (id.clone(), me.clone());
+                me.append_log(if running { "[queue] interrupt" } else { "[queue] remove" });
+                glib::spawn_future_local(async move {
+                    let res = gio::spawn_blocking(move || {
+                        if running { c.interrupt() } else { c.delete_queued(&[id]) }
+                    })
+                    .await;
+                    match res {
+                        Ok(Ok(())) => {}
+                        Ok(Err(e)) => me.append_log(&format!("[queue] {e}")),
+                        Err(_) => {}
+                    }
+                });
+            });
+            row.add_suffix(&btn);
+            self.queue_list.append(&row);
+        }
+        if q.running.is_empty() && q.pending.is_empty() {
+            let row = adw::ActionRow::builder().title("Queue is empty").css_classes(["dim-label"]).build();
+            self.queue_list.append(&row);
+        }
+    }
+
+    /// DaSiWa system monitor snapshot → header readout (no-op when that pack is absent).
+    fn update_monitor(&self, data: &serde_json::Value) {
+        let Some(cpu) = data["cpu_percent"].as_f64() else { return };
+        let ram = &data["ram"];
+        let gb = |b: f64| b / 1024.0 / 1024.0 / 1024.0;
+        self.monitor.set_text(&match ram["percent"].as_f64() {
+            Some(p) => format!("CPU {cpu:.0}% · RAM {p:.0}%"),
+            None => format!("CPU {cpu:.0}%"),
+        });
+        let mut detail = format!(
+            "CPU {cpu:.1}% of {} threads\nRAM {:.1}/{:.1} GB",
+            data["cpu_count"].as_u64().unwrap_or(0),
+            gb(ram["used"].as_f64().unwrap_or(0.0)),
+            gb(ram["total"].as_f64().unwrap_or(0.0))
+        );
+        if let Some(swap) = data["swap"]["percent"].as_f64() {
+            detail += &format!(" · swap {swap:.0}%");
+        }
+        for (i, g) in data["gpus"].as_array().into_iter().flatten().enumerate() {
+            detail += &format!(
+                "\nGPU{i} {}: {:.0}% · {:.1}/{:.1} GB",
+                g["name"].as_str().unwrap_or("?"),
+                g["utilization"].as_f64().unwrap_or(0.0),
+                gb(g["memory_used"].as_f64().unwrap_or(0.0)),
+                gb(g["memory_total"].as_f64().unwrap_or(0.0))
+            );
+            if let Some(t) = g["temperature"].as_f64() {
+                detail += &format!(" · {t:.0}°C");
+            }
+        }
+        self.monitor_detail.set_text(&detail);
+        self.monitor_btn.set_visible(true);
+    }
+
+    /// Interrupt whatever is running now.
+    fn interrupt(&self) {
+        let Some(client) = self.client.borrow().clone() else { return };
+        self.append_log("[queue] interrupt");
+        let me = self.clone();
+        glib::spawn_future_local(async move {
+            match gio::spawn_blocking(move || client.interrupt()).await {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => me.append_log(&format!("[queue] {e}")),
+                Err(_) => {}
+            }
+        });
     }
 
     /// Fetch the user's workflow list (silent when not connected).
@@ -455,19 +616,37 @@ impl Workspace {
         match ev {
             Connected => self.append_log("[ws] connected"),
             Disconnected(why) => self.append_log(&format!("[ws] disconnected: {why} (retrying)")),
-            Status { queue_remaining } => self.append_log(&format!("[ws] queue: {queue_remaining} remaining")),
+            Status { queue_remaining } => {
+                self.append_log(&format!("[ws] queue: {queue_remaining} remaining"));
+                self.refresh_queue();
+            }
             Progress { value, max, node } => {
                 self.title.set_subtitle(&format!("Running node {} · {value}/{max}", node.unwrap_or_default()))
             }
             Executing { node: None, prompt_id } => {
-                self.append_log(&format!("[ws] prompt {} finished", prompt_id.unwrap_or_default()))
+                self.append_log(&format!("[ws] prompt {} finished", prompt_id.unwrap_or_default()));
+                self.refresh_queue();
             }
-            Executing { node: Some(n), .. } => self.append_log(&format!("[ws] executing node {n}")),
-            ExecutionStart { prompt_id } => self.append_log(&format!("[ws] prompt {prompt_id} started")),
-            ExecutionError { message } => self.append_log(&format!("[ws] ERROR {message}")),
+            Executing { node: Some(n), .. } => {
+                self.append_log(&format!("[ws] executing node {n}"));
+                self.refresh_queue();
+            }
+            ExecutionStart { prompt_id } => {
+                self.append_log(&format!("[ws] prompt {prompt_id} started"));
+                self.refresh_queue();
+            }
+            ExecutionError { message } => {
+                self.append_log(&format!("[ws] ERROR {message}"));
+                self.refresh_queue();
+            }
             Preview(bytes) => self.append_log(&format!("[ws] preview frame ({} bytes)", bytes.len())),
-            // DaSiWa monitor pushes ~1 msg/s; not log material (Phase 3 draws it instead).
-            Other { kind, .. } if kind == "dasiwa.system_monitor" => {}
+            // DaSiWa monitor pushes ~1 msg/s: header readout, never the log.
+            Other { kind, data } if kind == "dasiwa.system_monitor" => {
+                self.update_monitor(&data);
+            }
+            Other { kind, .. } if kind.starts_with("execution_") || kind == "progress_state" => {
+                self.refresh_queue();
+            }
             Other { kind, data } => {
                 let d = data.to_string();
                 self.append_log(&format!("[ws] {kind} {}", &d[..d.floor_char_boundary(160)]))

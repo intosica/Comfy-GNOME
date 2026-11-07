@@ -20,7 +20,8 @@ Each phase ends with a runnable build, updated `AGENT-HANDOFF.md`, and screensho
       validated against 60 real prompts from output PNGs (exact 30/60, 805/821 nodes)
 - [x] Workflows sidebar (`/userdata`), open a workflow, restore its saved viewport, drill into subgraphs
 - [x] Run button (+Ctrl+Enter): queue the open workflow, log `prompt_id`, errors surface in the log
-- [ ] Queue sidebar: live queue, progress, cancel/interrupt
+- [x] Queue sidebar: live queue from `/queue` + WS status, per-item stop/remove, global interrupt
+- [x] DaSiWa system monitor readout in the header (WS `dasiwa.system_monitor`; hidden when absent)
 - [ ] Previews/gallery (WS preview frames + `executed.output.images` via `/view`)
 
 ## Phase 3 — Real Graph Editing
@@ -35,7 +36,7 @@ Each phase ends with a runnable build, updated `AGENT-HANDOFF.md`, and screensho
 ## Phase 4 — Widgets & Execution
 - [ ] In-node widgets: number/slider, combo, text/multiline, toggle, seed control (drawn on canvas, GTK popovers for editing)
 - [x] Queue Prompt, per-node progress in the log/header
-- [ ] Execution highlighting on the canvas, errors overlay
+- [ ] Execution highlighting on the canvas (progress events already drive the queue panel), errors overlay
 - [ ] Image preview/output nodes, LoadImage upload, gallery panel
 
 ## Phase 5 — Performance & Polish

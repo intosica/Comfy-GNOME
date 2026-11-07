@@ -73,9 +73,24 @@ build-dep glib-build-tools 0.21). Flatpak: GNOME 50 runtime + rust-stable 25.08 
   subgraph shows Inputs/Outputs pseudo-nodes and its inner node; Run queued a real prompt (executed successfully,
   WS `executed`/`execution_success` logged).
 
+## Session 2b — queue + monitor
+- Queue sidebar page: `/queue` snapshot (`api::Queue{running,pending}`, `QueueItem{number,prompt_id,nodes,classes}`),
+  rebuilt on every WS `status`/`executing`/`execution_*`/`progress_state` event but **only when the snapshot
+  string changed** (`queue_key`), rows = Running/Pending `#number` + short prompt id + node count + up to 3
+  class_types; suffix button stops (interrupt) or removes (delete_queued); header row has a global
+  destructive **Interrupt** (sensitive only while something runs) and reload. Empty state = "Queue is empty".
+- DaSiWa monitor: header MenuButton (icon + `CPU 5% · RAM 72%`), popover with threads, RAM/swap, per-GPU
+  utilisation/memory/temperature. Hidden until the first `dasiwa.system_monitor` event, so it silently does
+  nothing on installs without DaSiWa nodes. `update_monitor` never logs (1 msg/s).
+- Gotcha: `refresh_queue` is fired from several events at once — the JSON-string compare keeps it from
+  rebuilding rows constantly. Don't drop it.
+- Verified on Xvfb: queue empty state, live Running #26/Pending #27 rows with correct node counts and
+  stop/trash buttons, monitor readout updating (screenshot `docs/screenshots/phase2-queue.png`). Queue rows
+  only stay pending for a moment, so for UI tests queue several tiny `EmptyImage → PreviewImage` prompts
+  via curl (`POST /prompt`) instead of a real generation.
+
 ## Next steps (Phase 2 remainder → Phase 3)
-1. Queue sidebar: `/queue` snapshot + `status`/`progress`/`executing` events, interrupt/delete buttons.
-2. Previews: WS binary type 1 (JPEG/PNG) + type 4 (preview with metadata), `executed.output.images` → `/view`
+1. Previews: WS binary type 1 (JPEG/PNG) + type 4 (preview with metadata), `executed.output.images` → `/view`
    thumbnails in a bottom/gallery panel; parse `progress_state` instead of dumping raw JSON to the log.
 3. Node library (sidebar tab): search `/object_info`, drag/insert node → start real graph editing.
 4. Third-party UIs (research saved in `docs/research/custom-node-uis.md`): DaSiWa system monitor widget (WS
