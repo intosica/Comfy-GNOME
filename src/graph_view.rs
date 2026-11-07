@@ -249,7 +249,7 @@ mod tests {
         assert_eq!(w.root.nodes[1].inputs[0].link, Some(7));
 
         links.clear();
-        sync(&mut w.root, &nodes, &links, &[]);;
+        sync(&mut w.root, &nodes, &links, &[]);
         assert!(w.root.links.is_empty());
         assert_eq!(w.root.nodes[1].inputs[0].link, None);
         assert!(w.root.nodes[0].outputs[0].links.is_empty());

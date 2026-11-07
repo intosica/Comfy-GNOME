@@ -472,18 +472,67 @@ fn parse_io(v: &Value) -> Vec<SubgraphIo> {
 mod tests {
     use super::*;
 
+    /// Nodes and groups created in the editor exist only in the model, and nodes/groups
+    /// deleted there still exist in the loaded `raw`. `write_graph` has to reconcile both
+    /// directions — that bug shipped once and silently dropped every new node on save.
+    #[test]
+    fn to_json_reconciles_nodes_and_groups() {
+        let src = r##"{"version":0.4,"nodes":[
+            {"id":1,"type":"A","pos":[0,0],"size":[100,50],"inputs":[],"outputs":[]},
+            {"id":2,"type":"B","pos":[10,10],"size":[100,50],"inputs":[],"outputs":[]}],
+            "links":[],"groups":[{"id":5,"title":"Old","bounding":[0,0,10,10],"color":"#3f789e"}]}"##;
+        let mut wf = Workflow::from_str(src).expect("parse");
+        // Delete node 1, keep 2 where it is, add a brand-new node 3.
+        wf.root.nodes.retain(|n| n.id != "1");
+        let mut fresh = wf.root.nodes[0].clone();
+        fresh.id = "3".into();
+        fresh.ty = "C".into();
+        fresh.pos = (5.0, 6.0);
+        fresh.widgets_values = serde_json::json!([1, "x"]);
+        wf.root.nodes.push(fresh);
+        // A renamed old group plus a new one.
+        wf.root.groups[0].title = "Renamed".into();
+        wf.root.groups.push(fresh_group("Fresh", [1.0, 2.0, 3.0, 4.0]));
+
+        let out = wf.to_json();
+        let ids: Vec<&str> = out["nodes"]
+            .as_array()
+            .expect("nodes")
+            .iter()
+            .map(|n| n["id"].as_str().unwrap_or("?"))
+            .collect();
+        assert_eq!(ids.len(), 2, "deleted node still in file: {out}");
+        assert!(!ids.contains(&"1"), "node 1 came back");
+        let added = out["nodes"].as_array().unwrap().iter().find(|n| n["id"] == 3).expect("node 3 written");
+        assert_eq!(added["type"], "C");
+        assert_eq!(added["pos"], serde_json::json!([5.0, 6.0]));
+        assert_eq!(added["widgets_values"], serde_json::json!([1, "x"]));
+        assert_eq!(added["properties"]["Node name for S&R"], "C");
+
+        let groups = out["groups"].as_array().expect("groups");
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0]["title"], "Renamed");
+        assert_eq!(groups[0]["id"], 5, "existing group id preserved");
+        assert_eq!(groups[1]["title"], "Fresh");
+        assert_eq!(groups[1]["bounding"], serde_json::json!([1.0, 2.0, 3.0, 4.0]));
+    }
+
+    fn fresh_group(title: &str, rect: [f64; 4]) -> Group {
+        Group { title: title.into(), bounding: rect, color: None }
+    }
+
     /// Saving must not perturb coordinates: drag one node, write the file back, and
     /// the untouched nodes must keep their exact `f64`s (serde_json needs
     /// `float_roundtrip` for this — its default parser is off by an ulp on long
     /// mantissas, which silently rewrote every node position on save).
     #[test]
     fn to_json_keeps_coordinates_bit_exact() {
-        let src = r#"{"version":0.4,"nodes":[
+        let src = r##"{"version":0.4,"nodes":[
             {"id":6,"type":"X","pos":[950.2978891664006,104.62510134174657],
              "size":[315,98],"inputs":[],"outputs":[]},
             {"id":7,"type":"Y","pos":[-44.260121259699716,776.6053367103586],
              "size":[315,98],"inputs":[],"outputs":[]}],
-            "links":[],"groups":[]}"#;
+            "links":[],"groups":[]}"##;
         let out = Workflow::from_str(src).expect("parse").to_json().to_string();
         for want in ["104.62510134174657", "-44.260121259699716", "776.6053367103586", "950.2978891664006"] {
             assert!(out.contains(want), "{want} lost in round trip:\n{out}");
