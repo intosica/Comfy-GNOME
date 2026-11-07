@@ -102,6 +102,44 @@ browser. "Fit" and "Reset" buttons cover the rest.
 - Widget values are drawn as read-only pills from `prompt::widget_map`, i.e. exactly the
   values that would be sent to the backend.
 
+### Session 3 additions: documents, tabs, editing, saving
+
+```
+src/workspace.rs  Workspace { docs: Vec<DocRef>, tabs: adw::TabView, ... }
+                  Doc { file, wf: Workflow, path: Vec<String> (subgraph drill-down),
+                        canvas: Canvas, page: adw::TabPage, dirty }
+```
+One `Doc` == one open workflow == one `TabView` page whose child is that doc's `DrawingArea`.
+`path` is the subgraph stack: empty = root graph, `["uuid"]` = that definition, and the back
+arrow pops it. Every tab keeps its own `Canvas`, so viewports are independent; the model
+(`Workflow`) is only re-read from the canvas when the tab is rendered or saved.
+
+**Editing pipeline (canvas → model → server):**
+1. Canvas mutations (node move, link create/detach) are purely visual.
+2. `connect_change` fires once per completed gesture → `set_dirty(doc, true)` (tab title gains `•`).
+3. `Ctrl+S` → `sync_doc` → `graph_view::sync(graph, nodes, links)` rebuilds `graph.links`
+   (keeping the id of an unchanged endpoint quad, otherwise `max+1`) and rewrites every
+   `inputs[i].link` / `outputs[i].links`; `sync_io` refreshes subgraph `linkIds`.
+4. `workflow::to_json()` = `raw.clone()` with `pos`, `links`, wiring and `extra.ds` spliced in,
+   so fields we do not model survive untouched.
+5. `api::save_workflow` → `POST /api/userdata/<percent-encoded "workflows/<file>">`.
+
+**Link editing semantics** (`canvas::hit_slot` / `hit_target`, radius `9/zoom` canvas units):
+| gesture | result |
+|---|---|
+| drag from output | new link from that output |
+| drag from connected input | link unplugged, still attached to the cursor; drop on nothing deletes |
+| shift+drag from connected output | existing link detached and re-routed from the cursor |
+| drop on incompatible type | ignored (hover ring only on compatible targets) |
+
+**Link colours** come from the litegraph palette (`LGraphCanvas.link_type_colors`, ported to
+`canvas::type_color`): MODEL `#b39ddb`, CLIP `#ffd500`, VAE `#ff6e6e`, CONDITIONING `#ffa931`,
+LATENT `#ff9cf9`, IMAGE `#64b5f6`, MASK `#81c784`, and a hashed fallback for unknown types.
+
+**Viewport restore vs auto-fit:** `set_graph` marks `pending_fit`; the resize callback fits once
+the widget is allocated. `set_view` (saved `extra.ds`) clears that flag, so a restored viewport
+always wins and auto-fit only happens for graphs without one.
+
 ### Images
 `gdk::Texture::from_bytes` decodes PNG/JPEG through gdk-pixbuf, so previews need no `image` crate and no temp
 files; the bytes come either from WS binary frames (type 1, 8-byte header dropped) or from `/view` after an

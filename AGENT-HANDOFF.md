@@ -1,13 +1,14 @@
 # AGENT HANDOFF
 
-_Last updated: session 2 (in progress). Phases 1–2 code complete; Phase 2 still open on the queue panel, previews and third-party UIs._
+_Last updated: session 3. Phases 1–2 complete (only the output gallery is still open). Phase 3 is live: workflow tabs, colour-coded links, wire editing (drag / shift-detach / unplug) and saving via `POST /api/userdata`. Next: undo/redo, node add menu, multi-select, node library tab._
 
 Project: **Comfy-GNOME** at `/home/montel/Documents/Comfy-GNOME` (renamed from `GNOME-Comfyu` → `GNOME-ComfyUI` → this).
 Crate/binary `comfy-gnome`, app id `io.github.comfygnome.ComfyGnome` (`APP_ID` in `src/main.rs`).
 
 ## State
-Phase 1 complete. Phase 2 code-complete except queue panel / previews / custom-node UI (see `ROADMAP.md`).
-`cargo build` clean, `cargo test` passes (6 unit tests; 3 `--ignored` live tests against a running backend).
+Phase 1 complete. Phase 2 complete except the output gallery and third-party UI widgets (see `ROADMAP.md`).
+Phase 3 core editing works: tabs, link colours, wire drag/detach/unplug, save (`Ctrl+S`), viewport persistence.
+`cargo build` clean, `cargo test` passes (10 unit tests; 3 `--ignored` live tests against a running backend).
 Verified on X11 (`GDK_BACKEND=x11`):
 - Splash auto-detects `/home/montel/Documents/ComfyUI`; **Launch ComfyUI** (folder mode) starts
   `venv/bin/python main.py --port 8188`, log streams (ANSI stripped), backend connects.
@@ -108,11 +109,60 @@ build-dep glib-build-tools 0.21). Flatpak: GNOME 50 runtime + rust-stable 25.08 
   `width_chars(17)` + `xalign(0)`; rerun the header-jitter check (two screenshots 1 s apart, compare the blue
   Run button's x-range) after touching the header.
 
-## Next steps (Phase 2 remainder → Phase 3)
-1. (done) previews; next: WS binary type 1 (JPEG/PNG) + type 4 (preview with metadata), `executed.output.images` → `/view`
-   thumbnails in a bottom/gallery panel; parse `progress_state` instead of dumping raw JSON to the log.
-3. Node library (sidebar tab): search `/object_info`, drag/insert node → start real graph editing.
-4. Third-party UIs (research saved in `docs/research/custom-node-uis.md`): DaSiWa system monitor widget (WS
-   `dasiwa.system_monitor` every 1 s — currently filtered out of the log), LC Align guides, LoRA Manager
-   button/browser (`/loras` in the default browser: webkitgtk-6.0 is not installed on this host).
-5. Click-through test of Launch ComfyUI inside the Flatpak (host spawn + close kills python).
+## Session 3 — graph editing, tabs, saving
+- **Tabs**: `adw::TabView` + `adw::TabBar` (autohide false, expand false) above the canvas pane;
+  `docs: Rc<RefCell<Vec<DocRef>>>`, `struct Doc { file, wf, path, canvas, page, dirty }`. `Ctrl+W` closes the
+  active tab, `Ctrl+S` saves it, clicking a workflow already open just switches to its tab. Unsaved marker is a
+  `•` appended to the tab title by `set_dirty()` — `set_indicator_icon("media-record-symbolic")` rendered
+  *nothing* under this icon theme, do not go back to it.
+- **Saving**: `graph_view::sync(&mut graph, nodes, links)` writes canvas state back into the model (positions,
+  link endpoints, `inputs[i].link`, `outputs[i].links`; unchanged endpoint pairs keep their old link id, new ones
+  get `max+1`), `sync_io(sg)` rebuilds subgraph `inputs[].linkIds`, `workflow::to_json()` splices everything into
+  the original `raw` JSON (unknown fields survive), `api::save_workflow` POSTs it. Link endpoints are written as
+  numbers again via `idv()` (ids that are not integers, e.g. `"39:7"`, stay strings). `extra.ds` is overwritten
+  with the live viewport on save, like the web frontend.
+- **Round-trip proof**: opened a real 29-node workflow, saved it unchanged, then compared with a structural diff
+  (ignoring only formatting): **0 differences**, and `comfyui validate workflow` reports the identical
+  `converted_node_count: 21` plus the same single pre-existing error before and after. Use that MCP tool
+  (`mcp comfyui_validate_workflow`, arg `workflow_path`) as an external oracle — it converts UI→API server-side,
+  so it cross-checks `prompt.rs` and anything our save writes.
+- **Wires**: `hit_slot`/`hit_target` with radius `9/zoom` canvas units. Drag from an output → new link; drag from a
+  connected **input** → unplug (stays detached on release over nothing); **shift+drag from a connected output** →
+  detaches that link and re-routes from the cursor (the dropped-to-empty case deletes it). In-progress wire is
+  `#aaffaa`; hovering a type-compatible target draws a ring; incompatible slots are ignored.
+- **Bug fixed — viewport restore lost**: `set_graph()` set `pending_fit` and the resize callback refit the graph
+  once the widget got a size, silently overriding the `extra.ds` viewport restored right after. `set_view()` now
+  clears `pending_fit`, so a saved viewport wins and auto-fit only happens when there is no saved view.
+- **Bug fixed — sidebar filter hid everything**: on libadwaita 1.5 `AdwActionRow` *is* a `GtkListBoxRow`, so the
+  filter's `row.child().downcast::<adw::ActionRow>()` never matched. Use `row.downcast_ref::<adw::ActionRow>()`
+  first (see `row_title`). Rows also carry `set_widget_name(file)`; selection reads `widget_name()` because
+  `row.index()` shifts while the list is filtered.
+
+### Testing notes added in session 3
+- The Xvfb screen is 1600×1000 but screenshots are shown to the agent downscaled — **do not** read click
+  coordinates off the rendered picture. Either scan the PNG (helper logic: connected components of the node body
+  colour `#353535` → bboxes; slot dots by their type colour) or compute `screen = canvas_origin + ds_offset + pos*zoom`
+  after restoring a known `extra.ds`.
+- xdotool needs dwell time inside a drag: `xdotool mousemove X Y sleep 0.3 mousedown 1 sleep 0.3 mousemove X2 Y2
+  sleep 0.4 mouseup 1`. A single fast chained call registers as a pan. Holding the button across *separate*
+  xdotool invocations works, so you can screenshot mid-drag.
+- Canvas widget origin is (285, 138) at a 1280×800 window with the tab bar (x includes the 285 px sidebar).
+- To validate a saved file with the oracle: `mcp({tool:"comfyui_validate_workflow", args:{workflow_path:"/path.json"}})`.
+
+## Next steps (Phase 3 remainder)
+1. **Undo/redo**: snapshot `(nodes, links)` per mutation (cheap `Vec` clone, they are small) with a `VecDeque`
+   capped at ~50; wire `Ctrl+Z`/`Ctrl+Shift+Z`. Every mutation already funnels through `connect_change`, so hook
+   the snapshot push there and remember to suppress it while undoing.
+2. **Node add menu**: right-click on empty canvas → popover with a search entry over `Registry::by_category`;
+   insert creates a `workflow::Node` + canvas node at the pointer, marks dirty. Deleting: `Delete` key on the
+   primary selection (selected node id, raised last).
+3. **Multi-select + rubber band**: `State.selected: Vec<usize>`, drag on empty canvas with the primary button to
+   rubber-band (currently that pans), move all selected nodes together.
+4. **Saving is not yet prompted on close**: closing a dirty tab or the window discards silently. Add an
+   `adw::AlertDialog` ("Save / Discard / Cancel") in `tabs.connect_close_page` (return `Propagation::Stop` when cancel).
+5. **Third-party UIs** (research saved in `docs/research/custom-node-uis.md`): DaSiWa system monitor widget (WS
+   `dasiwa.system_monitor` every 1 s — already parsed and shown in the header, the *in-node* widget is still
+   missing), LC Align guides, LoRA Manager button/browser (`/loras` in the default browser: webkitgtk-6.0 is not
+   installed on this host).
+6. Output gallery (last Phase 2 leftover): `executed.output.images` → `/view` thumbnails, click = full preview.
+7. Click-through test of Launch ComfyUI inside the Flatpak (host spawn + close kills python).

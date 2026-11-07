@@ -17,8 +17,8 @@ pub struct Workspace {
     proc: Rc<RefCell<Option<backend::Backend>>>,
     pub client: Rc<RefCell<Option<api::Client>>>,
     pub registry: Rc<RefCell<registry::Registry>>,
-    canvas: canvas::Canvas,
-    nav: Rc<RefCell<Nav>>,
+    tabs: adw::TabView,
+    docs: Rc<RefCell<Vec<DocRef>>>,
     wf_list: gtk::ListBox,
     /// Sidebar row index → workflow file path (rows never reorder, only hide).
     files: Rc<RefCell<Vec<String>>>,
@@ -36,12 +36,27 @@ pub struct Workspace {
     bottom: adw::ViewStack,
 }
 
-/// Currently displayed workflow and the subgraph path drilled into.
-#[derive(Default)]
-struct Nav {
-    wf: Option<workflow::Workflow>,
-    file: Option<String>,
+type DocRef = Rc<RefCell<Doc>>;
+
+/// One open workflow file = one tab, with its own canvas and subgraph path.
+struct Doc {
+    file: String,
+    wf: workflow::Workflow,
+    /// Subgraph definitions drilled into, outermost first.
     path: Vec<String>,
+    canvas: canvas::Canvas,
+    page: adw::TabPage,
+    /// Edited since the last save (shown as a dot on the tab).
+    dirty: bool,
+}
+
+/// Title text of a workflow row. libadwaita < 1.6 makes `AdwActionRow` a `GtkListBoxRow`
+/// itself, so the title can live on the row or on its child — handle both.
+fn row_title(row: &gtk::ListBoxRow) -> String {
+    if let Some(r) = row.downcast_ref::<adw::ActionRow>() {
+        return r.title().to_string();
+    }
+    row.child().and_then(|c| c.downcast::<adw::ActionRow>().ok()).map(|r| r.title().to_string()).unwrap_or_default()
 }
 
 fn placeholder(icon: &str, title: &str, desc: &str) -> adw::StatusPage {
@@ -78,11 +93,7 @@ impl Workspace {
             search.connect_search_changed(move |e| {
                 let q = e.text().to_lowercase();
                 list.set_filter_func(move |row| {
-                    q.is_empty()
-                        || row
-                            .child()
-                            .and_then(|c| c.downcast::<adw::ActionRow>().ok())
-                            .is_some_and(|r| r.title().to_lowercase().contains(&q))
+                    q.is_empty() || row_title(row).to_lowercase().contains(&q)
                 });
             });
         }
@@ -116,7 +127,15 @@ impl Workspace {
         side_tb.set_content(Some(&side_stack));
 
         // Canvas + log -----------------------------------------------------------
-        let canvas = canvas::Canvas::new();
+        let tabs = adw::TabView::new();
+        tabs.set_vexpand(true);
+        let tab_bar = adw::TabBar::new();
+        tab_bar.set_view(Some(&tabs));
+        tab_bar.set_autohide(false);
+        tab_bar.set_expand_tabs(false);
+        let canvas_pane = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        canvas_pane.append(&tab_bar);
+        canvas_pane.append(&tabs);
 
         let log = gtk::TextView::builder()
             .editable(false)
@@ -155,7 +174,7 @@ impl Workspace {
 
         let paned = gtk::Paned::builder()
             .orientation(gtk::Orientation::Vertical)
-            .start_child(&canvas.area)
+            .start_child(&canvas_pane)
             .end_child(&bottom_page)
             .resize_end_child(false)
             .shrink_end_child(false)
@@ -192,17 +211,11 @@ impl Workspace {
         mon_btn.set_popover(Some(&mon_pop));
         mon_btn.set_visible(false);
         header.pack_end(&run);
+        let save = gtk::Button::builder().icon_name("document-save-symbolic").tooltip_text("Save Workflow (Ctrl+S)").build();
+        header.pack_end(&save);
         header.pack_end(&fit);
         header.pack_end(&reset);
         header.pack_end(&mon_btn);
-        {
-            let canvas = canvas.clone();
-            fit.connect_clicked(move |_| canvas.fit_view());
-        }
-        {
-            let canvas = canvas.clone();
-            reset.connect_clicked(move |_| canvas.reset_view());
-        }
 
         let content_tb = adw::ToolbarView::new();
         content_tb.add_top_bar(&header);
@@ -222,8 +235,8 @@ impl Workspace {
             proc: Rc::default(),
             client: Rc::default(),
             registry: Rc::default(),
-            canvas,
-            nav: Rc::default(),
+            tabs,
+            docs: Rc::default(),
             wf_list,
             files: Rc::default(),
             crumb,
@@ -242,6 +255,20 @@ impl Workspace {
             let me = ws.clone();
             run.connect_clicked(move |_| me.queue_prompt());
             let me = ws.clone();
+            save.connect_clicked(move |_| me.save_active());
+            let me = ws.clone();
+            fit.connect_clicked(move |_| {
+                if let Some(c) = me.active_canvas() {
+                    c.fit_view();
+                }
+            });
+            let me = ws.clone();
+            reset.connect_clicked(move |_| {
+                if let Some(c) = me.active_canvas() {
+                    c.reset_view();
+                }
+            });
+            let me = ws.clone();
             q_reload.connect_clicked(move |_| me.refresh_queue());
             let me = ws.clone();
             reload.connect_clicked(move |_| me.refresh_workflows());
@@ -253,6 +280,22 @@ impl Workspace {
                 gtk::ShortcutTrigger::parse_string("<Control>Return"),
                 Some(gtk::CallbackAction::new(move |_, _| {
                     me.queue_prompt();
+                    gtk::glib::Propagation::Stop
+                })),
+            ));
+            let me = ws.clone();
+            keys.add_shortcut(gtk::Shortcut::new(
+                gtk::ShortcutTrigger::parse_string("<Control>s"),
+                Some(gtk::CallbackAction::new(move |_, _| {
+                    me.save_active();
+                    gtk::glib::Propagation::Stop
+                })),
+            ));
+            let me = ws.clone();
+            keys.add_shortcut(gtk::Shortcut::new(
+                gtk::ShortcutTrigger::parse_string("<Control>w"),
+                Some(gtk::CallbackAction::new(move |_, _| {
+                    me.close_active();
                     gtk::glib::Propagation::Stop
                 })),
             ));
@@ -268,9 +311,7 @@ impl Workspace {
             self.append_log("[run] not connected");
             return;
         };
-        let nav = self.nav.borrow();
-        let Some(wf) = &nav.wf else {
-            drop(nav);
+        let Some(doc) = self.active_doc() else {
             self.append_log("[run] no workflow open");
             return;
         };
@@ -280,11 +321,13 @@ impl Workspace {
             self.append_log("[run] node definitions not loaded yet");
             return;
         }
-        let (api_prompt, warnings) = prompt::build(wf, &reg);
+        let (api_prompt, warnings, raw) = {
+            let d = doc.borrow();
+            let (p, w) = prompt::build(&d.wf, &reg);
+            (p, w, d.wf.raw.clone())
+        };
         drop(reg);
-        let raw = wf.raw.clone();
         let n = api_prompt.as_object().map_or(0, |o| o.len());
-        drop(nav);
         for w in warnings {
             self.append_log(&format!("[run] {w}"));
         }
@@ -305,9 +348,6 @@ impl Workspace {
 
     fn setup_navigation(&self) {
         let me = self.clone();
-        self.canvas.connect_activate(move |id| me.open_node(id));
-
-        let me = self.clone();
         self.queue_list.connect_map(move |_| me.refresh_queue());
 
         // row-selected, not row-activated: libadwaita rows don't fire activation reliably,
@@ -315,7 +355,9 @@ impl Workspace {
         let me = self.clone();
         self.wf_list.connect_row_selected(move |_, row| {
             let Some(row) = row else { return };
-            let file = me.files.borrow().get(row.index() as usize).cloned();
+            // Row widget name = file path (index shifts when the list is filtered).
+            let name = row.widget_name().to_string();
+            let file = if name.is_empty() { me.files.borrow().get(row.index() as usize).cloned() } else { Some(name) };
             if let Some(f) = file {
                 me.load_workflow(f);
             }
@@ -323,12 +365,110 @@ impl Workspace {
 
         let me = self.clone();
         self.back.connect_clicked(move |_| {
-            me.nav.borrow_mut().path.pop();
-            me.render();
+            if let Some(doc) = me.active_doc() {
+                doc.borrow_mut().path.pop();
+                me.render_doc(&doc);
+            }
+        });
+
+        // Tab switching updates the breadcrumb / back button.
+        let me = self.clone();
+        self.tabs.connect_selected_page_notify(move |_| {
+            if let Some(doc) = me.active_doc() {
+                me.show_trail(&doc);
+            }
+        });
+
+        // Drop the doc when its tab is closed (button on the tab, Ctrl+W, …).
+        let docs = self.docs.clone();
+        self.tabs.connect_page_detached(move |_, page, _| {
+            docs.borrow_mut().retain(|d| &d.borrow().page != page);
         });
 
         let me = self.clone();
         self.wf_list.connect_map(move |_| me.refresh_workflows());
+    }
+
+    fn active_doc(&self) -> Option<DocRef> {
+        let page = self.tabs.selected_page()?;
+        self.docs.borrow().iter().find(|d| d.borrow().page == page).cloned()
+    }
+
+    fn active_canvas(&self) -> Option<canvas::Canvas> {
+        self.active_doc().map(|d| d.borrow().canvas.clone())
+    }
+
+    fn close_active(&self) {
+        if let Some(page) = self.tabs.selected_page() {
+            self.tabs.close_page(&page);
+        }
+    }
+
+    /// Push the canvas wiring back into the workflow model before it is used
+    /// (save, run, switching views).
+    fn sync_doc(&self, doc: &DocRef) {
+        let (canvas, path) = {
+            let d = doc.borrow();
+            (d.canvas.clone(), d.path.clone())
+        };
+        let (nodes, links, _) = canvas.scene();
+        let (zoom, off) = canvas.view();
+        let mut d = doc.borrow_mut();
+        match path.last() {
+            None => {
+                graph_view::sync(&mut d.wf.root, &nodes, &links);
+                // Persist the viewport like the web frontend (`extra.ds`).
+                let ds = serde_json::json!({"scale": zoom, "offset": [off.0, off.1]});
+                if let Some(extra) = d.wf.raw.get_mut("extra").and_then(|e| e.as_object_mut()) {
+                    extra.insert("ds".into(), ds);
+                }
+            }
+            Some(p) => {
+                if let Some(sg) = d.wf.subgraphs.get_mut(p) {
+                    graph_view::sync(&mut sg.graph, &nodes, &links);
+                    graph_view::sync_io(sg);
+                }
+            }
+        }
+    }
+
+    fn set_dirty(&self, doc: &DocRef, dirty: bool) {
+        let mut d = doc.borrow_mut();
+        if d.dirty == dirty {
+            return;
+        }
+        d.dirty = dirty;
+        let name = d.file.rsplit('/').next().unwrap_or(&d.file).trim_end_matches(".json").to_string();
+        let title = if dirty { format!("{name} \u{2022}") } else { name };
+        d.page.set_title(&title);
+    }
+
+    fn save_active(&self) {
+        let Some(doc) = self.active_doc() else {
+            self.append_log("[save] no workflow open");
+            return;
+        };
+        let Some(client) = self.client.borrow().clone() else {
+            self.append_log("[save] not connected");
+            return;
+        };
+        self.sync_doc(&doc);
+        let (file, body) = {
+            let d = doc.borrow();
+            (d.file.clone(), d.wf.to_json().to_string())
+        };
+        let me = self.clone();
+        self.append_log(&format!("[save] {file}"));
+        glib::spawn_future_local(async move {
+            match gio::spawn_blocking(move || client.save_workflow(&file, body.as_bytes())).await {
+                Ok(Ok(())) => {
+                    me.append_log("[save] saved");
+                    me.set_dirty(&doc, false);
+                }
+                Ok(Err(e)) => me.append_log(&format!("[save] {e}")),
+                Err(_) => me.append_log("[save] worker panicked"),
+            }
+        });
     }
 
     /// `GET /queue` → rebuild the sidebar list (cheap; called on every WS status event).
@@ -489,6 +629,7 @@ impl Workspace {
                 None => adw::ActionRow::builder().title(glib::markup_escape_text(f.trim_end_matches(".json"))).build(),
             };
             row.set_tooltip_text(Some(f));
+            row.set_widget_name(f);
             self.wf_list.append(&row);
         }
         self.append_log(&format!("{} workflows", files.len()));
@@ -518,49 +659,107 @@ impl Workspace {
                 wf.root.links.len(),
                 wf.subgraphs.len()
             ));
-            *me.nav.borrow_mut() = Nav { wf: Some(wf), file: Some(file), path: Vec::new() };
-            me.render();
+            me.open_workflow(file, wf);
         });
     }
 
-    /// Double-click: drill into a subgraph instance.
-    fn open_node(&self, id: &str) {
-        let nav = self.nav.borrow();
-        let Some(wf) = &nav.wf else { return };
-        let graph = nav.path.last().and_then(|p| wf.subgraphs.get(p)).map(|s| &s.graph).unwrap_or(&wf.root);
-        let Some(node) = graph.node(id) else { return };
-        if !wf.subgraphs.contains_key(&node.ty) {
+    /// Show a workflow in its own tab (or switch to the tab that already has it).
+    fn open_workflow(&self, file: String, wf: workflow::Workflow) {
+        if let Some(doc) = self.docs.borrow().iter().find(|d| d.borrow().file == file).cloned() {
+            let page = doc.borrow().page.clone();
+            self.tabs.set_selected_page(&page);
             return;
         }
-        let ty = node.ty.clone();
-        drop(nav);
-        self.nav.borrow_mut().path.push(ty);
-        self.render();
+        let canvas = canvas::Canvas::new();
+        let page = self.tabs.append(&canvas.area);
+        page.set_title(file.rsplit('/').next().unwrap_or(&file).trim_end_matches(".json"));
+        page.set_tooltip(&file);
+        let doc: DocRef = Rc::new(RefCell::new(Doc {
+            file,
+            wf,
+            path: Vec::new(),
+            canvas: canvas.clone(),
+            page: page.clone(),
+            dirty: false,
+        }));
+        self.docs.borrow_mut().push(doc.clone());
+        {
+            // Double-click a subgraph instance: drill in.
+            let me = self.clone();
+            let weak = Rc::downgrade(&doc);
+            canvas.connect_activate(move |id| {
+                if let Some(d) = weak.upgrade() {
+                    me.open_node(&d, id);
+                }
+            });
+            // Any model change marks the tab dirty (and keeps the model current).
+            let me = self.clone();
+            let weak = Rc::downgrade(&doc);
+            canvas.connect_change(move || {
+                if let Some(d) = weak.upgrade() {
+                    me.set_dirty(&d, true);
+                }
+            });
+        }
+        self.render_doc(&doc);
+        self.tabs.set_selected_page(&page);
     }
 
-    fn render(&self) {
-        let nav = self.nav.borrow();
-        let Some(wf) = &nav.wf else { return };
-        let def = nav.path.last().and_then(|p| wf.subgraphs.get(p));
-        let graph = def.map(|s| &s.graph).unwrap_or(&wf.root);
-        let (nodes, links, groups) = graph_view::scene(wf, graph, def, &self.registry.borrow());
-        // Root graph: restore the viewport the web frontend saved (`extra.ds`).
-        let saved_view = (nav.path.is_empty())
-            .then(|| wf.raw["extra"]["ds"].as_object())
-            .flatten()
-            .and_then(|ds| {
-                let scale = ds.get("scale")?.as_f64()?;
-                let off = ds.get("offset")?.as_array()?;
-                Some((scale, (off.first()?.as_f64()?, off.get(1)?.as_f64()?)))
-            });
-        let mut trail = vec![nav.file.as_deref().unwrap_or_default().to_owned()];
-        trail.extend(nav.path.iter().map(|p| wf.subgraphs[p].name.clone()));
+    /// Double-click: drill into a subgraph instance.
+    fn open_node(&self, doc: &DocRef, id: &str) {
+        let ty = {
+            let d = doc.borrow_mut();
+            let graph = d.path.last().and_then(|p| d.wf.subgraphs.get(p)).map(|s| &s.graph).unwrap_or(&d.wf.root);
+            match graph.node(id) {
+                Some(n) if d.wf.subgraphs.contains_key(&n.ty) => n.ty.clone(),
+                _ => return,
+            }
+        };
+        doc.borrow_mut().path.push(ty);
+        self.render_doc(doc);
+    }
+
+    fn show_trail(&self, doc: &DocRef) {
+        let d = doc.borrow();
+        let mut trail = vec![d.file.rsplit('/').next().unwrap_or_default().to_owned()];
+        trail.extend(d.path.iter().map(|p| d.wf.subgraphs[p].name.clone()));
         self.crumb.set_text(&trail.join(" › "));
-        self.back.set_visible(!nav.path.is_empty());
-        drop(nav);
-        self.canvas.set_graph(nodes, links, groups);
+        self.back.set_visible(!d.path.is_empty());
+    }
+
+    fn render_doc(&self, doc: &DocRef) {
+        let (canvas, nodes, links, groups, saved_view) = {
+            let d = doc.borrow();
+            let def = d.path.last().and_then(|p| d.wf.subgraphs.get(p));
+            let graph = def.map(|s| &s.graph).unwrap_or(&d.wf.root);
+            let (nodes, links, groups) = graph_view::scene(&d.wf, graph, def, &self.registry.borrow());
+            // Root graph: restore the viewport the web frontend saved (`extra.ds`).
+            let saved_view = d
+                .path
+                .is_empty()
+                .then(|| d.wf.raw["extra"]["ds"].as_object())
+                .flatten()
+                .and_then(|ds| {
+                    let scale = ds.get("scale")?.as_f64()?;
+                    let off = ds.get("offset")?.as_array()?;
+                    Some((scale, (off.first()?.as_f64()?, off.get(1)?.as_f64()?)))
+                });
+            (d.canvas.clone(), nodes, links, groups, saved_view)
+        };
+        self.show_trail(doc);
+        canvas.set_graph(nodes, links, groups);
         if let Some((zoom, off)) = saved_view {
-            self.canvas.set_view(zoom, off);
+            canvas.set_view(zoom, off);
+        }
+    }
+
+    /// Re-run `scene()` for every tab (after `/object_info` arrives) without
+    /// losing its viewport.
+    fn redraw_all(&self) {
+        for doc in self.docs.borrow().iter() {
+            let view = doc.borrow().canvas.view();
+            self.render_doc(doc);
+            doc.borrow().canvas.set_view(view.0, view.1);
         }
     }
 
@@ -642,6 +841,8 @@ impl Workspace {
                         t.elapsed().as_millis()
                     ));
                     *me.registry.borrow_mut() = reg;
+                    // Titles/widget labels come from /object_info.
+                    me.redraw_all();
                 }
                 Ok(Err(e)) => me.append_log(&format!("[object_info] {e}")),
                 Err(_) => me.append_log("[object_info] worker panicked"),

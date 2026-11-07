@@ -8,8 +8,8 @@
 //! to its outputs. Schema: ComfyUI_frontend `workflowSchema.ts` (see
 //! docs/research/frontend-1.60-reference.md §3).
 //!
-//! The parsed model is read-only for now; `raw` keeps the original JSON so saving
-//! can round-trip unknown fields (extra, groups, reroutes, properties…).
+//! The parsed model is edited in place (positions, links); `raw` keeps the original JSON so
+//! saving can round-trip unknown fields (extra, groups, reroutes, properties…).
 
 use serde_json::Value;
 use std::collections::HashMap;
@@ -146,6 +146,65 @@ impl Workflow {
     pub fn from_str(s: &str) -> Result<Self, String> {
         Self::from_json(serde_json::from_str(s).map_err(|e| e.to_string())?)
     }
+
+    /// Original JSON with positions and wiring refreshed from the parsed model.
+    /// Nodes the model does not track (group nodes, reroutes…) keep their saved values.
+    pub fn to_json(&self) -> Value {
+        let mut v = self.raw.clone();
+        write_graph(&mut v, &self.root, false);
+        if let Some(defs) = v["definitions"]["subgraphs"].as_array_mut() {
+            for d in defs {
+                let Some(sg) = d["id"].as_str().and_then(|id| self.subgraphs.get(id)) else { continue };
+                write_graph(d, &sg.graph, true);
+                for (key, ios) in [("inputs", &sg.inputs), ("outputs", &sg.outputs)] {
+                    for (i, io) in d[key].as_array_mut().into_iter().flatten().enumerate() {
+                        if let Some(src) = ios.get(i) {
+                            io["linkIds"] = Value::from(src.link_ids.clone());
+                        }
+                    }
+                }
+            }
+        }
+        v
+    }
+}
+
+/// Splice `g` back into its raw node/link arrays. Subgraph definitions store links as
+/// objects, the root graph as 0.4 tuples.
+fn write_graph(s: &mut Value, g: &Graph, object_links: bool) {
+    for nv in s["nodes"].as_array_mut().into_iter().flatten() {
+        let Some(n) = id_of(&nv["id"]).and_then(|id| g.nodes.iter().find(|n| n.id == id)) else { continue };
+        nv["pos"] = serde_json::json!([n.pos.0, n.pos.1]);
+        for (i, iv) in nv["inputs"].as_array_mut().into_iter().flatten().enumerate() {
+            if let Some(src) = n.inputs.get(i) {
+                iv["link"] = src.link.map(Value::from).unwrap_or(Value::Null);
+            }
+        }
+        for (i, ov) in nv["outputs"].as_array_mut().into_iter().flatten().enumerate() {
+            if let Some(src) = n.outputs.get(i) {
+                ov["links"] = Value::from(src.links.clone());
+            }
+        }
+    }
+
+    // Node ids are stored as strings in the model; write them back as numbers when they
+    // were numbers (plain ids), keeping "39:7" style ids from unpacked subgraphs.
+    let idv = |id: &str| id.parse::<i64>().map_or_else(|_| Value::from(id), Value::from);
+    let mut links: Vec<&Link> = g.links.values().collect();
+    links.sort_by_key(|l| l.id);
+    s["links"] = Value::Array(
+        links
+            .iter()
+            .map(|l| {
+                if object_links {
+                    serde_json::json!({"id": l.id, "origin_id": idv(&l.origin_id), "origin_slot": l.origin_slot,
+                                       "target_id": idv(&l.target_id), "target_slot": l.target_slot, "type": l.ty})
+                } else {
+                    serde_json::json!([l.id, idv(&l.origin_id), l.origin_slot, idv(&l.target_id), l.target_slot, l.ty])
+                }
+            })
+            .collect(),
+    );
 }
 
 fn str_of(v: &Value) -> String {

@@ -139,6 +139,18 @@ impl Client {
         self.agent.get(&url).call().map_err(err)?.into_string().map_err(|e| e.to_string())
     }
 
+    /// `POST /api/userdata/workflows/<path>` with the raw JSON body (ComfyUI writes it
+    /// atomically; the route reads the body verbatim, not as a JSON field).
+    pub fn save_workflow(&self, file: &str, body: &[u8]) -> Result<(), String> {
+        let url = format!("{}/api/userdata/{}", self.base, percent_encode(&format!("workflows/{file}")));
+        self.agent
+            .post(&url)
+            .set("Content-Type", "application/json")
+            .send_bytes(body)
+            .map(drop)
+            .map_err(err)
+    }
+
     /// `POST /prompt` with an API-format prompt. Returns `prompt_id`.
     #[allow(dead_code)] // Phase 2.4
     pub fn queue_prompt(&self, prompt: Value, workflow: Option<Value>) -> Result<String, String> {

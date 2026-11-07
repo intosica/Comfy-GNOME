@@ -2,7 +2,9 @@
 
 Native GTK4/Libadwaita frontend for [ComfyUI](https://github.com/comfyanonymous/ComfyUI), written in Rust. Targets Linux/X11.
 
-Status: Phase 1 (shell + splash + canvas prototype). See `ROADMAP.md` and `AGENT-HANDOFF.md`.
+Status: Phases 1–2 complete, Phase 3 in progress — open saved workflows in tabs, colour-coded typed wires,
+edit the graph (move nodes, drag/detach/re-route links) and save straight back to the backend's `userdata`.
+See `ROADMAP.md` and `AGENT-HANDOFF.md`.
 
 ## Run
 

@@ -12,7 +12,7 @@
 pub mod transform;
 
 use adw::{gdk, gtk, prelude::*};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::f64::consts::PI;
 use std::rc::Rc;
 use transform::View;
@@ -21,15 +21,22 @@ const TITLE_H: f64 = 30.0;
 const SLOT_H: f64 = 20.0;
 const GRID: f64 = 20.0;
 
-#[derive(Default)]
+/// A node socket: label text plus the socket type (drives colour and link validity).
+#[derive(Default, Clone)]
+pub struct Slot {
+    pub label: String,
+    pub ty: String,
+}
+
+#[derive(Default, Clone)]
 pub struct Node {
     /// Workflow node id (opaque to the canvas; reported back on activation).
     pub id: String,
     pub title: String,
     pub pos: (f64, f64),
     pub size: (f64, f64),
-    pub inputs: Vec<String>,
-    pub outputs: Vec<String>,
+    pub inputs: Vec<Slot>,
+    pub outputs: Vec<Slot>,
     /// (name, value) rows drawn below the slots. Read-only in Phase 2.
     pub widgets: Vec<(String, String)>,
     pub color: Option<u32>,
@@ -41,6 +48,7 @@ pub struct Node {
     pub subgraph: bool,
 }
 
+#[derive(Clone)]
 pub struct Group {
     pub title: String,
     pub rect: [f64; 4],
@@ -65,12 +73,33 @@ impl Node {
     }
 }
 
-/// (from_node, from_output, to_node, to_input)
-pub type Link = (usize, usize, usize, usize);
+/// Wire between two nodes. `from_*` is the origin output, `to_*` the target input.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Link {
+    pub from: usize,
+    pub from_slot: usize,
+    pub to: usize,
+    pub to_slot: usize,
+}
 
 enum Drag {
-    Node { idx: usize, grab: (f64, f64) },
+    Node { idx: usize, grab: (f64, f64), start: (f64, f64) },
     Pan { start_offset: (f64, f64) },
+    Link(LinkDrag),
+}
+
+/// A wire being dragged. Always anchored at an output: dragging away from an
+/// input, or shift-dragging off a connected output, first detaches that wire.
+struct LinkDrag {
+    from: usize,
+    from_slot: usize,
+    ty: String,
+    /// Canvas-space cursor position.
+    to: (f64, f64),
+    /// The wire was pulled off an existing connection (dropping on nothing deletes it).
+    detached: bool,
+    /// Anything added or removed during this drag.
+    changed: bool,
 }
 
 #[derive(Default)]
@@ -85,17 +114,105 @@ struct State {
     pointer: (f64, f64),
 }
 
+impl State {
+    /// Topmost socket within `r` canvas units of `p`.
+    fn hit_slot(&self, p: (f64, f64), r: f64) -> Option<(usize, bool, usize)> {
+        for &i in self.order.iter().rev() {
+            let n = &self.nodes[i];
+            for (out, slots) in [(true, &n.outputs), (false, &n.inputs)] {
+                for (si, _) in slots.iter().enumerate() {
+                    let (sx, sy) = n.slot_pos(out, si);
+                    if (sx - p.0).hypot(sy - p.1) <= r {
+                        return Some((i, out, si));
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Topmost input socket that `ty` may connect to.
+    fn hit_target(&self, p: (f64, f64), r: f64, ty: &str) -> Option<(usize, usize)> {
+        for &i in self.order.iter().rev() {
+            let n = &self.nodes[i];
+            for (si, slot) in n.inputs.iter().enumerate() {
+                let (sx, sy) = n.slot_pos(false, si);
+                if (sx - p.0).hypot(sy - p.1) <= r && compatible(ty, &slot.ty) {
+                    return Some((i, si));
+                }
+            }
+        }
+        None
+    }
+
+    /// Drop the dragged wire: connect to a compatible input, replacing what was there.
+    /// Inputs take one link only; outputs fan out freely.
+    fn finish_link(&mut self, d: &mut LinkDrag, r: f64) {
+        let Some((to, slot)) = self.hit_target(d.to, r, &d.ty) else { return };
+        self.links.retain(|l| !(l.to == to && l.to_slot == slot));
+        self.links.push(Link { from: d.from, from_slot: d.from_slot, to, to_slot: slot });
+        d.changed = true;
+    }
+}
+
+/// Socket types match when identical, when either side is a wildcard, or when the
+/// input lists alternatives (`"IMAGE,MASK"`).
+fn compatible(out_ty: &str, in_ty: &str) -> bool {
+    let ok = |t: &str| t == out_ty || t == "*" || out_ty.is_empty();
+    in_ty.is_empty() || in_ty.split(',').any(|t| ok(t.trim()))
+}
+
+/// ComfyUI dark-palette socket colours (`src/assets/palettes/dark.json` → colors.node_slot),
+/// with litegraph's default link colour for everything else.
+pub fn type_color(ty: &str) -> u32 {
+    match ty {
+        "CLIP" => 0xffd500,
+        "CLIP_VISION" => 0xa8dadc,
+        "CLIP_VISION_OUTPUT" => 0xad7452,
+        "CONDITIONING" => 0xffa931,
+        "CONTROL_NET" => 0x6ee7b7,
+        "IMAGE" => 0x64b5f6,
+        "LATENT" => 0xff9cf9,
+        "MASK" => 0x81c784,
+        "MODEL" => 0xb39ddb,
+        "STYLE_MODEL" => 0xc2ffae,
+        "VAE" => 0xff6e6e,
+        "NOISE" => 0xb0b0b0,
+        "GUIDER" => 0x66ffff,
+        "SAMPLER" => 0xecb4b4,
+        "SIGMAS" => 0xcdffcd,
+        "TAESD" => 0xdcc274,
+        _ => 0x99aa99,
+    }
+}
+
 #[derive(Clone)]
 pub struct Canvas {
     pub area: gtk::DrawingArea,
     state: Rc<RefCell<State>>,
     on_activate: Rc<RefCell<Option<Box<dyn Fn(&str)>>>>,
+    on_change: Rc<RefCell<Option<Box<dyn Fn()>>>>,
+    /// A graph was set before the widget had a size: fit as soon as it does.
+    pending_fit: Rc<Cell<bool>>,
 }
 
 impl Canvas {
     pub fn new() -> Self {
         let area = gtk::DrawingArea::builder().hexpand(true).vexpand(true).focusable(true).build();
-        let c = Self { area, state: Rc::default(), on_activate: Rc::default() };
+        let c = Self {
+            area,
+            state: Rc::default(),
+            on_activate: Rc::default(),
+            on_change: Rc::default(),
+            pending_fit: Rc::default(),
+        };
+        let me = c.clone();
+        let pending = c.pending_fit.clone();
+        c.area.connect_resize(move |_, w, h| {
+            if pending.get() && w > 10 && h > 10 {
+                me.fit_view();
+            }
+        });
         c.setup_draw();
         c.setup_input();
         c
@@ -110,7 +227,14 @@ impl Canvas {
         s.groups = groups;
         s.drag = None;
         drop(s);
+        self.pending_fit.set(true);
         self.fit_view();
+    }
+
+    /// Copy of the current scene (nodes carry live positions).
+    pub fn scene(&self) -> (Vec<Node>, Vec<Link>, Vec<Group>) {
+        let s = self.state.borrow();
+        (s.nodes.clone(), s.links.clone(), s.groups.clone())
     }
 
     pub fn view(&self) -> (f64, (f64, f64)) {
@@ -119,7 +243,9 @@ impl Canvas {
     }
 
     /// Restore a saved viewport (`extra.ds` in workflow files).
+    /// Restore an explicit viewport (wins over the initial auto-fit).
     pub fn set_view(&self, zoom: f64, offset: (f64, f64)) {
+        self.pending_fit.set(false);
         let mut s = self.state.borrow_mut();
         s.view = View { zoom: zoom.clamp(transform::ZOOM_MIN, transform::ZOOM_MAX), offset };
         drop(s);
@@ -131,9 +257,19 @@ impl Canvas {
         *self.on_activate.borrow_mut() = Some(Box::new(f));
     }
 
+    /// A node moved or a wire was connected/disconnected (edits to persist).
+    pub fn connect_change(&self, f: impl Fn() + 'static) {
+        *self.on_change.borrow_mut() = Some(Box::new(f));
+    }
+
     /// Zoom/pan so every node is visible (falls back to reset when empty).
     pub fn fit_view(&self) {
         let (w, h) = (self.area.width() as f64, self.area.height() as f64);
+        if w < 10.0 || h < 10.0 {
+            self.pending_fit.set(true); // retried from connect_resize
+            return;
+        }
+        self.pending_fit.set(false);
         let mut s = self.state.borrow_mut();
         let mut b = [f64::MAX, f64::MAX, f64::MIN, f64::MIN];
         for n in &s.nodes {
@@ -170,6 +306,7 @@ impl Canvas {
     }
 
     pub fn reset_view(&self) {
+        self.pending_fit.set(false);
         self.state.borrow_mut().view = View { zoom: 1.0, offset: (40.0, 60.0) };
         self.area.queue_draw();
     }
@@ -221,22 +358,60 @@ impl Canvas {
         });
         self.area.add_controller(click);
 
-        // Primary drag: move node under pointer, else pan. Middle drag: always pan.
-        for button in [gdk::BUTTON_PRIMARY, gdk::BUTTON_MIDDLE] {
-            let drag = gtk::GestureDrag::builder().button(button).build();
-            let st = self.state.clone();
-            drag.connect_drag_begin(move |_, x, y| {
+        // Primary drag: socket → wire, node body → move, empty space → pan.
+        // Middle drag: always pan (Helvum).
+        {
+            let drag = gtk::GestureDrag::builder().button(gdk::BUTTON_PRIMARY).build();
+            let (st, area) = (self.state.clone(), self.area.clone());
+            drag.connect_drag_begin(move |g, x, y| {
+                let shift = g
+                    .current_event()
+                    .map(|e| e.modifier_state().contains(gdk::ModifierType::SHIFT_MASK))
+                    .unwrap_or(false);
                 let mut s = st.borrow_mut();
                 let c = s.view.to_canvas((x, y));
-                let hit = (button == gdk::BUTTON_PRIMARY)
-                    .then(|| s.order.iter().rposition(|&i| s.nodes[i].contains(c)))
-                    .flatten();
+                let r = 9.0 / s.view.zoom; // constant ~9 screen px, whatever the zoom
+                if let Some((idx, out, si)) = s.hit_slot(c, r) {
+                    if out {
+                        let ty = s.nodes[idx].outputs[si].ty.clone();
+                        let mut d = LinkDrag { from: idx, from_slot: si, ty, to: c, detached: false, changed: false };
+                        // Shift pulls the existing wire off the output instead of adding one.
+                        if shift {
+                            if let Some(li) = s.links.iter().rposition(|l| l.from == idx && l.from_slot == si) {
+                                s.links.remove(li);
+                                d.detached = true;
+                                d.changed = true;
+                            }
+                        }
+                        s.drag = Some(Drag::Link(d));
+                        drop(s);
+                        area.queue_draw();
+                        return;
+                    }
+                    // Dragging off a connected input takes that wire with it.
+                    if let Some(li) = s.links.iter().position(|l| l.to == idx && l.to_slot == si) {
+                        let l = s.links.remove(li);
+                        let ty = s.nodes[l.from].outputs[l.from_slot].ty.clone();
+                        s.drag = Some(Drag::Link(LinkDrag {
+                            from: l.from,
+                            from_slot: l.from_slot,
+                            ty,
+                            to: c,
+                            detached: true,
+                            changed: true,
+                        }));
+                        drop(s);
+                        area.queue_draw();
+                        return;
+                    }
+                }
+                let hit = s.order.iter().rposition(|&i| s.nodes[i].contains(c));
                 s.drag = Some(match hit {
                     Some(oi) => {
                         let idx = s.order.remove(oi);
                         s.order.push(idx); // raise to top
                         let p = s.nodes[idx].pos;
-                        Drag::Node { idx, grab: (c.0 - p.0, c.1 - p.1) }
+                        Drag::Node { idx, grab: (c.0 - p.0, c.1 - p.1), start: p }
                     }
                     None => Drag::Pan { start_offset: s.view.offset },
                 });
@@ -245,18 +420,58 @@ impl Canvas {
             drag.connect_drag_update(move |g, dx, dy| {
                 let Some((sx, sy)) = g.start_point() else { return };
                 let mut s = st.borrow_mut();
-                match s.drag {
-                    Some(Drag::Node { idx, grab }) => {
-                        let c = s.view.to_canvas((sx + dx, sy + dy));
-                        s.nodes[idx].pos = (c.0 - grab.0, c.1 - grab.1);
+                let st = &mut *s;
+                let view = st.view;
+                match &mut st.drag {
+                    Some(Drag::Node { idx, grab, .. }) => {
+                        let c = view.to_canvas((sx + dx, sy + dy));
+                        st.nodes[*idx].pos = (c.0 - grab.0, c.1 - grab.1);
                     }
-                    Some(Drag::Pan { start_offset }) => {
-                        s.view.offset = (start_offset.0 + dx, start_offset.1 + dy);
-                    }
+                    Some(Drag::Pan { start_offset }) => st.view.offset = (start_offset.0 + dx, start_offset.1 + dy),
+                    Some(Drag::Link(d)) => d.to = view.to_canvas((sx + dx, sy + dy)),
                     None => return,
                 }
                 drop(s);
                 area.queue_draw();
+            });
+            let (st, area, cb) = (self.state.clone(), self.area.clone(), self.on_change.clone());
+            drag.connect_drag_end(move |_, _, _| {
+                let mut s = st.borrow_mut();
+                let r = 9.0 / s.view.zoom;
+                let mut changed = false;
+                match s.drag.take() {
+                    Some(Drag::Link(mut d)) => {
+                        s.finish_link(&mut d, r);
+                        changed = d.changed;
+                    }
+                    Some(Drag::Node { idx, start, .. }) => changed = s.nodes[idx].pos != start,
+                    _ => {}
+                }
+                drop(s);
+                area.queue_draw();
+                if changed {
+                    if let Some(f) = cb.borrow().as_ref() {
+                        f();
+                    }
+                }
+            });
+            self.area.add_controller(drag);
+        }
+        {
+            let drag = gtk::GestureDrag::builder().button(gdk::BUTTON_MIDDLE).build();
+            let st = self.state.clone();
+            drag.connect_drag_begin(move |_, _, _| {
+                let mut s = st.borrow_mut();
+                s.drag = Some(Drag::Pan { start_offset: s.view.offset });
+            });
+            let (st, area) = (self.state.clone(), self.area.clone());
+            drag.connect_drag_update(move |_, dx, dy| {
+                let mut s = st.borrow_mut();
+                if let Some(Drag::Pan { start_offset }) = s.drag {
+                    s.view.offset = (start_offset.0 + dx, start_offset.1 + dy);
+                    drop(s);
+                    area.queue_draw();
+                }
             });
             let st = self.state.clone();
             drag.connect_drag_end(move |_, _, _| st.borrow_mut().drag = None);
@@ -358,17 +573,29 @@ fn draw(cr: &gtk::cairo::Context, s: &State, w: f64, h: f64) {
         cr.show_text(&g.title).ok();
     }
 
-    // Links under nodes (litegraph order). Culled by their bounding box.
-    rgb(cr, 0x99aa99);
-    cr.set_line_width(3.0);
-    for &(a, ao, b, bi) in &s.links {
-        let (o, i) = (s.nodes[a].slot_pos(true, ao), s.nodes[b].slot_pos(false, bi));
+    // Links under nodes, batched by socket type so each colour is a single stroke.
+    let mut by_color: Vec<(u32, Vec<((f64, f64), (f64, f64))>)> = Vec::new();
+    for l in &s.links {
+        let (Some(a), Some(b)) = (s.nodes.get(l.from), s.nodes.get(l.to)) else { continue };
+        let (o, i) = (a.slot_pos(true, l.from_slot), b.slot_pos(false, l.to_slot));
         let half = (o.0 - i.0).abs() / 2.0;
-        if visible(o.0.min(i.0) - half, o.1.min(i.1) - 30.0, (o.0 - i.0).abs() + 2.0 * half, (o.1 - i.1).abs() + 30.0) {
-            link_path(cr, o, i);
+        if !visible(o.0.min(i.0) - half, o.1.min(i.1) - 30.0, (o.0 - i.0).abs() + 2.0 * half, (o.1 - i.1).abs() + 30.0) {
+            continue;
+        }
+        let c = type_color(a.outputs.get(l.from_slot).map(|s| s.ty.as_str()).unwrap_or_default());
+        match by_color.iter_mut().find(|(k, _)| *k == c) {
+            Some((_, v)) => v.push((o, i)),
+            None => by_color.push((c, vec![(o, i)])),
         }
     }
-    cr.stroke().ok();
+    cr.set_line_width(3.0);
+    for (color, wires) in &by_color {
+        rgb(cr, *color);
+        for &(o, i) in wires {
+            link_path(cr, o, i);
+        }
+        cr.stroke().ok();
+    }
 
     let detail = v.zoom >= 0.4; // skip text when too small to read
     for &i in &s.order {
@@ -380,7 +607,7 @@ fn draw(cr: &gtk::cairo::Context, s: &State, w: f64, h: f64) {
         rounded_rect(cr, x, y - TITLE_H, nw, nh + TITLE_H, 8.0);
         rgba(cr, if n.mode == 4 { 0x9a3a9a } else { n.bgcolor.unwrap_or(0x353535) }, alpha);
         cr.fill_preserve().ok();
-        let dragging = matches!(s.drag, Some(Drag::Node { idx, .. }) if idx == i);
+        let dragging = matches!(&s.drag, Some(Drag::Node { idx, .. }) if *idx == i);
         rgb(cr, if dragging { 0xffffff } else { 0x111111 });
         cr.set_line_width(if dragging { 2.0 } else { 1.0 });
         cr.stroke().ok();
@@ -419,16 +646,27 @@ fn draw(cr: &gtk::cairo::Context, s: &State, w: f64, h: f64) {
         cr.rectangle(x, y, nw, nh);
         cr.clip();
         cr.set_font_size(12.0);
-        for (out, labels) in [(false, &n.inputs), (true, &n.outputs)] {
-            for (si, label) in labels.iter().enumerate() {
+        for (out, slots) in [(false, &n.inputs), (true, &n.outputs)] {
+            for (si, slot) in slots.iter().enumerate() {
                 let (px, py) = n.slot_pos(out, si);
-                rgb(cr, 0x99aa99);
+                rgb(cr, type_color(&slot.ty));
                 cr.arc(px, py, 5.0, 0.0, 2.0 * PI);
                 cr.fill().ok();
+                // Ring the socket a dragged wire would land in.
+                if !out {
+                    if let Some(Drag::Link(d)) = &s.drag {
+                        if compatible(&d.ty, &slot.ty) && (px - d.to.0).hypot(py - d.to.1) <= 12.0 / v.zoom {
+                            rgb(cr, 0xffffff);
+                            cr.set_line_width(2.0);
+                            cr.arc(px, py, 8.5, 0.0, 2.0 * PI);
+                            cr.stroke().ok();
+                        }
+                    }
+                }
                 rgb(cr, 0xaaaaaa);
-                let tw = cr.text_extents(label).map(|e| e.width()).unwrap_or(0.0);
+                let tw = cr.text_extents(&slot.label).map(|e| e.width()).unwrap_or(0.0);
                 cr.move_to(if out { px - 12.0 - tw } else { px + 12.0 }, py + 4.0);
-                cr.show_text(label).ok();
+                cr.show_text(&slot.label).ok();
             }
         }
         // Widget rows (read-only values)
@@ -448,6 +686,16 @@ fn draw(cr: &gtk::cairo::Context, s: &State, w: f64, h: f64) {
             wy += 24.0;
         }
         cr.restore().ok();
+    }
+
+    // Wire being dragged, on top of everything (litegraph CONNECTING_LINK_COLOR).
+    if let Some(Drag::Link(d)) = &s.drag {
+        if let Some(n) = s.nodes.get(d.from) {
+            rgb(cr, 0xaaffaa);
+            cr.set_line_width(3.0);
+            link_path(cr, n.slot_pos(true, d.from_slot), d.to);
+            cr.stroke().ok();
+        }
     }
     cr.restore().ok();
 

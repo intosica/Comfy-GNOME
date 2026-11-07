@@ -26,12 +26,17 @@ Each phase ends with a runnable build, updated `AGENT-HANDOFF.md`, and screensho
 - [ ] Gallery/history of past outputs (only the newest image is shown today)
 
 ## Phase 3 — Real Graph Editing
-- [x] Load ComfyUI workflow JSON (UI format, litegraph `nodes`/`links`/`groups`) — read-only rendering
-- [ ] Save / edit workflows (drag links between slots, move nodes writes back, undo)
-- [ ] Slot type colors, link creation/removal by dragging between slots, type checking
+- [x] Load ComfyUI workflow JSON (UI format, litegraph `nodes`/`links`/`groups`)
+- [x] Workflow **tabs**: one `adw::TabView` per open workflow, switch/close (`Ctrl+W`), unsaved marker `•`
+- [x] Save (`Ctrl+S`) via `POST /api/userdata/<percent-encoded file>`; positions, wiring, `extra.ds` viewport
+      written back; unknown JSON fields preserved (verified: byte-identical round-trip on a real 29-node graph,
+      `converted_node_count` unchanged by `comfyui validate workflow`)
+- [x] Slot **type colours** (16-entry palette from `LGraphCanvas.link_type_colors`)
+- [x] Link editing: drag from an output/input to wire, drag off an input to unplug, **shift+drag** an output to
+      detach the existing link and re-route it, hover ring on type-compatible targets only
+- [ ] Undo/redo history
 - [ ] Node add menu/search (from `/object_info`), delete, multi-select, rubber-band, copy/paste
-- [x] Workflows sidebar (user dir + `/userdata` API) — listing + open only
-- [ ] Node library sidebar tab (search `/object_info`, insert nodes), undo/redo
+- [ ] Node library sidebar tab (search `/object_info`, insert nodes)
 - [ ] Pango text rendering, spatial index for hit-testing, viewport culling
 
 ## Phase 4 — Widgets & Execution
