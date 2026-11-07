@@ -18,11 +18,24 @@ pub enum Kind {
     String,
     Boolean,
     Combo(Vec<String>),
+    /// v3 `COMFY_DYNAMICCOMBO_V3`: a combo whose selected option adds nested inputs,
+    /// serialized right after it as `"<name>.<child>"`.
+    DynCombo(Vec<(String, Vec<Input>)>),
+    /// Widget type the frontend (or an extension) draws itself: MARKDOWN, COLOR,
+    /// IMAGECOMPARE, EASY_PROMPT_STYLES, … Value is opaque JSON.
+    Custom(String),
     /// Link-only socket of this type (e.g. "MODEL", "*").
     Socket(String),
 }
 
-#[derive(Debug, Clone)]
+/// Core frontend widget types beyond the primitives (`scripts/widgets.ts::ComfyWidgets`).
+const CORE_WIDGETS: &[&str] = &[
+    "MARKDOWN", "IMAGEUPLOAD", "COLOR", "IMAGECOMPARE", "BOUNDING_BOX", "CHART", "GALLERIA", "PAINTER",
+    "COMPOSITOR", "TEXTAREA", "CURVE", "RANGE", "VIDEO_EDIT", "RESOLUTION_PREVIEW", "BOUNDING_BOXES",
+    "LIGHT_INFO_PREVIEW", "COLORS",
+];
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct Input {
     pub name: String,
     pub kind: Kind,
@@ -32,8 +45,9 @@ pub struct Input {
 }
 
 impl Input {
+    /// Occupies a `widgets_values` slot. `forceInput` primitives are plain sockets.
     pub fn is_widget(&self) -> bool {
-        !matches!(self.kind, Kind::Socket(_))
+        !matches!(self.kind, Kind::Socket(_)) && self.opts["forceInput"].as_bool() != Some(true)
     }
     /// Socket type string as used for link compatibility checks.
     #[allow(dead_code)] // Phase 3 link validation
@@ -43,8 +57,8 @@ impl Input {
             Kind::Float => "FLOAT",
             Kind::String => "STRING",
             Kind::Boolean => "BOOLEAN",
-            Kind::Combo(_) => "COMBO",
-            Kind::Socket(t) => t,
+            Kind::Combo(_) | Kind::DynCombo(_) => "COMBO",
+            Kind::Custom(t) | Kind::Socket(t) => t,
         }
     }
 }
@@ -74,7 +88,35 @@ impl Registry {
             .as_object()
             .map(|m| m.iter().filter_map(|(k, d)| Some((k.clone(), parse_node(k, d)?))).collect())
             .unwrap_or_default();
-        Self { nodes }
+        let mut r = Self { nodes };
+        r.mark_custom_widgets();
+        r
+    }
+
+    /// Extensions register widget constructors for their own types in JS, which we can't
+    /// see. Heuristic: a socket type that no node outputs can never be linked, so it must
+    /// be a widget (EASY_PROMPT_STYLES, COLORCODE, LORAS…). Union types ("A,B"), "*" and
+    /// v3 dynamic-input markers are excluded.
+    fn mark_custom_widgets(&mut self) {
+        let produced: std::collections::HashSet<String> =
+            self.nodes.values().flat_map(|n| n.outputs.iter().map(|o| o.0.clone())).collect();
+        let fix = |i: &mut Input| {
+            if let Kind::Socket(t) = &i.kind {
+                let custom = CORE_WIDGETS.contains(&t.as_str())
+                    || (!produced.contains(t) && !t.contains(',') && t != "*" && !t.ends_with("_V3"));
+                if custom {
+                    i.kind = Kind::Custom(t.clone());
+                }
+            }
+        };
+        for n in self.nodes.values_mut() {
+            for i in &mut n.inputs {
+                fix(i);
+                if let Kind::DynCombo(opts) = &mut i.kind {
+                    opts.iter_mut().flat_map(|o| o.1.iter_mut()).for_each(fix);
+                }
+            }
+        }
     }
 
     pub fn get(&self, name: &str) -> Option<&NodeDef> {
@@ -96,21 +138,7 @@ impl Registry {
 
 fn parse_node(key: &str, d: &Value) -> Option<NodeDef> {
     let s = |k: &str| d[k].as_str().unwrap_or_default().to_owned();
-    let input = &d["input"];
-    let mut inputs = Vec::new();
-    for (section, optional) in [("required", false), ("optional", true)] {
-        let Some(sec) = input[section].as_object() else { continue };
-        // input_order preserves Python declaration order; fall back to map order.
-        let order: Vec<String> = d["input_order"][section]
-            .as_array()
-            .map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_owned)).collect())
-            .unwrap_or_else(|| sec.keys().cloned().collect());
-        for name in order {
-            if let Some(spec) = sec.get(&name) {
-                inputs.push(parse_input(name, spec, optional));
-            }
-        }
-    }
+    let inputs = parse_inputs(&d["input"], &d["input_order"]);
     let types: Vec<String> = d["output"].as_array()?.iter().map(type_str).collect();
     let names = d["output_name"].as_array();
     let outputs = types
@@ -140,6 +168,25 @@ fn type_str(v: &Value) -> String {
     v.as_str().map(str::to_owned).unwrap_or_else(|| "COMBO".into())
 }
 
+/// `{required:{…}, optional:{…}}`, ordered by `input_order` when given, else by
+/// map order (serde_json `preserve_order` keeps the server's declaration order).
+fn parse_inputs(input: &Value, order: &Value) -> Vec<Input> {
+    let mut inputs = Vec::new();
+    for (section, optional) in [("required", false), ("optional", true)] {
+        let Some(sec) = input[section].as_object() else { continue };
+        let names: Vec<String> = order[section]
+            .as_array()
+            .map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_owned)).collect())
+            .unwrap_or_else(|| sec.keys().cloned().collect());
+        for name in names {
+            if let Some(spec) = sec.get(&name) {
+                inputs.push(parse_input(name, spec, optional));
+            }
+        }
+    }
+    inputs
+}
+
 fn parse_input(name: String, spec: &Value, optional: bool) -> Input {
     let head = &spec[0];
     let opts = spec.get(1).cloned().unwrap_or(Value::Null);
@@ -156,6 +203,14 @@ fn parse_input(name: String, spec: &Value, optional: bool) -> Input {
             "STRING" => Kind::String,
             "BOOLEAN" => Kind::Boolean,
             "COMBO" => Kind::Combo(strings(&opts["options"])),
+            "COMFY_DYNAMICCOMBO_V3" => Kind::DynCombo(
+                opts["options"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(|o| (o["key"].as_str().unwrap_or_default().to_owned(), parse_inputs(&o["inputs"], &Value::Null)))
+                    .collect(),
+            ),
             t => Kind::Socket(t.to_owned()),
         },
         _ => Kind::Socket("*".into()),
@@ -174,7 +229,8 @@ mod tests {
                "sampler_name":[["euler","ddim"],{}]},"optional":{"img":["COMBO",{"options":["a.png"]}]}},
                "input_order":{"required":["model","seed","sampler_name"],"optional":["img"]},
                "output":["LATENT"],"output_name":["LATENT"],"name":"KSampler","display_name":"KSampler",
-               "category":"sampling","python_module":"nodes","output_node":false}}"#,
+               "category":"sampling","python_module":"nodes","output_node":false},
+               "Loader":{"input":{},"output":["MODEL"],"category":"loaders"}}"#,
         )
         .unwrap();
         let r = Registry::from_object_info(&v);

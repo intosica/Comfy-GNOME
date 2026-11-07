@@ -4,7 +4,9 @@
 
 mod api;
 mod backend;
+mod prompt;
 mod registry;
+mod workflow;
 mod canvas;
 mod splash;
 mod workspace;

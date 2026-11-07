@@ -12,7 +12,7 @@ adw = { version = "0.8", package = "libadwaita", features = ["v1_5"] }
 async-channel = "2"
 gtk = { version = "0.10", package = "gtk4", features = ["v4_14"] }
 libc = "0.2"
-serde_json = "1.0.154"
+serde_json = { version = "1.0.154", features = ["preserve_order"] }
 tungstenite = { version = "0.24", default-features = false, features = ["handshake"] }
 ureq = { version = "2", default-features = false, features = ["json"] }
 
