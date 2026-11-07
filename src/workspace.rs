@@ -87,12 +87,6 @@ fn danger(label: impl Into<String>, f: impl Fn() + 'static) -> Entry {
 }
 
 /// Plain closure action, reachable from menus as `wb.<name>`.
-fn add_action(group: &gio::SimpleActionGroup, name: &str, f: impl Fn() + 'static) {
-    let a = gio::SimpleAction::new(name, None);
-    a.connect_activate(move |_, _| f());
-    group.add_action(&a);
-}
-
 fn placeholder(icon: &str, title: &str, desc: &str) -> adw::StatusPage {
     adw::StatusPage::builder()
         .icon_name(icon)
