@@ -102,7 +102,12 @@ browser. "Fit" and "Reset" buttons cover the rest.
 - Widget values are drawn as read-only pills from `prompt::widget_map`, i.e. exactly the
   values that would be sent to the backend.
 
-### Session 3 additions: documents, tabs, editing, saving
+### Images
+`gdk::Texture::from_bytes` decodes PNG/JPEG through gdk-pixbuf, so previews need no `image` crate and no temp
+files; the bytes come either from WS binary frames (type 1, 8-byte header dropped) or from `/view` after an
+`executed` event (which the server only sends to the client that queued the prompt).
+
+## Session 3 additions: documents, tabs, editing, saving
 
 ```
 src/workspace.rs  Workspace { docs: Vec<DocRef>, tabs: adw::TabView, ... }
@@ -144,6 +149,47 @@ mantissas and would rewrite every node position), and `write_graph` never invent
 with `get_mut`, an output's `links` stay sorted ascending, and `links: null` stays `null` instead of becoming `[]`.
 Verified by saving untouched copies of a 29-node workflow and of one with a subgraph definition: both compare equal.
 
+## Session 4 additions: selection, manipulation, menus
+
+**Selection lives in the canvas** (`State.sel: HashSet<String>` of node ids), so it survives re-renders and is what
+every group operation acts on. Rules, mirroring litegraph: shift-click toggles membership; a plain click inside the
+current selection keeps it (so a multi-node drag does not collapse to one node); a plain click outside selects just
+that node; `Ctrl`+drag on empty canvas rubber-bands; `Ctrl+A` selects all; clicking empty canvas or a group header
+clears it.
+
+`enum Drag` names the gesture that owns the pointer:
+
+| variant | started by | end effect |
+|---|---|---|
+| `Nodes { idx, grab, start }` | left-drag on a node | move every selected node by the same delta; `start` enables a cheap change test |
+| `Group { idx, start, nodes, grab }` | left-drag in a group's **title bar** | move the group rect and every node whose **centre** is inside it |
+| `Band { start, end }` | `Ctrl`+left-drag on empty canvas | select all intersecting node rects |
+| `Link(LinkDrag)` | left-drag on a socket | wire creation / unplug (see session 3 table) |
+| `Pan { start_offset }` | left- or middle-drag on empty canvas | translate the viewport |
+
+**Context menus are plain `gtk::Popover`s full of `gtk::Button`s**, built per invocation as
+`Entry::Item { label, danger, f }` / `Line` / `Swatches(vec)`. This is deliberate: `GtkPopoverMenu` + `gio::Menu`
+with `win.*`-style actions silently never activated under this build (items highlighted, the popover closed, no
+warning), while buttons work. Menu entries map 1:1 onto model operations, so keyboard shortcuts (`Ctrl+B`, `Delete`,
+…) and the menu share one code path (`with_selection` → `bypass`/`mute`/`delete_nodes`/…).
+
+**Model-only data must be written by the editor, not read from the file.** `write_graph` reconciles three lists that
+the loaded JSON cannot know about: (1) nodes — entries whose id vanished from the model are dropped and model nodes
+without a JSON entry are appended via `fresh_node_json` (which reproduces the frontend's own node shape: `properties
+{"Node name for S&R"}`, `outputs[].slot_index`, `flags`, `mode`, and `"widget": {"name": …}` on widget-shadowed
+inputs); (2) groups — rebuilt from `Canvas`/model rects with ids preserved by index; (3) per-node `mode`, `title` and
+`flags.collapsed`. Without this, "create a node, save" and "add a group, save" both wrote nothing (found by testing).
+
+**Bypass rendering.** A `mode: 4` node is painted magenta and each *connected* input gains a dashed white line to the
+first output whose type is `compatible()`, falling back to output 0 — the same "passthrough" the web frontend draws,
+so a bypassed node still reads as part of the graph. The dashes are drawn **after** node bodies (drawing them before
+means the body paints over them). Muted (`mode: 2`) nodes are drawn at 40 % alpha.
+
+**Subgraph boundary pseudo-nodes** get ids that do not exist in the model, so editing them is filtered out in
+`with_selection` and their right-click falls back to the canvas menu; double-clicking a subgraph *instance* pushes its
+`uuid` onto `Doc.path` and re-renders from `definitions.subgraphs`.
+
+
 **Link colours** come from the litegraph palette (`LGraphCanvas.link_type_colors`, ported to
 `canvas::type_color`): MODEL `#b39ddb`, CLIP `#ffd500`, VAE `#ff6e6e`, CONDITIONING `#ffa931`,
 LATENT `#ff9cf9`, IMAGE `#64b5f6`, MASK `#81c784`, and a hashed fallback for unknown types.
@@ -152,12 +198,7 @@ LATENT `#ff9cf9`, IMAGE `#64b5f6`, MASK `#81c784`, and a hashed fallback for unk
 the widget is allocated. `set_view` (saved `extra.ds`) clears that flag, so a restored viewport
 always wins and auto-fit only happens for graphs without one.
 
-### Images
-`gdk::Texture::from_bytes` decodes PNG/JPEG through gdk-pixbuf, so previews need no `image` crate and no temp
-files; the bytes come either from WS binary frames (type 1, 8-byte header dropped) or from `/view` after an
-`executed` event (which the server only sends to the client that queued the prompt).
-
-### Prompt conversion invariants (learned from real captures)
+## Prompt conversion invariants (learned from real captures)
 1. Node ids are strings; subgraph execution ids are `<host path>:<node id>`.
 2. A subgraph instance is not emitted; its inner nodes are, using the host's prefix.
 3. Links from `-10` continue at the host's input with the same **name** (not index); an

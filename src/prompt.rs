@@ -185,6 +185,37 @@ fn extra_slots(i: &Input) -> usize {
     control as usize + upload as usize
 }
 
+/// `widgets_values` for a freshly created node: each widget's default followed by its
+/// `control_after_generate` ("randomize") / upload slots, dynamic-combo children included.
+pub fn default_widgets(def: &NodeDef) -> Vec<Value> {
+    let mut out = Vec::new();
+    push_defaults(&def.inputs, &mut out);
+    out
+}
+
+fn push_defaults(inputs: &[Input], out: &mut Vec<Value>) {
+    for i in inputs.iter().filter(|i| i.is_widget()) {
+        if let Kind::DynCombo(opts) = &i.kind {
+            if let Some((name, children)) = opts.first() {
+                out.push(Value::from(name.clone()));
+                push_defaults(children, out);
+                continue;
+            }
+        }
+        out.push(match &i.kind {
+            Kind::Int => Value::from(i.opts["default"].as_i64().unwrap_or(0)),
+            Kind::Float => Value::from(i.opts["default"].as_f64().unwrap_or(0.0)),
+            Kind::String => Value::from(i.opts["default"].as_str().unwrap_or("")),
+            Kind::Boolean => Value::from(i.opts["default"].as_bool().unwrap_or(false)),
+            Kind::Combo(opts) => opts.first().map_or(Value::Null, |s| Value::from(s.clone())),
+            _ => i.opts.get("default").cloned().unwrap_or(Value::Null),
+        });
+        for _ in 0..extra_slots(i) {
+            out.push(Value::from("randomize"));
+        }
+    }
+}
+
 /// Map positional `widgets_values` onto widget names (`"parent.child"` for dynamic
 /// combo children, which follow their combo).
 pub fn map_widgets<'v>(inputs: &[Input], vals: &mut impl Iterator<Item = &'v Value>, prefix: &str, out: &mut Map<String, Value>) {

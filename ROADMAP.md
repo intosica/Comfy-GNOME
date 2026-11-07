@@ -25,7 +25,7 @@ Each phase ends with a runnable build, updated `AGENT-HANDOFF.md`, and screensho
 - [x] Preview panel (bottom tab): WS binary preview frames + `executed.output.images` via `/view`
 - [ ] Gallery/history of past outputs (only the newest image is shown today)
 
-## Phase 3 — Real Graph Editing
+## Phase 3 — Real Graph Editing (essentially done, session 4)
 - [x] Load ComfyUI workflow JSON (UI format, litegraph `nodes`/`links`/`groups`)
 - [x] Workflow **tabs**: one `adw::TabView` per open workflow, switch/close (`Ctrl+W`), unsaved marker `•`
 - [x] Save (`Ctrl+S`) via `POST /api/userdata/<percent-encoded file>`; positions, wiring, `extra.ds` viewport
@@ -36,9 +36,19 @@ Each phase ends with a runnable build, updated `AGENT-HANDOFF.md`, and screensho
 - [x] Link editing: drag from an output/input to wire, drag off an input to unplug, **shift+drag** an output to
       de-anchor the far end (wire keeps hanging from its input, drop it on another output to re-source it), hover ring
       on type-compatible targets only
+- [x] Node context menu: Bypass / Mute / Collapse / Edit Title / Duplicate / Delete, plus "Open Subgraph" on
+      instances; empty-space menu: Add Node…, Add Group, Select All, Fit, Reset
+- [x] Behaviour **bypass** (`mode: 4`) and **mute** (`mode: 2`): magenta / dimmed node, dashed passthrough drawn
+      from each connected input to the first type-compatible output, persisted on save
+- [x] Add Node dialog: search across all `/object_info` types, new nodes get registry defaults (incl.
+      `control_after_generate`) and serialise like the web frontend (`properties`, `slot_index`, widget shadows)
+- [x] Multi-select: shift-click, rubber band (`Ctrl`+drag), `Ctrl+A`, group drag of the selection; `Delete`,
+      `Ctrl+D` duplicate, `Ctrl+B` bypass, `Ctrl+M` mute, `Ctrl+G` group selection
+- [x] Groups: create from selection or at a point, drag by the title bar (moves contained nodes), rename,
+      8-colour picker, fit to group, delete — all persisted to `groups[]`
+- [x] Node **collapse** (`flags.collapsed`), custom titles, all saved back
 - [ ] Undo/redo history
-- [ ] Node add menu/search (from `/object_info`), delete, multi-select, rubber-band, copy/paste
-- [ ] Node library sidebar tab (search `/object_info`, insert nodes)
+- [ ] Copy/paste of nodes, node library sidebar tab (search `/object_info`, drag to insert)
 - [ ] Pango text rendering, spatial index for hit-testing, viewport culling
 
 ## Phase 4 — Widgets & Execution
@@ -49,7 +59,7 @@ Each phase ends with a runnable build, updated `AGENT-HANDOFF.md`, and screensho
 
 ## Phase 5 — Performance & Polish
 - [ ] GPU path (`gsk` render nodes or snapshot cache per node) if cairo profiling demands it; target 60 fps @ 500 nodes on X11
-- [ ] Groups, reroutes, minimap, keyboard shortcuts, preferences (persist splash config via GSettings/keyfile)
+- [ ] Reroutes, minimap, preferences (persist splash config via GSettings/keyfile)
 - [ ] Custom-node frontend extensions: document unsupported cases, graceful fallbacks
 
 ## Phase 6 — Packaging & Release

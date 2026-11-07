@@ -124,11 +124,14 @@ pub fn scene(
 /// Write the edited scene back into `graph` (positions + wiring), keeping link ids
 /// of untouched wires. Links touching the subgraph boundary (-10 / -20) survive,
 /// since those pseudo-nodes are not in `graph.nodes`.
-pub fn sync(graph: &mut Graph, nodes: &[Node], links: &[Link]) {
+pub fn sync(graph: &mut Graph, nodes: &[Node], links: &[Link], groups: &[Group]) {
     for n in nodes {
         if let Some(w) = graph.nodes.iter_mut().find(|w| w.id == n.id) {
             w.pos = n.pos;
         }
+    }
+    for (g, s) in graph.groups.iter_mut().zip(groups) {
+        g.bounding = s.rect;
     }
     let mut slot_of: HashMap<String, usize> = HashMap::with_capacity(graph.nodes.len());
     for (i, n) in graph.nodes.iter().enumerate() {
@@ -238,7 +241,7 @@ mod tests {
         ];
         nodes[1].pos = (400.0, 50.0);
         let mut links = vec![Link { from: 0, from_slot: 0, to: 1, to_slot: 0 }];
-        sync(&mut w.root, &nodes, &links);
+        sync(&mut w.root, &nodes, &links, &[]);
         assert_eq!(w.root.nodes[1].pos, (400.0, 50.0));
         assert_eq!(w.root.links.len(), 1);
         assert_eq!(w.root.links[&7].target_id, "2"); // id kept for an unchanged endpoint pair
@@ -246,7 +249,7 @@ mod tests {
         assert_eq!(w.root.nodes[1].inputs[0].link, Some(7));
 
         links.clear();
-        sync(&mut w.root, &nodes, &links);;
+        sync(&mut w.root, &nodes, &links, &[]);;
         assert!(w.root.links.is_empty());
         assert_eq!(w.root.nodes[1].inputs[0].link, None);
         assert!(w.root.nodes[0].outputs[0].links.is_empty());
@@ -265,7 +268,7 @@ mod tests {
         }))
         .unwrap();
         let sg = w.subgraphs.get_mut("u1").unwrap();
-        sync(&mut sg.graph, &[], &[]);
+        sync(&mut sg.graph, &[], &[], &[]);
         sync_io(sg);
         assert!(sg.inputs[0].link_ids.is_empty(), "stale boundary link should be dropped");
     }

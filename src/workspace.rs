@@ -59,6 +59,40 @@ fn row_title(row: &gtk::ListBoxRow) -> String {
     row.child().and_then(|c| c.downcast::<adw::ActionRow>().ok()).map(|r| r.title().to_string()).unwrap_or_default()
 }
 
+/// The graph the tab is currently showing (root or the drilled-into subgraph).
+fn graph_ref(d: &Doc) -> &workflow::Graph {
+    d.path.last().and_then(|p| d.wf.subgraphs.get(p)).map(|s| &s.graph).unwrap_or(&d.wf.root)
+}
+
+fn graph_mut(d: &mut Doc) -> &mut workflow::Graph {
+    match d.path.last().cloned() {
+        Some(p) => &mut d.wf.subgraphs.get_mut(&p).expect("drilled subgraph vanished").graph,
+        None => &mut d.wf.root,
+    }
+}
+
+/// One row of a context menu: a button, a separator, or a row of colour swatches.
+enum Entry {
+    Item { label: String, danger: bool, f: Box<dyn Fn()> },
+    Line,
+    Swatches(Vec<(u32, Box<dyn Fn()>)>),
+}
+
+fn item(label: impl Into<String>, f: impl Fn() + 'static) -> Entry {
+    Entry::Item { label: label.into(), danger: false, f: Box::new(f) }
+}
+
+fn danger(label: impl Into<String>, f: impl Fn() + 'static) -> Entry {
+    Entry::Item { label: label.into(), danger: true, f: Box::new(f) }
+}
+
+/// Plain closure action, reachable from menus as `wb.<name>`.
+fn add_action(group: &gio::SimpleActionGroup, name: &str, f: impl Fn() + 'static) {
+    let a = gio::SimpleAction::new(name, None);
+    a.connect_activate(move |_, _| f());
+    group.add_action(&a);
+}
+
 fn placeholder(icon: &str, title: &str, desc: &str) -> adw::StatusPage {
     adw::StatusPage::builder()
         .icon_name(icon)
@@ -299,6 +333,56 @@ impl Workspace {
                     gtk::glib::Propagation::Stop
                 })),
             ));
+            let me = ws.clone();
+            keys.add_shortcut(gtk::Shortcut::new(
+                gtk::ShortcutTrigger::parse_string("Delete"),
+                Some(gtk::CallbackAction::new(move |_, _| {
+                    me.with_selection(|ws, d, ids| ws.delete_nodes(d, ids));
+                    gtk::glib::Propagation::Stop
+                })),
+            ));
+            let me = ws.clone();
+            keys.add_shortcut(gtk::Shortcut::new(
+                gtk::ShortcutTrigger::parse_string("<Control>b"),
+                Some(gtk::CallbackAction::new(move |_, _| {
+                    me.with_selection(|ws, d, ids| ws.bypass(d, ids));
+                    gtk::glib::Propagation::Stop
+                })),
+            ));
+            let me = ws.clone();
+            keys.add_shortcut(gtk::Shortcut::new(
+                gtk::ShortcutTrigger::parse_string("<Control>m"),
+                Some(gtk::CallbackAction::new(move |_, _| {
+                    me.with_selection(|ws, d, ids| ws.mute(d, ids));
+                    gtk::glib::Propagation::Stop
+                })),
+            ));
+            let me = ws.clone();
+            keys.add_shortcut(gtk::Shortcut::new(
+                gtk::ShortcutTrigger::parse_string("<Control>d"),
+                Some(gtk::CallbackAction::new(move |_, _| {
+                    me.with_selection(|ws, d, ids| ws.duplicate_nodes(d, ids));
+                    gtk::glib::Propagation::Stop
+                })),
+            ));
+            let me = ws.clone();
+            keys.add_shortcut(gtk::Shortcut::new(
+                gtk::ShortcutTrigger::parse_string("<Control>a"),
+                Some(gtk::CallbackAction::new(move |_, _| {
+                    if let Some(d) = me.active_doc() {
+                        me.select_all(&d);
+                    }
+                    gtk::glib::Propagation::Stop
+                })),
+            ));
+            let me = ws.clone();
+            keys.add_shortcut(gtk::Shortcut::new(
+                gtk::ShortcutTrigger::parse_string("<Control>g"),
+                Some(gtk::CallbackAction::new(move |_, _| {
+                    me.with_selection(|ws, d, ids| ws.add_group(d, ids, None));
+                    gtk::glib::Propagation::Stop
+                })),
+            ));
             ws.root.add_controller(keys);
         }
         ws.setup_navigation();
@@ -411,12 +495,12 @@ impl Workspace {
             let d = doc.borrow();
             (d.canvas.clone(), d.path.clone())
         };
-        let (nodes, links, _) = canvas.scene();
+        let (nodes, links, groups) = canvas.scene();
         let (zoom, off) = canvas.view();
         let mut d = doc.borrow_mut();
         match path.last() {
             None => {
-                graph_view::sync(&mut d.wf.root, &nodes, &links);
+                graph_view::sync(&mut d.wf.root, &nodes, &links, &groups);
                 // Persist the viewport like the web frontend (`extra.ds`).
                 let ds = serde_json::json!({"scale": zoom, "offset": [off.0, off.1]});
                 if let Some(extra) = d.wf.raw.get_mut("extra").and_then(|e| e.as_object_mut()) {
@@ -425,7 +509,7 @@ impl Workspace {
             }
             Some(p) => {
                 if let Some(sg) = d.wf.subgraphs.get_mut(p) {
-                    graph_view::sync(&mut sg.graph, &nodes, &links);
+                    graph_view::sync(&mut sg.graph, &nodes, &links, &groups);
                     graph_view::sync_io(sg);
                 }
             }
@@ -653,11 +737,16 @@ impl Workspace {
                 Ok(w) => w,
                 Err(e) => return me.append_log(&format!("[workflow] {file}: {e}")),
             };
+            // Log the saved viewport: test harnesses need it to turn node positions
+            // in the file into screen coordinates.
+            let ds = &wf.raw["extra"]["ds"];
             me.append_log(&format!(
-                "Opened {file}: {} nodes, {} links, {} subgraphs",
+                "Opened {file}: {} nodes, {} links, {} subgraphs [ds {} {}]",
                 wf.root.nodes.len(),
                 wf.root.links.len(),
-                wf.subgraphs.len()
+                wf.subgraphs.len(),
+                ds["scale"],
+                ds["offset"]
             ));
             me.open_workflow(file, wf);
         });
@@ -690,6 +779,14 @@ impl Workspace {
             canvas.connect_activate(move |id| {
                 if let Some(d) = weak.upgrade() {
                     me.open_node(&d, id);
+                }
+            });
+            // Right click: node / group / canvas menu.
+            let me = self.clone();
+            let weak = Rc::downgrade(&doc);
+            canvas.connect_context(move |x, y, hit| {
+                if let Some(d) = weak.upgrade() {
+                    me.context_menu(&d, x, y, hit);
                 }
             });
             // Any model change marks the tab dirty (and keeps the model current).
@@ -761,6 +858,571 @@ impl Workspace {
             self.render_doc(doc);
             doc.borrow().canvas.set_view(view.0, view.1);
         }
+    }
+
+    /// Run `f` with the active tab and its current selection (no-op when empty).
+    fn with_selection(&self, f: impl Fn(&Self, &DocRef, &[String])) {
+        let Some(doc) = self.active_doc() else { return };
+        let mut ids = doc.borrow().canvas.selected();
+        // Subgraph boundary pseudo-nodes ("Inputs"/"Outputs") are view-only: they are not
+        // in the model, so editing them must be a no-op rather than a broken menu.
+        {
+            let d = doc.borrow();
+            let g = graph_ref(&d);
+            ids.retain(|id| g.nodes.iter().any(|n| &n.id == id));
+        }
+        if ids.is_empty() {
+            self.append_log("nothing selected");
+            return;
+        }
+        f(self, &doc, &ids);
+    }
+
+    /// Re-render from the model, keeping the viewport where it is.
+    fn refresh_doc(&self, doc: &DocRef) {
+        let view = doc.borrow().canvas.view();
+        self.render_doc(doc);
+        doc.borrow().canvas.set_view(view.0, view.1);
+        // Keep keyboard shortcuts (Ctrl+S, Delete…) alive after a dialog or menu closes.
+        doc.borrow().canvas.area.grab_focus();
+    }
+
+    fn edited(&self, doc: &DocRef) {
+        self.refresh_doc(doc);
+        self.set_dirty(doc, true);
+    }
+
+    fn is_bypassed(&self, doc: &DocRef, ids: &[String]) -> bool {
+        let d = doc.borrow();
+        graph_ref(&d).nodes.iter().any(|n| ids.contains(&n.id) && n.mode == workflow::MODE_BYPASS)
+    }
+
+    /// Toggle bypass (mode 4): the node is skipped when the prompt is built and its
+    /// input is passed through to a matching output.
+    fn bypass(&self, doc: &DocRef, ids: &[String]) {
+        let off = self.is_bypassed(doc, ids);
+        {
+            let mut d = doc.borrow_mut();
+            for n in graph_mut(&mut d).nodes.iter_mut().filter(|n| ids.contains(&n.id)) {
+                n.mode = if off { 0 } else { workflow::MODE_BYPASS };
+            }
+        }
+        self.edited(doc);
+    }
+
+    /// Toggle mute (mode 2): the node does not execute and its outputs go dark.
+    fn mute(&self, doc: &DocRef, ids: &[String]) {
+        let off = {
+            let d = doc.borrow();
+            graph_ref(&d).nodes.iter().any(|n| ids.contains(&n.id) && n.mode == workflow::MODE_NEVER)
+        };
+        {
+            let mut d = doc.borrow_mut();
+            for n in graph_mut(&mut d).nodes.iter_mut().filter(|n| ids.contains(&n.id)) {
+                n.mode = if off { 0 } else { workflow::MODE_NEVER };
+            }
+        }
+        self.edited(doc);
+    }
+
+    fn collapse(&self, doc: &DocRef, ids: &[String]) {
+        let off = {
+            let d = doc.borrow();
+            graph_ref(&d).nodes.iter().any(|n| ids.contains(&n.id) && n.collapsed)
+        };
+        {
+            let mut d = doc.borrow_mut();
+            for n in graph_mut(&mut d).nodes.iter_mut().filter(|n| ids.contains(&n.id)) {
+                n.collapsed = !off;
+            }
+        }
+        self.edited(doc);
+    }
+
+    fn set_title(&self, doc: &DocRef, id: &str, title: String) {
+        {
+            let mut d = doc.borrow_mut();
+            if let Some(n) = graph_mut(&mut d).nodes.iter_mut().find(|n| n.id == id) {
+                n.title = if title.trim().is_empty() { None } else { Some(title) };
+            }
+        }
+        self.edited(doc);
+    }
+
+    fn delete_nodes(&self, doc: &DocRef, ids: &[String]) {
+        {
+            let mut d = doc.borrow_mut();
+            let g = graph_mut(&mut d);
+            g.nodes.retain(|n| !ids.contains(&n.id));
+            g.links.retain(|_, l| !ids.contains(&l.origin_id) && !ids.contains(&l.target_id));
+        }
+        doc.borrow().canvas.select(&[]);
+        self.edited(doc);
+    }
+
+    fn duplicate_nodes(&self, doc: &DocRef, ids: &[String]) {
+        let mut fresh = Vec::new();
+        {
+            let mut d = doc.borrow_mut();
+            let g = graph_mut(&mut d);
+            let originals: Vec<workflow::Node> = g.nodes.iter().filter(|n| ids.contains(&n.id)).cloned().collect();
+            for mut n in originals {
+                n.id = g.next_id();
+                n.pos = (n.pos.0 + 30.0, n.pos.1 + 30.0);
+                for i in &mut n.inputs {
+                    i.link = None;
+                }
+                for o in &mut n.outputs {
+                    o.links.clear();
+                }
+                fresh.push(n.id.clone());
+                g.nodes.push(n);
+            }
+        }
+        self.refresh_doc(doc);
+        doc.borrow().canvas.select(&fresh);
+        self.set_dirty(doc, true);
+    }
+
+    /// Group the selection (`at` = fixed rect for the canvas menu, else fit the nodes).
+    fn add_group(&self, doc: &DocRef, ids: &[String], at: Option<(f64, f64)>) {
+        let rect = {
+            let d = doc.borrow();
+            let sel: Vec<&workflow::Node> = graph_ref(&d).nodes.iter().filter(|n| ids.contains(&n.id)).collect();
+            if let Some(p) = at {
+                [p.0, p.1, 420.0, 260.0]
+            } else if sel.is_empty() {
+                [0.0, 0.0, 420.0, 260.0]
+            } else {
+                let mut b = [f64::MAX, f64::MAX, f64::MIN, f64::MIN];
+                for n in sel {
+                    b[0] = b[0].min(n.pos.0);
+                    b[1] = b[1].min(n.pos.1 - 30.0);
+                    b[2] = b[2].max(n.pos.0 + n.size.0);
+                    b[3] = b[3].max(n.pos.1 + n.size.1);
+                }
+                [b[0] - 20.0, b[1] - 45.0, b[2] - b[0] + 40.0, b[3] - b[1] + 70.0]
+            }
+        };
+        {
+            let mut d = doc.borrow_mut();
+            let g = graph_mut(&mut d);
+            let title = format!("Group {}", g.groups.len() + 1);
+            g.groups.push(workflow::Group { title, bounding: rect, color: Some("#3f789e".into()) });
+        }
+        self.edited(doc);
+    }
+
+    fn rename_group(&self, doc: &DocRef, gi: usize, title: String) {
+        {
+            let mut d = doc.borrow_mut();
+            if let Some(g) = graph_mut(&mut d).groups.get_mut(gi) {
+                g.title = title;
+            }
+        }
+        self.edited(doc);
+    }
+
+    fn set_group_color(&self, doc: &DocRef, gi: usize, color: &str) {
+        {
+            let mut d = doc.borrow_mut();
+            if let Some(g) = graph_mut(&mut d).groups.get_mut(gi) {
+                g.color = Some(color.to_string());
+            }
+        }
+        self.edited(doc);
+    }
+
+    fn delete_group(&self, doc: &DocRef, gi: usize) {
+        {
+            let mut d = doc.borrow_mut();
+            let g = graph_mut(&mut d);
+            if gi < g.groups.len() {
+                g.groups.remove(gi);
+            }
+        }
+        self.edited(doc);
+    }
+
+    fn fit_rect(&self, canvas: &canvas::Canvas, r: [f64; 4]) {
+        let (w, h) = (canvas.area.width() as f64, canvas.area.height() as f64);
+        if w < 10.0 || h < 10.0 || r[2] <= 0.0 || r[3] <= 0.0 {
+            return;
+        }
+        let m = 40.0;
+        let zoom = ((w - 2.0 * m) / r[2]).min((h - 2.0 * m) / r[3]).clamp(0.1, 1.0);
+        canvas.set_view(zoom, (w / 2.0 - (r[0] + r[2] / 2.0) * zoom, h / 2.0 - (r[1] + r[3] / 2.0) * zoom));
+    }
+
+    fn fit_group(&self, doc: &DocRef, gi: usize) {
+        let (canvas, rect) = {
+            let d = doc.borrow();
+            (d.canvas.clone(), graph_ref(&d).groups.get(gi).map(|g| g.bounding))
+        };
+        if let Some(r) = rect {
+            self.fit_rect(&canvas, r);
+        }
+    }
+
+    fn select_all(&self, doc: &DocRef) {
+        let ids: Vec<String> = {
+            let d = doc.borrow();
+            graph_ref(&d).nodes.iter().map(|n| n.id.clone()).collect()
+        };
+        doc.borrow().canvas.select(&ids);
+        self.append_log(&format!("selected {} nodes", ids.len()));
+    }
+
+    /// Create a node from `/object_info` defaults at a canvas position.
+    fn create_node(&self, doc: &DocRef, name: &str, pos: (f64, f64)) {
+        let Some(def) = self.registry.borrow().get(name).cloned() else {
+            self.append_log(&format!("unknown node type {name}"));
+            return;
+        };
+        let id = {
+            let mut d = doc.borrow_mut();
+            let g = graph_mut(&mut d);
+            let id = g.next_id();
+            g.nodes.push(workflow::Node::from_def(&def, id.clone(), pos));
+            id
+        };
+        self.refresh_doc(doc);
+        doc.borrow().canvas.select(&[id]);
+        self.set_dirty(doc, true);
+        self.append_log(&format!("added {} at ({:.0}, {:.0})", def.display_name, pos.0, pos.1));
+    }
+
+    /// Open a popover menu at widget coordinates. Plain buttons, not GMenuModel:
+    /// menu-item action resolution through widget action groups proved unreliable here.
+    fn show_menu(&self, area: &gtk::DrawingArea, x: f64, y: f64, entries: Vec<Entry>) {
+        let pop = gtk::Popover::new();
+        pop.set_has_arrow(false);
+        pop.set_position(gtk::PositionType::Bottom);
+        let bx = gtk::Box::new(gtk::Orientation::Vertical, 2);
+        for e in entries {
+            match e {
+                Entry::Item { label, danger, f } => {
+                    let lb = gtk::Label::builder().label(&label).xalign(0.0).build();
+                    if danger {
+                        lb.add_css_class("error");
+                    }
+                    let row = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+                    row.set_margin_start(10);
+                    row.set_margin_end(18);
+                    row.append(&lb);
+                    let b = gtk::Button::builder().child(&row).build();
+                    b.add_css_class("flat");
+                    b.set_halign(gtk::Align::Fill);
+                    let p = pop.downgrade();
+                    b.connect_clicked(move |_| {
+                        if let Some(p) = p.upgrade() {
+                            p.popdown();
+                        }
+                        f();
+                    });
+                    bx.append(&b);
+                }
+                Entry::Line => {
+                    let sep = gtk::Separator::new(gtk::Orientation::Horizontal);
+                    sep.set_margin_top(3);
+                    sep.set_margin_bottom(3);
+                    bx.append(&sep);
+                }
+                Entry::Swatches(list) => {
+                    let row = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+                    row.set_margin_start(10);
+                    row.set_margin_top(4);
+                    row.set_margin_bottom(4);
+                    for (hex, f) in list {
+                        let da = gtk::DrawingArea::new();
+                        da.set_content_width(20);
+                        da.set_content_height(20);
+                        da.set_draw_func(move |_, cr, w, h| {
+                            cr.set_source_rgb(
+                                ((hex >> 16) & 0xff) as f64 / 255.0,
+                                ((hex >> 8) & 0xff) as f64 / 255.0,
+                                (hex & 0xff) as f64 / 255.0,
+                            );
+                            cr.rectangle(0.0, 0.0, w as f64, h as f64);
+                            cr.fill().ok();
+                        });
+                        let b = gtk::Button::builder().child(&da).build();
+                        b.add_css_class("flat");
+                        let p = pop.downgrade();
+                        b.connect_clicked(move |_| {
+                            if let Some(p) = p.upgrade() {
+                                p.popdown();
+                            }
+                            f();
+                        });
+                        row.append(&b);
+                    }
+                    bx.append(&row);
+                }
+            }
+        }
+        bx.set_margin_top(6);
+        bx.set_margin_bottom(6);
+        bx.set_margin_start(6);
+        bx.set_margin_end(6);
+        pop.set_child(Some(&bx));
+        pop.set_parent(area);
+        pop.set_pointing_to(Some(&gtk::gdk::Rectangle::new(x as i32, y as i32, 1, 1)));
+        let p = pop.clone();
+        pop.connect_closed(move |_| p.unparent());
+        pop.popup();
+    }
+
+    /// Context menu for whatever the right click landed on.
+    fn context_menu(&self, doc: &DocRef, x: f64, y: f64, hit: canvas::Hit) {
+        // Pseudo-nodes have no model counterpart: fall back to the canvas menu.
+        let hit = match &hit {
+            canvas::Hit::Node(id) if !graph_ref(&doc.borrow()).nodes.iter().any(|n| &n.id == id) => canvas::Hit::Empty,
+            _ => hit,
+        };
+        let area = doc.borrow().canvas.area.clone();
+        let ids = doc.borrow().canvas.selected();
+        let mut entries: Vec<Entry> = Vec::new();
+        match hit {
+            canvas::Hit::Node(id) => {
+                let (mode, collapsed, title, is_sub) = {
+                    let d = doc.borrow();
+                    match graph_ref(&d).node(&id) {
+                        Some(n) => (n.mode, n.collapsed, n.title.clone().unwrap_or_default(), d.wf.subgraphs.contains_key(&n.ty)),
+                        None => return,
+                    }
+                };
+                let bypassed = mode == workflow::MODE_BYPASS;
+                let muted = mode == workflow::MODE_NEVER;
+                {
+                    let (me, d, i) = (self.clone(), doc.clone(), ids.clone());
+                    entries.push(item(
+                        if bypassed { "Un-Bypass Node" } else { "Bypass Node (Ctrl+B)" },
+                        move || me.bypass(&d, &i),
+                    ));
+                }
+                {
+                    let (me, d, i) = (self.clone(), doc.clone(), ids.clone());
+                    entries.push(item(
+                        if muted { "Un-Mute Node" } else { "Mute Node (Ctrl+M)" },
+                        move || me.mute(&d, &i),
+                    ));
+                }
+                {
+                    let (me, d, i) = (self.clone(), doc.clone(), ids.clone());
+                    entries.push(item(if collapsed { "Expand Node" } else { "Collapse Node" }, move || me.collapse(&d, &i)));
+                }
+                entries.push(Entry::Line);
+                {
+                    let (me, d) = (self.clone(), doc.clone());
+                    let (node, initial) = (id.clone(), title.clone());
+                    entries.push(item("Edit Title…", move || {
+                        let (me2, d2, node2, initial2) = (me.clone(), d.clone(), node.clone(), initial.clone());
+                        me.text_dialog("Node Title", &initial2, move |t| me2.set_title(&d2, &node2, t));
+                    }));
+                }
+                if is_sub {
+                    let (me, d) = (self.clone(), doc.clone());
+                    let node = id.clone();
+                    entries.push(item("Open Subgraph", move || me.open_node(&d, &node)));
+                }
+                {
+                    let (me, d, i) = (self.clone(), doc.clone(), ids.clone());
+                    entries.push(item("Duplicate Node", move || me.duplicate_nodes(&d, &i)));
+                }
+                {
+                    let (me, d, i) = (self.clone(), doc.clone(), ids.clone());
+                    entries.push(danger("Delete Node", move || me.delete_nodes(&d, &i)));
+                }
+            }
+            canvas::Hit::Group(gi) => {
+                let title = {
+                    let d = doc.borrow();
+                    graph_ref(&d).groups.get(gi).map(|g| g.title.clone()).unwrap_or_default()
+                };
+                {
+                    let (me, d) = (self.clone(), doc.clone());
+                    let initial = title.clone();
+                    entries.push(item("Rename Group…", move || {
+                        let (me2, d2, initial2) = (me.clone(), d.clone(), initial.clone());
+                        me.text_dialog("Group Title", &initial2, move |t| me2.rename_group(&d2, gi, t));
+                    }));
+                }
+                entries.push(Entry::Swatches(
+                    [
+                        ("#3f789e", 0x3f789e),
+                        ("#ff6b6b", 0xff6b6b),
+                        ("#59b259", 0x59b259),
+                        ("#b39ddb", 0xb39ddb),
+                        ("#ffd500", 0xffd500),
+                        ("#59d0ff", 0x59d0ff),
+                        ("#ff8fb1", 0xff8fb1),
+                        ("#ffa931", 0xffa931),
+                    ]
+                    .into_iter()
+                    .map(|(hex, rgb)| {
+                        let (me, d) = (self.clone(), doc.clone());
+                        (rgb, Box::new(move || me.set_group_color(&d, gi, hex)) as Box<dyn Fn()>)
+                    })
+                    .collect(),
+                ));
+                {
+                    let (me, d) = (self.clone(), doc.clone());
+                    entries.push(item("Fit to Group", move || me.fit_group(&d, gi)));
+                }
+                {
+                    let (me, d) = (self.clone(), doc.clone());
+                    entries.push(danger("Delete Group", move || me.delete_group(&d, gi)));
+                }
+            }
+            canvas::Hit::Empty => {
+                let (zoom, off) = doc.borrow().canvas.view();
+                let pos = ((x - off.0) / zoom, (y - off.1) / zoom);
+                {
+                    let (me, d) = (self.clone(), doc.clone());
+                    entries.push(item("Add Node…", move || me.add_node_dialog(&d, pos)));
+                }
+                {
+                    let (me, d, i) = (self.clone(), doc.clone(), ids.clone());
+                    entries.push(item("Add Group", move || me.add_group(&d, &i, Some(pos))));
+                }
+                entries.push(Entry::Line);
+                {
+                    let (me, d) = (self.clone(), doc.clone());
+                    entries.push(item("Select All (Ctrl+A)", move || me.select_all(&d)));
+                }
+                {
+                    let d = doc.clone();
+                    entries.push(item("Fit View", move || d.borrow().canvas.fit_view()));
+                }
+                {
+                    let d = doc.clone();
+                    entries.push(item("Reset View", move || d.borrow().canvas.reset_view()));
+                }
+            }
+        }
+        self.show_menu(&area, x, y, entries);
+    }
+
+    /// One-button-per-result node search over `/object_info`.
+    fn add_node_dialog(&self, doc: &DocRef, pos: (f64, f64)) {
+        let Some(win) = self.root.root().and_downcast::<gtk::Window>() else { return };
+        let dlg = gtk::Window::builder()
+            .title("Add Node")
+            .transient_for(&win)
+            .modal(true)
+            .default_width(460)
+            .default_height(560)
+            .build();
+        let hb = gtk::HeaderBar::new();
+        dlg.set_titlebar(Some(&hb));
+        let search = gtk::SearchEntry::builder().placeholder_text("Search nodes…").margin_top(12).margin_start(12).margin_end(12).build();
+        let results = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        results.add_css_class("boxed-list");
+        let scrolled = gtk::ScrolledWindow::builder()
+            .child(&results)
+            .vexpand(true)
+            .margin_top(6)
+            .margin_bottom(12)
+            .margin_start(12)
+            .margin_end(12)
+            .build();
+        let bx = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        bx.append(&search);
+        bx.append(&scrolled);
+        dlg.set_child(Some(&bx));
+
+        let fill: Rc<dyn Fn(&str)> = {
+            let me = self.clone();
+            let doc = doc.clone();
+            let dlg = dlg.clone();
+            let results = results.clone();
+            Rc::new(move |q: &str| {
+                while let Some(c) = results.first_child() {
+                    results.remove(&c);
+                }
+                let q = q.to_lowercase();
+                // 4775 rows would be slow to build; show the first matches only.
+                let mut shown = 0;
+                for def in me.registry.borrow().nodes.values() {
+                    if shown >= 60 {
+                        break;
+                    }
+                    if !q.is_empty() && !format!("{} {}", def.display_name, def.category).to_lowercase().contains(&q) {
+                        continue;
+                    }
+                    shown += 1;
+                    let name = gtk::Label::builder().label(&def.display_name).xalign(0.0).build();
+                    let cat = gtk::Label::builder().label(&def.category).xalign(0.0).build();
+                    cat.add_css_class("dim-label");
+                    cat.add_css_class("caption");
+                    let col = gtk::Box::new(gtk::Orientation::Vertical, 2);
+                    col.append(&name);
+                    col.append(&cat);
+                    let b = gtk::Button::builder().child(&col).build();
+                    b.add_css_class("flat");
+                    b.set_halign(gtk::Align::Fill);
+                    let me2 = me.clone();
+                    let doc2 = doc.clone();
+                    let dlg2 = dlg.clone();
+                    let ty = def.name.clone();
+                    b.connect_clicked(move |_| {
+                        me2.create_node(&doc2, &ty, pos);
+                        dlg2.close();
+                    });
+                    results.append(&b);
+                }
+                if shown == 0 {
+                    let l = gtk::Label::builder().label("No matching nodes").margin_top(18).build();
+                    l.add_css_class("dim-label");
+                    results.append(&l);
+                }
+            })
+        };
+        {
+            let fill = fill.clone();
+            search.connect_search_changed(move |e| fill(&e.text()));
+        }
+        fill("");
+        dlg.present();
+    }
+
+    fn text_dialog(&self, title: &str, initial: &str, on_ok: impl Fn(String) + 'static) {
+        let Some(win) = self.root.root().and_downcast::<gtk::Window>() else { return };
+        let dlg = gtk::Window::builder()
+            .title(title)
+            .transient_for(&win)
+            .modal(true)
+            .default_width(380)
+            .build();
+        let hb = gtk::HeaderBar::new();
+        dlg.set_titlebar(Some(&hb));
+        let entry = gtk::Entry::builder().text(initial).activates_default(true).build();
+        let cancel = gtk::Button::with_label("Cancel");
+        let ok = gtk::Button::with_label("OK");
+        ok.add_css_class("suggested-action");
+        let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        row.set_halign(gtk::Align::End);
+        row.append(&cancel);
+        row.append(&ok);
+        let bx = gtk::Box::new(gtk::Orientation::Vertical, 12);
+        bx.append(&entry);
+        bx.append(&row);
+        bx.set_margin_top(18);
+        bx.set_margin_bottom(18);
+        bx.set_margin_start(18);
+        bx.set_margin_end(18);
+        dlg.set_child(Some(&bx));
+        dlg.set_default_widget(Some(&ok));
+        let d = dlg.clone();
+        cancel.connect_clicked(move |_| d.close());
+        let d = dlg.clone();
+        let on_ok = Rc::new(on_ok);
+        ok.connect_clicked(move |_| {
+            on_ok(entry.text().to_string());
+            d.close();
+        });
+        dlg.present();
     }
 
     /// Stop a backend we launched (Drop kills its process group). Call on window close:

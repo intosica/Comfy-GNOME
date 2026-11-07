@@ -82,9 +82,50 @@ pub struct Graph {
     pub groups: Vec<Group>,
 }
 
+impl Node {
+    /// Fresh, unlinked node from a registry definition, laid out the way litegraph does:
+    /// every input (widget-backed or not) becomes a slot, widget inputs shadowed by a widget,
+    /// and `widgets_values` follows widget-input declaration order.
+    pub fn from_def(def: &crate::registry::NodeDef, id: String, pos: (f64, f64)) -> Node {
+        Node {
+            id,
+            ty: def.name.clone(),
+            title: None,
+            pos,
+            size: (240.0, 100.0),
+            mode: 0,
+            inputs: def
+                .inputs
+                .iter()
+                .map(|i| Input {
+                    name: i.name.clone(),
+                    ty: i.type_name().to_string(),
+                    link: None,
+                    widget: i.is_widget().then(|| i.name.clone()),
+                })
+                .collect(),
+            outputs: def
+                .outputs
+                .iter()
+                .map(|(ty, name)| Output { name: name.clone(), ty: ty.clone(), links: Vec::new() })
+                .collect(),
+            widgets_values: Value::Array(crate::prompt::default_widgets(def)),
+            color: None,
+            bgcolor: None,
+            collapsed: false,
+        }
+    }
+}
+
 impl Graph {
     pub fn node(&self, id: &str) -> Option<&Node> {
         self.nodes.iter().find(|n| n.id == id)
+    }
+
+    /// Next free node id (ComfyUI ids are numeric strings; max + 1 keeps them dense).
+    pub fn next_id(&self) -> String {
+        let max = self.nodes.iter().filter_map(|n| n.id.parse::<i64>().ok()).max().unwrap_or(0);
+        (max + 1).to_string()
     }
 }
 
@@ -174,9 +215,38 @@ impl Workflow {
 /// Splice `g` back into its raw node/link arrays. Subgraph definitions store links as
 /// objects, the root graph as 0.4 tuples.
 fn write_graph(s: &mut Value, g: &Graph, object_links: bool) {
+    {
+        // Reconcile the node list: drop nodes deleted in the editor, append new ones.
+        // Nodes created in the app exist only in the model, not in the loaded `raw`.
+        let known: std::collections::HashSet<String> = g.nodes.iter().map(|n| n.id.clone()).collect();
+        let arr = s["nodes"].as_array_mut();
+        if let Some(arr) = arr {
+            arr.retain(|nv| id_of(&nv["id"]).is_some_and(|id| known.contains(&id)));
+            let present: std::collections::HashSet<String> = arr.iter().filter_map(|nv| id_of(&nv["id"])).collect();
+            for n in g.nodes.iter().filter(|n| !present.contains(&n.id)) {
+                arr.push(fresh_node_json(n));
+            }
+        }
+    }
     for nv in s["nodes"].as_array_mut().into_iter().flatten() {
         let Some(n) = id_of(&nv["id"]).and_then(|id| g.nodes.iter().find(|n| n.id == id)) else { continue };
         nv["pos"] = serde_json::json!([n.pos.0, n.pos.1]);
+        // Node state the canvas can change. ComfyUI always serialises `mode`, folds
+        // "collapsed" into `flags`, and only writes a title that differs from the type.
+        nv["mode"] = Value::from(n.mode);
+        match &n.title {
+            Some(t) if !t.is_empty() => nv["title"] = Value::from(t.as_str()),
+            _ => {
+                if let Some(o) = nv.as_object_mut() {
+                    o.remove("title");
+                }
+            }
+        }
+        if n.collapsed {
+            nv["flags"]["collapsed"] = Value::Bool(true);
+        } else if let Some(f) = nv.get_mut("flags").and_then(|f| f.as_object_mut()) {
+            f.remove("collapsed");
+        }
         for (i, iv) in nv["inputs"].as_array_mut().into_iter().flatten().enumerate() {
             if let Some(src) = n.inputs.get(i) {
                 iv["link"] = src.link.map(Value::from).unwrap_or(Value::Null);
@@ -191,6 +261,34 @@ fn write_graph(s: &mut Value, g: &Graph, object_links: bool) {
             }
         }
     }
+
+    // Groups: rebuilt from the model (created/deleted/renamed/moved in the editor).
+    let old_ids: Vec<Value> = s["groups"].as_array().map(|a| a.iter().map(|g| g["id"].clone()).collect()).unwrap_or_default();
+    let mut next_id = old_ids.iter().filter_map(Value::as_i64).max().unwrap_or(0) + 1;
+    let groups: Vec<Value> = g
+        .groups
+        .iter()
+        .enumerate()
+        .map(|(i, gr)| {
+            let id = match old_ids.get(i) {
+                Some(v) if v.is_i64() => v.clone(),
+                _ => {
+                    let v = Value::from(next_id);
+                    next_id += 1;
+                    v
+                }
+            };
+            serde_json::json!({
+                "id": id,
+                "title": gr.title,
+                "bounding": gr.bounding,
+                "color": gr.color.clone().unwrap_or_else(|| "#3f789e".to_string()),
+                "font_size": 24,
+                "flags": {},
+            })
+        })
+        .collect();
+    s["groups"] = Value::Array(groups);
 
     // Node ids are stored as strings in the model; write them back as numbers when they
     // were numbers (plain ids), keeping "39:7" style ids from unpacked subgraphs.
@@ -210,6 +308,41 @@ fn write_graph(s: &mut Value, g: &Graph, object_links: bool) {
             })
             .collect(),
     );
+}
+
+/// Serialise a node that has no counterpart in the loaded JSON (created in the editor).
+fn fresh_node_json(n: &Node) -> Value {
+    let idv = |id: &str| id.parse::<i64>().map_or_else(|_| Value::from(id), Value::from);
+    serde_json::json!({
+        "id": idv(&n.id),
+        "type": n.ty,
+        "pos": [n.pos.0, n.pos.1],
+        "size": [n.size.0, n.size.1],
+        "flags": {},
+        "order": 0,
+        "mode": n.mode,
+        "inputs": n.inputs.iter().map(|i| {
+            let mut iv = serde_json::json!({
+                "name": i.name,
+                "type": i.ty,
+                "link": i.link.map(Value::from).unwrap_or(Value::Null),
+            });
+            // Widget-backed inputs are shadowed by their widget in the frontend.
+            if let Some(w) = &i.widget {
+                iv["widget"] = serde_json::json!({"name": w});
+            }
+            iv
+        }).collect::<Vec<_>>(),
+        "outputs": n.outputs.iter().enumerate().map(|(i, o)| serde_json::json!({
+            "name": o.name,
+            "type": o.ty,
+            "slot_index": i,
+            "links": if o.links.is_empty() { Value::Null } else { Value::from(o.links.clone()) },
+        })).collect::<Vec<_>>(),
+        // ComfyUI records the class type here; some nodes rely on it for "Node name for S&R".
+        "properties": {"Node name for S&R": n.ty},
+        "widgets_values": n.widgets_values,
+    })
 }
 
 fn str_of(v: &Value) -> String {

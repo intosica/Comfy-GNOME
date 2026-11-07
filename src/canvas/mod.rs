@@ -13,6 +13,7 @@ pub mod transform;
 
 use adw::{gdk, gtk, prelude::*};
 use std::cell::{Cell, RefCell};
+use std::collections::HashSet;
 use std::f64::consts::PI;
 use std::rc::Rc;
 use transform::View;
@@ -73,6 +74,14 @@ impl Node {
     }
 }
 
+/// What a click landed on, in canvas coordinates, for context menus.
+#[derive(Clone, Debug)]
+pub enum Hit {
+    Node(String),
+    Group(usize),
+    Empty,
+}
+
 /// Wire between two nodes. `from_*` is the origin output, `to_*` the target input.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Link {
@@ -83,9 +92,14 @@ pub struct Link {
 }
 
 enum Drag {
-    Node { idx: usize, grab: (f64, f64), start: (f64, f64) },
+    /// Moving the current selection; positions are captured at drag start.
+    Nodes { idx: usize, grab: (f64, f64), start: Vec<(usize, (f64, f64))> },
     Pan { start_offset: (f64, f64) },
     Link(LinkDrag),
+    /// Rubber-band selection (ctrl + drag on empty canvas, as in litegraph).
+    Band { start: (f64, f64), end: (f64, f64) },
+    /// Dragging a group's title bar moves the group and the nodes it holds.
+    Group { idx: usize, start: [f64; 4], nodes: Vec<(usize, (f64, f64))>, grab: (f64, f64) },
 }
 
 /// A wire being dragged, anchored at one end. The free end is on the opposite
@@ -117,6 +131,8 @@ struct State {
     groups: Vec<Group>,
     drag: Option<Drag>,
     pointer: (f64, f64),
+    /// Selected node ids (survives re-scenes: ids are stable).
+    sel: HashSet<String>,
 }
 
 impl State {
@@ -134,6 +150,28 @@ impl State {
             }
         }
         None
+    }
+
+    /// Topmost node under canvas point `p`.
+    fn hit_node(&self, p: (f64, f64)) -> Option<usize> {
+        self.order.iter().rev().copied().find(|&i| self.nodes[i].contains(p))
+    }
+
+    /// Group whose title bar covers `p` (kept grabbable at low zoom).
+    fn hit_group(&self, p: (f64, f64)) -> Option<usize> {
+        let hh = 34.0f64.max(26.0 / self.view.zoom);
+        self.groups.iter().rposition(|g| {
+            let r = g.rect;
+            p.0 >= r[0] && p.0 <= r[0] + r[2] && p.1 >= r[1] && p.1 <= r[1] + hh
+        })
+    }
+
+    /// Group whose whole rect covers `p` (context menu target).
+    fn group_at(&self, p: (f64, f64)) -> Option<usize> {
+        self.groups.iter().rposition(|g| {
+            let r = g.rect;
+            p.0 >= r[0] && p.0 <= r[0] + r[2] && p.1 >= r[1] && p.1 <= r[1] + r[3]
+        })
     }
 
     /// Topmost socket on the `out` side that the dragged wire may land on.
@@ -207,6 +245,7 @@ pub struct Canvas {
     state: Rc<RefCell<State>>,
     on_activate: Rc<RefCell<Option<Box<dyn Fn(&str)>>>>,
     on_change: Rc<RefCell<Option<Box<dyn Fn()>>>>,
+    on_context: Rc<RefCell<Option<Box<dyn Fn(f64, f64, Hit)>>>>,
     /// A graph was set before the widget had a size: fit as soon as it does.
     pending_fit: Rc<Cell<bool>>,
 }
@@ -219,6 +258,7 @@ impl Canvas {
             state: Rc::default(),
             on_activate: Rc::default(),
             on_change: Rc::default(),
+            on_context: Rc::default(),
             pending_fit: Rc::default(),
         };
         let me = c.clone();
@@ -275,6 +315,23 @@ impl Canvas {
     /// A node moved or a wire was connected/disconnected (edits to persist).
     pub fn connect_change(&self, f: impl Fn() + 'static) {
         *self.on_change.borrow_mut() = Some(Box::new(f));
+    }
+
+    /// Right click on the canvas: what sits under the pointer.
+    pub fn connect_context(&self, f: impl Fn(f64, f64, Hit) + 'static) {
+        *self.on_context.borrow_mut() = Some(Box::new(f));
+    }
+
+    /// Selected node ids, sorted for stable output.
+    pub fn selected(&self) -> Vec<String> {
+        let mut v: Vec<String> = self.state.borrow().sel.iter().cloned().collect();
+        v.sort();
+        v
+    }
+
+    pub fn select(&self, ids: &[String]) {
+        self.state.borrow_mut().sel = ids.iter().cloned().collect();
+        self.area.queue_draw();
     }
 
     /// Zoom/pan so every node is visible (falls back to reset when empty).
@@ -383,6 +440,10 @@ impl Canvas {
                     .current_event()
                     .map(|e| e.modifier_state().contains(gdk::ModifierType::SHIFT_MASK))
                     .unwrap_or(false);
+                let ctrl = g
+                    .current_event()
+                    .map(|e| e.modifier_state().contains(gdk::ModifierType::CONTROL_MASK))
+                    .unwrap_or(false);
                 let mut s = st.borrow_mut();
                 let c = s.view.to_canvas((x, y));
                 let r = 9.0 / s.view.zoom; // constant ~9 screen px, whatever the zoom
@@ -439,15 +500,57 @@ impl Canvas {
                     }
                 }
                 let hit = s.order.iter().rposition(|&i| s.nodes[i].contains(c));
-                s.drag = Some(match hit {
-                    Some(oi) => {
-                        let idx = s.order.remove(oi);
-                        s.order.push(idx); // raise to top
-                        let p = s.nodes[idx].pos;
-                        Drag::Node { idx, grab: (c.0 - p.0, c.1 - p.1), start: p }
+                if let Some(oi) = hit {
+                    let idx = s.order.remove(oi);
+                    s.order.push(idx); // raise to top
+                    let id = s.nodes[idx].id.clone();
+                    if shift {
+                        // Shift toggles membership; a node that just left the selection
+                        // is not dragged.
+                        if !s.sel.insert(id.clone()) {
+                            s.sel.remove(&id);
+                            s.drag = None;
+                            drop(s);
+                            area.queue_draw();
+                            return;
+                        }
+                    } else if !s.sel.contains(&id) {
+                        s.sel.clear();
+                        s.sel.insert(id);
                     }
-                    None => Drag::Pan { start_offset: s.view.offset },
-                });
+                    let mut start: Vec<(usize, (f64, f64))> = s
+                        .order
+                        .iter()
+                        .copied()
+                        .filter(|&i| s.sel.contains(&s.nodes[i].id))
+                        .map(|i| (i, s.nodes[i].pos))
+                        .collect();
+                    if start.is_empty() {
+                        start.push((idx, s.nodes[idx].pos));
+                    }
+                    let p = s.nodes[idx].pos;
+                    s.drag = Some(Drag::Nodes { idx, grab: (c.0 - p.0, c.1 - p.1), start });
+                } else if let Some(gi) = s.hit_group(c) {
+                    let r = s.groups[gi].rect;
+                    let nodes: Vec<(usize, (f64, f64))> = s
+                        .order
+                        .iter()
+                        .copied()
+                        .filter(|&i| {
+                            let n = &s.nodes[i];
+                            let (cx, cy) = (n.pos.0 + n.size.0 / 2.0, n.pos.1 + n.body_h() / 2.0);
+                            cx >= r[0] && cx <= r[0] + r[2] && cy >= r[1] && cy <= r[1] + r[3]
+                        })
+                        .map(|i| (i, s.nodes[i].pos))
+                        .collect();
+                    s.sel.clear();
+                    s.drag = Some(Drag::Group { idx: gi, start: r, nodes, grab: c });
+                } else if ctrl {
+                    s.drag = Some(Drag::Band { start: c, end: c });
+                } else {
+                    s.sel.clear();
+                    s.drag = Some(Drag::Pan { start_offset: s.view.offset });
+                }
             });
             let (st, area) = (self.state.clone(), self.area.clone());
             drag.connect_drag_update(move |g, dx, dy| {
@@ -456,10 +559,23 @@ impl Canvas {
                 let st = &mut *s;
                 let view = st.view;
                 match &mut st.drag {
-                    Some(Drag::Node { idx, grab, .. }) => {
+                    Some(Drag::Nodes { idx, grab, start }) => {
                         let c = view.to_canvas((sx + dx, sy + dy));
-                        st.nodes[*idx].pos = (c.0 - grab.0, c.1 - grab.1);
+                        let base = start.iter().find(|(i, _)| i == idx).map(|(_, p)| *p).unwrap_or(st.nodes[*idx].pos);
+                        let d = (c.0 - grab.0 - base.0, c.1 - grab.1 - base.1);
+                        for (i, p) in start.iter() {
+                            st.nodes[*i].pos = (p.0 + d.0, p.1 + d.1);
+                        }
                     }
+                    Some(Drag::Group { idx, start, nodes, grab }) => {
+                        let c = view.to_canvas((sx + dx, sy + dy));
+                        let d = (c.0 - grab.0, c.1 - grab.1);
+                        st.groups[*idx].rect = [start[0] + d.0, start[1] + d.1, start[2], start[3]];
+                        for (i, p) in nodes.iter() {
+                            st.nodes[*i].pos = (p.0 + d.0, p.1 + d.1);
+                        }
+                    }
+                    Some(Drag::Band { end, .. }) => *end = view.to_canvas((sx + dx, sy + dy)),
                     Some(Drag::Pan { start_offset }) => st.view.offset = (start_offset.0 + dx, start_offset.1 + dy),
                     Some(Drag::Link(d)) => d.to = view.to_canvas((sx + dx, sy + dy)),
                     None => return,
@@ -477,7 +593,34 @@ impl Canvas {
                         s.finish_link(&mut d, r);
                         changed = d.changed;
                     }
-                    Some(Drag::Node { idx, start, .. }) => changed = s.nodes[idx].pos != start,
+                    Some(Drag::Nodes { start, .. }) => changed = start.iter().any(|(i, p)| s.nodes[*i].pos != *p),
+                    Some(Drag::Group { idx, start, nodes, .. }) => {
+                        changed = s.groups[idx].rect != start || nodes.iter().any(|(i, p)| s.nodes[*i].pos != *p)
+                    }
+                    Some(Drag::Band { start, end }) => {
+                        let band = [
+                            start.0.min(end.0),
+                            start.1.min(end.1),
+                            (end.0 - start.0).abs(),
+                            (end.1 - start.1).abs(),
+                        ];
+                        if band[2] > 4.0 || band[3] > 4.0 {
+                            let ids: Vec<String> = s
+                                .order
+                                .iter()
+                                .filter(|&&i| {
+                                    let n = &s.nodes[i];
+                                    let r = [n.pos.0, n.pos.1 - TITLE_H, n.size.0, n.body_h() + TITLE_H];
+                                    r[0] <= band[0] + band[2]
+                                        && r[0] + r[2] >= band[0]
+                                        && r[1] <= band[1] + band[3]
+                                        && r[1] + r[3] >= band[1]
+                                })
+                                .map(|&i| s.nodes[i].id.clone())
+                                .collect();
+                            s.sel.extend(ids);
+                        }
+                    }
                     _ => {}
                 }
                 drop(s);
@@ -510,6 +653,33 @@ impl Canvas {
             drag.connect_drag_end(move |_, _, _| st.borrow_mut().drag = None);
             self.area.add_controller(drag);
         }
+        // Right click: report the target; the workspace shows the menu.
+        let click = gtk::GestureClick::builder().button(gdk::BUTTON_SECONDARY).build();
+        let (st, cb) = (self.state.clone(), self.on_context.clone());
+        click.connect_pressed(move |_, _, x, y| {
+            let mut s = st.borrow_mut();
+            let c = s.view.to_canvas((x, y));
+            let hit = match s.hit_node(c) {
+                // Right-clicking an unselected node selects it, as in every other editor.
+                Some(i) => {
+                    let id = s.nodes[i].id.clone();
+                    if !s.sel.contains(&id) {
+                        s.sel.clear();
+                        s.sel.insert(id.clone());
+                    }
+                    Hit::Node(id)
+                }
+                None => match s.group_at(c) {
+                    Some(g) => Hit::Group(g),
+                    None => Hit::Empty,
+                },
+            };
+            drop(s);
+            if let Some(f) = cb.borrow().as_ref() {
+                f(x, y, hit);
+            }
+        });
+        self.area.add_controller(click);
     }
 }
 
@@ -640,7 +810,7 @@ fn draw(cr: &gtk::cairo::Context, s: &State, w: f64, h: f64) {
         rounded_rect(cr, x, y - TITLE_H, nw, nh + TITLE_H, 8.0);
         rgba(cr, if n.mode == 4 { 0x9a3a9a } else { n.bgcolor.unwrap_or(0x353535) }, alpha);
         cr.fill_preserve().ok();
-        let dragging = matches!(&s.drag, Some(Drag::Node { idx, .. }) if *idx == i);
+        let dragging = matches!(&s.drag, Some(Drag::Nodes { idx, .. }) if *idx == i) || s.sel.contains(&n.id);
         rgb(cr, if dragging { 0xffffff } else { 0x111111 });
         cr.set_line_width(if dragging { 2.0 } else { 1.0 });
         cr.stroke().ok();
@@ -671,6 +841,12 @@ fn draw(cr: &gtk::cairo::Context, s: &State, w: f64, h: f64) {
         } else {
             cr.arc(x + 14.0, y - TITLE_H / 2.0, 5.0, 0.0, 2.0 * PI);
             cr.fill().ok();
+        }
+        if s.sel.contains(&n.id) {
+            rgb(cr, 0xffffff);
+            cr.set_line_width(2.0 / v.zoom);
+            rounded_rect(cr, x - 3.0, y - TITLE_H - 3.0, nw + 6.0, nh + TITLE_H + 6.0, 10.0);
+            cr.stroke().ok();
         }
         if n.collapsed { continue; }
 
@@ -720,6 +896,41 @@ fn draw(cr: &gtk::cairo::Context, s: &State, w: f64, h: f64) {
             wy += 24.0;
         }
         cr.restore().ok();
+    }
+
+    // Bypassed nodes (mode 4) forward an input to a same-type output, so the graph
+    // still reads as connected without tracing the wire into the node.
+    cr.save().ok();
+    rgba(cr, 0xffffff, 0.45);
+    cr.set_line_width(1.5);
+    cr.set_dash(&[6.0, 4.0], 0.0);
+    for &i in &s.order {
+        let n = &s.nodes[i];
+        if n.mode != 4 || n.outputs.is_empty() {
+            continue;
+        }
+        for (si, slot) in n.inputs.iter().enumerate() {
+            if !s.links.iter().any(|l| l.to == i && l.to_slot == si) {
+                continue;
+            }
+            let j = n.outputs.iter().position(|o| compatible(&o.ty, &slot.ty)).unwrap_or(0);
+            link_path(cr, n.slot_pos(true, j), n.slot_pos(false, si));
+            cr.stroke().ok();
+        }
+    }
+    cr.set_dash(&[], 0.0);
+    cr.restore().ok();
+
+    if let Some(Drag::Band { start, end }) = &s.drag {
+        let (x0, y0) = (start.0.min(end.0), start.1.min(end.1));
+        let (bw, bh) = ((start.0 - end.0).abs(), (start.1 - end.1).abs());
+        rgba(cr, 0x7aa2ff, 0.12);
+        cr.rectangle(x0, y0, bw, bh);
+        cr.fill().ok();
+        rgba(cr, 0x7aa2ff, 0.9);
+        cr.set_line_width(1.0 / v.zoom);
+        cr.rectangle(x0, y0, bw, bh);
+        cr.stroke().ok();
     }
 
     // Wire being dragged, on top of everything (litegraph CONNECTING_LINK_COLOR).

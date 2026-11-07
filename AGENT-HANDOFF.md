@@ -167,20 +167,59 @@ build-dep glib-build-tools 0.21). Flatpak: GNOME 50 runtime + rust-stable 25.08 
 - Canvas widget origin is (285, 138) at a 1280×800 window with the tab bar (x includes the 285 px sidebar).
 - To validate a saved file with the oracle: `mcp({tool:"comfyui_validate_workflow", args:{workflow_path:"/path.json"}})`.
 
-## Next steps (Phase 3 remainder)
-1. **Undo/redo**: snapshot `(nodes, links)` per mutation (cheap `Vec` clone, they are small) with a `VecDeque`
-   capped at ~50; wire `Ctrl+Z`/`Ctrl+Shift+Z`. Every mutation already funnels through `connect_change`, so hook
-   the snapshot push there and remember to suppress it while undoing.
-2. **Node add menu**: right-click on empty canvas → popover with a search entry over `Registry::by_category`;
-   insert creates a `workflow::Node` + canvas node at the pointer, marks dirty. Deleting: `Delete` key on the
-   primary selection (selected node id, raised last).
-3. **Multi-select + rubber band**: `State.selected: Vec<usize>`, drag on empty canvas with the primary button to
-   rubber-band (currently that pans), move all selected nodes together.
-4. **Saving is not yet prompted on close**: closing a dirty tab or the window discards silently. Add an
-   `adw::AlertDialog` ("Save / Discard / Cancel") in `tabs.connect_close_page` (return `Propagation::Stop` when cancel).
-5. **Third-party UIs** (research saved in `docs/research/custom-node-uis.md`): DaSiWa system monitor widget (WS
-   `dasiwa.system_monitor` every 1 s — already parsed and shown in the header, the *in-node* widget is still
-   missing), LC Align guides, LoRA Manager button/browser (`/loras` in the default browser: webkitgtk-6.0 is not
-   installed on this host).
-6. Output gallery (last Phase 2 leftover): `executed.output.images` → `/view` thumbnails, click = full preview.
-7. Click-through test of Launch ComfyUI inside the Flatpak (host spawn + close kills python).
+## Session 4 — node/group editing, context menus, bypass
+
+Ask (m01975): "continue working on the UI, functions and UI functions, for nodes, subgraphs, and groups. Also
+'bypass' logic, for bypassing node on right-click (along with other right-click options of course)."
+
+Shipped:
+- **Selection model** in `canvas` (`State.sel`): shift-click toggle, plain click keeps or replaces the selection,
+  `Ctrl`+drag rubber band, `Ctrl+A`, group drag, `Delete`/`Ctrl+D`/`Ctrl+B`/`Ctrl+M`/`Ctrl+G` shortcuts.
+- **Context menus** (node / group / empty canvas) built as plain `gtk::Popover` + buttons — see
+  `ARCHITECTURE.md` for why GMenuModel actions are banned here.
+- **Bypass (mode 4) and mute (mode 2)** toggles, magenta/dimmed rendering, and dashed passthrough lines from each
+  connected input to the first type-compatible output, drawn *after* the node bodies.
+- **Collapse** (`flags.collapsed`), custom titles, **duplicate**, **delete with link pruning**, **groups** (create
+  from a selection or at a point, move by dragging the title bar, rename, 8-colour picker, fit, delete).
+- **Add Node dialog**: search over `/object_info`; new nodes come from `workflow::Node::from_def` with
+  `prompt::default_widgets` (defaults + `control_after_generate`) and are written into the file by
+  `fresh_node_json` on save.
+- **Save path reconciled** — this was the main bug class of the session: data that exists only in the model (new
+  nodes, new/deleted groups, `mode`, `title`, `flags`) is now authored by `write_graph` instead of being read back
+  from the loaded JSON. Verified: add node → 30 nodes on disk; add group → `groups[].bounding` written; bypass
+  inside a subgraph → `definitions.subgraphs[0].nodes[0].mode == 4`; group colour/rename/delete persist.
+- Subgraph boundary pseudo-nodes are view-only: edit operations filter them out and their right-click shows the
+  canvas menu.
+
+Screenshots: `docs/screenshots/phase4-node-menu.png`, `phase4-bypass.png`, `phase4-add-node.png`.
+
+### Testing notes added in session 4
+- **The reload button (↻) is at (260, 79)** in the sidebar; the list is fetched on connect and on demand only, so a
+  workflow uploaded with `curl` while the app runs is invisible until you press it. The search entry is at
+  (130, 73), first row at (130, 120)–(130,140).
+- Menu items in the button-based popover are only clickable **on their label text** (the buttons do not expand to
+  the row width): e.g. node menu items sit at x≈665-720 and are 34 px apart; the group menu's "Rename Group…" label
+  is at (515, 258) while the swatch row is at y≈294.
+- Dialog windows (`Add Node`, `Group Title`) open at 0,0 *under* the main window without a WM: find them with
+  `xdotool search --name "^Add Node"` / `"^Group Title"`, then `windowraise` + `windowfocus` before typing.
+- A click that only focuses the window does not focus a widget: press `windowfocus` first, then click the search
+  entry, or `Ctrl+A`/typing goes to the canvas (select-all + no text input).
+- Workflow files for tests: upload to `POST /api/userdata/workflows%2Fzz-test.json` (single-segment, percent-encoded
+  — the two-segment form is 405), delete with `DELETE` on the same URL (204). Always delete them afterwards;
+  `anima_simple_generate.json` is the safe read-only fixture (md5 `0552a9a3f1d07218ba0711b7263c1689`).
+- `fit_view` picks a smaller zoom than expected on tall graphs (uses the widget height minus margins); the header
+  fit button and `Ctrl`-wheel zoom both work, so it is cosmetic.
+
+## Next steps (Phase 4 → 5)
+1. **Undo/redo**: snapshot `(nodes, links, groups)` in `connect_change` (cheap clones) into a `VecDeque` capped at
+   ~50; `Ctrl+Z`/`Ctrl+Shift+Z`. Every mutation already funnels through `notify_change`.
+2. **Save prompt on close**: `tabs.connect_close_page` → `adw::AlertDialog` (Save / Discard / Cancel) returning
+   `Propagation::Stop`; same on window close when any tab is dirty.
+3. **In-node widgets** (the big Phase 4 item): draw editable values, open GTK popovers for text/number/combo/seed,
+   write back into `widgets_values` in the right order (use `prompt::widget_map` in reverse).
+4. **Copy/paste** of nodes (clipboard JSON) and drag-and-drop from a node-library sidebar tab.
+5. Execution highlighting: progress events already carry `node`, so tint the running node; show the error overlay.
+6. Output gallery (last Phase 2 leftover) and LoadImage upload.
+7. Third-party UIs in priority order (see `docs/research/custom-node-uis.md`): DaSiWa in-node monitor, LC Align
+   guides, LoRA Manager button.
+8. Flatpak rebuild + click-through after the feature work lands (`launch-flatpak.sh --rebuild`).

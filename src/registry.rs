@@ -50,7 +50,6 @@ impl Input {
         !matches!(self.kind, Kind::Socket(_)) && self.opts["forceInput"].as_bool() != Some(true)
     }
     /// Socket type string as used for link compatibility checks.
-    #[allow(dead_code)] // Phase 3 link validation
     pub fn type_name(&self) -> &str {
         match &self.kind {
             Kind::Int => "INT",
