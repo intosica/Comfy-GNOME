@@ -1,0 +1,34 @@
+{
+    "id": "io.github.gnomecomfyui.GnomeComfyUI",
+    "runtime": "org.gnome.Platform",
+    "runtime-version": "50",
+    "sdk": "org.gnome.Sdk",
+    "sdk-extensions": ["org.freedesktop.Sdk.Extension.rust-stable"],
+    "command": "gnome-comfyui",
+    "finish-args": [
+        "--share=ipc",
+        "--share=network",
+        "--socket=fallback-x11",
+        "--socket=wayland",
+        "--device=dri",
+        "--filesystem=home",
+        "--talk-name=org.freedesktop.Flatpak"
+    ],
+    "build-options": {
+        "append-path": "/usr/lib/sdk/rust-stable/bin",
+        "build-args": ["--share=network"],
+        "env": { "CARGO_HOME": "/run/build/gnome-comfyui/cargo" }
+    },
+    "modules": [
+        {
+            "name": "gnome-comfyui",
+            "buildsystem": "simple",
+            "build-commands": [
+                "cargo build --release --locked",
+                "install -Dm755 target/release/gnome-comfyui /app/bin/gnome-comfyui",
+                "install -Dm644 data/io.github.gnomecomfyui.GnomeComfyUI.desktop /app/share/applications/io.github.gnomecomfyui.GnomeComfyUI.desktop"
+            ],
+            "sources": [{ "type": "dir", "path": ".." }]
+        }
+    ]
+}

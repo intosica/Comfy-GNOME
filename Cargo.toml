@@ -1,0 +1,15 @@
+[package]
+name = "gnome-comfyui"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.80"
+license = "GPL-3.0-only"
+description = "Native GTK4/Libadwaita frontend for ComfyUI"
+readme = "README.md"
+
+[dependencies]
+adw = { version = "0.8", package = "libadwaita", features = ["v1_5"] }
+gtk = { version = "0.10", package = "gtk4", features = ["v4_14"] }
+
+[profile.release]
+lto = "thin"

@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=GNOME-ComfyUI
+Comment=Native GTK frontend for ComfyUI
+Exec=gnome-comfyui
+Icon=applications-graphics
+Terminal=false
+Type=Application
+Categories=Graphics;GTK;
+StartupNotify=true
