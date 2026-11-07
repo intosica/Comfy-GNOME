@@ -33,7 +33,8 @@ Each phase ends with a runnable build, updated `AGENT-HANDOFF.md`, and screensho
       `converted_node_count` unchanged by `comfyui validate workflow`)
 - [x] Slot **type colours** (16-entry palette from `LGraphCanvas.link_type_colors`)
 - [x] Link editing: drag from an output/input to wire, drag off an input to unplug, **shift+drag** an output to
-      detach the existing link and re-route it, hover ring on type-compatible targets only
+      de-anchor the far end (wire keeps hanging from its input, drop it on another output to re-source it), hover ring
+      on type-compatible targets only
 - [ ] Undo/redo history
 - [ ] Node add menu/search (from `/object_info`), delete, multi-select, rubber-band, copy/paste
 - [ ] Node library sidebar tab (search `/object_info`, insert nodes)

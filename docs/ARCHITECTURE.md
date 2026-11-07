@@ -124,12 +124,16 @@ arrow pops it. Every tab keeps its own `Canvas`, so viewports are independent; t
    so fields we do not model survive untouched.
 5. `api::save_workflow` → `POST /api/userdata/<percent-encoded "workflows/<file>">`.
 
-**Link editing semantics** (`canvas::hit_slot` / `hit_target`, radius `9/zoom` canvas units):
+**Link editing semantics** (`canvas::hit_slot` / `hit_target`, radius `9/zoom` canvas units). A dragged wire is
+anchored at exactly one end (`LinkDrag { node, slot, out, ty, to, changed }`); `out` names the side the anchor sits
+on and the drop test therefore looks at the *opposite* side — `hit_target(p, r, ty, !out)`, which also picks the
+right comparison direction because `compatible()` is asymmetric (only the input may list alternatives like
+`"IMAGE,MASK"`):
 | gesture | result |
 |---|---|
 | drag from output | new link from that output |
 | drag from connected input | link unplugged, still attached to the cursor; drop on nothing deletes |
-| shift+drag from connected output | existing link detached and re-routed from the cursor |
+| shift+drag from connected output | link **de-anchored at that output**: the wire keeps hanging from the input it fed and now hunts for a new output (drop on nothing deletes it) |
 | drop on incompatible type | ignored (hover ring only on compatible targets) |
 
 **Link colours** come from the litegraph palette (`LGraphCanvas.link_type_colors`, ported to

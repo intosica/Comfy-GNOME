@@ -88,17 +88,22 @@ enum Drag {
     Link(LinkDrag),
 }
 
-/// A wire being dragged. Always anchored at an output: dragging away from an
-/// input, or shift-dragging off a connected output, first detaches that wire.
+/// A wire being dragged, anchored at one end. The free end is on the opposite
+/// side: anchored at an output → looking for an input; anchored at an input
+/// (shift on a connected output, or pulling a wire off an input) → looking for
+/// a new output. In both cases the old wire is deleted up front, so dropping on
+/// nothing leaves it removed.
 struct LinkDrag {
-    from: usize,
-    from_slot: usize,
+    /// Node + slot the wire hangs from.
+    node: usize,
+    slot: usize,
+    /// `true` when the anchor is an output of `node`.
+    out: bool,
     ty: String,
     /// Canvas-space cursor position.
     to: (f64, f64),
-    /// The wire was pulled off an existing connection (dropping on nothing deletes it).
-    detached: bool,
-    /// Anything added or removed during this drag.
+    /// Anything added or removed during this drag (a wire pulled off a socket
+    /// counts, so dropping it on nothing leaves the connection deleted).
     changed: bool,
 }
 
@@ -131,13 +136,19 @@ impl State {
         None
     }
 
-    /// Topmost input socket that `ty` may connect to.
-    fn hit_target(&self, p: (f64, f64), r: f64, ty: &str) -> Option<(usize, usize)> {
+    /// Topmost socket on the `out` side that the dragged wire may land on.
+    fn hit_target(&self, p: (f64, f64), r: f64, ty: &str, out: bool) -> Option<(usize, usize)> {
         for &i in self.order.iter().rev() {
             let n = &self.nodes[i];
-            for (si, slot) in n.inputs.iter().enumerate() {
-                let (sx, sy) = n.slot_pos(false, si);
-                if (sx - p.0).hypot(sy - p.1) <= r && compatible(ty, &slot.ty) {
+            let slots = if out { &n.outputs } else { &n.inputs };
+            for (si, slot) in slots.iter().enumerate() {
+                let (sx, sy) = n.slot_pos(out, si);
+                if (sx - p.0).hypot(sy - p.1) > r {
+                    continue;
+                }
+                // `ty` is the free end's type: the anchor decides which side is compared.
+                let ok = if out { compatible(&slot.ty, ty) } else { compatible(ty, &slot.ty) };
+                if ok || slot.ty.is_empty() || ty.is_empty() {
                     return Some((i, si));
                 }
             }
@@ -145,12 +156,16 @@ impl State {
         None
     }
 
-    /// Drop the dragged wire: connect to a compatible input, replacing what was there.
-    /// Inputs take one link only; outputs fan out freely.
+    /// Drop the dragged wire on the opposite side. Inputs take one link only
+    /// (replacing what was there); outputs fan out freely.
     fn finish_link(&mut self, d: &mut LinkDrag, r: f64) {
-        let Some((to, slot)) = self.hit_target(d.to, r, &d.ty) else { return };
-        self.links.retain(|l| !(l.to == to && l.to_slot == slot));
-        self.links.push(Link { from: d.from, from_slot: d.from_slot, to, to_slot: slot });
+        let Some((other, slot)) = self.hit_target(d.to, r, &d.ty, !d.out) else { return };
+        if d.out {
+            self.links.retain(|l| !(l.to == other && l.to_slot == slot));
+            self.links.push(Link { from: d.node, from_slot: d.slot, to: other, to_slot: slot });
+        } else {
+            self.links.push(Link { from: other, from_slot: slot, to: d.node, to_slot: d.slot });
+        }
         d.changed = true;
     }
 }
@@ -373,31 +388,49 @@ impl Canvas {
                 let r = 9.0 / s.view.zoom; // constant ~9 screen px, whatever the zoom
                 if let Some((idx, out, si)) = s.hit_slot(c, r) {
                     if out {
-                        let ty = s.nodes[idx].outputs[si].ty.clone();
-                        let mut d = LinkDrag { from: idx, from_slot: si, ty, to: c, detached: false, changed: false };
-                        // Shift pulls the existing wire off the output instead of adding one.
+                        // Shift de-anchors the far end: the wire keeps hanging from the
+                        // input it fed and follows the cursor looking for a new output.
                         if shift {
                             if let Some(li) = s.links.iter().rposition(|l| l.from == idx && l.from_slot == si) {
-                                s.links.remove(li);
-                                d.detached = true;
-                                d.changed = true;
+                                let l = s.links.remove(li);
+                                let ty = s.nodes[l.to].inputs[l.to_slot].ty.clone();
+                                s.drag = Some(Drag::Link(LinkDrag {
+                                    node: l.to,
+                                    slot: l.to_slot,
+                                    out: false,
+                                    ty,
+                                    to: c,
+                                    changed: true,
+                                }));
+                                drop(s);
+                                area.queue_draw();
+                                return;
                             }
                         }
-                        s.drag = Some(Drag::Link(d));
+                        let ty = s.nodes[idx].outputs[si].ty.clone();
+                        s.drag = Some(Drag::Link(LinkDrag {
+                            node: idx,
+                            slot: si,
+                            out: true,
+                            ty,
+                            to: c,
+                            changed: false,
+                        }));
                         drop(s);
                         area.queue_draw();
                         return;
                     }
-                    // Dragging off a connected input takes that wire with it.
+                    // Dragging off a connected input takes that wire with it (anchored at
+                    // its output, i.e. the other end).
                     if let Some(li) = s.links.iter().position(|l| l.to == idx && l.to_slot == si) {
                         let l = s.links.remove(li);
                         let ty = s.nodes[l.from].outputs[l.from_slot].ty.clone();
                         s.drag = Some(Drag::Link(LinkDrag {
-                            from: l.from,
-                            from_slot: l.from_slot,
+                            node: l.from,
+                            slot: l.from_slot,
+                            out: true,
                             ty,
                             to: c,
-                            detached: true,
                             changed: true,
                         }));
                         drop(s);
@@ -652,10 +685,11 @@ fn draw(cr: &gtk::cairo::Context, s: &State, w: f64, h: f64) {
                 rgb(cr, type_color(&slot.ty));
                 cr.arc(px, py, 5.0, 0.0, 2.0 * PI);
                 cr.fill().ok();
-                // Ring the socket a dragged wire would land in.
-                if !out {
-                    if let Some(Drag::Link(d)) = &s.drag {
-                        if compatible(&d.ty, &slot.ty) && (px - d.to.0).hypot(py - d.to.1) <= 12.0 / v.zoom {
+                // Ring the socket a dragged wire would land in (the free end's side).
+                if let Some(Drag::Link(d)) = &s.drag {
+                    if d.out != out {
+                        let ok = if out { compatible(&slot.ty, &d.ty) } else { compatible(&d.ty, &slot.ty) };
+                        if ok && (px - d.to.0).hypot(py - d.to.1) <= 12.0 / v.zoom {
                             rgb(cr, 0xffffff);
                             cr.set_line_width(2.0);
                             cr.arc(px, py, 8.5, 0.0, 2.0 * PI);
@@ -690,10 +724,10 @@ fn draw(cr: &gtk::cairo::Context, s: &State, w: f64, h: f64) {
 
     // Wire being dragged, on top of everything (litegraph CONNECTING_LINK_COLOR).
     if let Some(Drag::Link(d)) = &s.drag {
-        if let Some(n) = s.nodes.get(d.from) {
+        if let Some(n) = s.nodes.get(d.node) {
             rgb(cr, 0xaaffaa);
             cr.set_line_width(3.0);
-            link_path(cr, n.slot_pos(true, d.from_slot), d.to);
+            link_path(cr, n.slot_pos(d.out, d.slot), d.to);
             cr.stroke().ok();
         }
     }

@@ -127,9 +127,12 @@ build-dep glib-build-tools 0.21). Flatpak: GNOME 50 runtime + rust-stable 25.08 
   (`mcp comfyui_validate_workflow`, arg `workflow_path`) as an external oracle — it converts UI→API server-side,
   so it cross-checks `prompt.rs` and anything our save writes.
 - **Wires**: `hit_slot`/`hit_target` with radius `9/zoom` canvas units. Drag from an output → new link; drag from a
-  connected **input** → unplug (stays detached on release over nothing); **shift+drag from a connected output** →
-  detaches that link and re-routes from the cursor (the dropped-to-empty case deletes it). In-progress wire is
-  `#aaffaa`; hovering a type-compatible target draws a ring; incompatible slots are ignored.
+  connected **input** → the wire keeps hanging from its origin and follows the cursor (unplug; release over nothing
+  deletes it). **shift+drag from a connected output** de-anchors the *far* end: the wire keeps hanging from the input
+  it fed and hunts for a new output, so shift-dragging a MODEL wire from loader A onto loader B re-sources the wire
+  (`links: [[5,5,0,3,0,"MODEL"]]`) instead of merely redrawing it from the same node. Implemented by making
+  `LinkDrag` anchor-agnostic (`out: bool`); the drop targets and hover ring use `hit_target(p, r, ty, !out)`.
+  In-progress wire is `#aaffaa`; hovering a type-compatible target draws a ring; incompatible slots are ignored.
 - **Bug fixed — viewport restore lost**: `set_graph()` set `pending_fit` and the resize callback refit the graph
   once the widget got a size, silently overriding the `extra.ds` viewport restored right after. `set_view()` now
   clears `pending_fit`, so a saved viewport wins and auto-fit only happens when there is no saved view.
