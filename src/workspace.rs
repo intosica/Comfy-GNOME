@@ -120,6 +120,30 @@ struct Doc {
 /// ponytail: full JSON snapshots, cap 50; diff-based history if huge workflows make this slow.
 const UNDO_MAX: usize = 50;
 
+/// Node colours offered by the context menu and the floating toolbox (node body; the title bar
+/// gets the same colour darkened, so a coloured node still reads as a node).
+const NODE_COLORS: [(&str, u32); 8] = [
+    ("#3f789e", 0x3f789e),
+    ("#ff6b6b", 0xff6b6b),
+    ("#59b259", 0x59b259),
+    ("#b39ddb", 0xb39ddb),
+    ("#ffd500", 0xffd500),
+    ("#59d0ff", 0x59d0ff),
+    ("#ff8fb1", 0xff8fb1),
+    ("#ffa931", 0xffa931),
+];
+
+/// Single-quote a path for `sh` (`'` becomes `'\''`).
+fn shq(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+/// `c` scaled towards black — the title bar of a coloured node.
+fn shade(c: u32, f: f64) -> u32 {
+    let ch = |s: u32| ((((c >> s) & 0xff) as f64) * f).round() as u32;
+    (ch(16) << 16) | (ch(8) << 8) | ch(0)
+}
+
 /// Workflow JSON without the viewport (panning is not an edit).
 fn snapshot(wf: &workflow::Workflow) -> Value {
     let mut v = wf.to_json();
@@ -250,6 +274,9 @@ fn load_css() {
          button.sidebar-reveal { background: alpha(black, 0.55); border: 1px solid alpha(white, 0.14); min-width: 5px; min-height: 0; padding: 0; margin: 8px 3px; border-radius: 999px; box-shadow: none; opacity: 0; transition: opacity 150ms; }
          button.sidebar-reveal.near { opacity: 1; }
          button.sidebar-reveal:hover { background: alpha(black, 0.8); border-color: alpha(white, 0.35); }
+         box.selection-toolbar { padding: 2px 4px; border-radius: 11px; }
+         box.selection-toolbar button, box.selection-toolbar menubutton > button { padding: 3px 5px; min-width: 0; min-height: 0; border-radius: 7px; }
+         box.selection-toolbar image, box.selection-toolbar drawingarea { -gtk-icon-size: 15px; }
          box.dock-bar { padding: 3px 6px; border-top: 1px solid alpha(currentColor, 0.12); background: alpha(currentColor, 0.04); }
          togglebutton.dock-tab { padding: 2px 12px; min-height: 22px; border-radius: 999px; }
          togglebutton.dock-tab:checked { background: alpha(@accent_bg_color, 0.2); color: @accent_color; }
@@ -279,6 +306,10 @@ impl Workspace {
         load_css();
         // Sidebar ----------------------------------------------------------------
         let side_stack = adw::ViewStack::new();
+        // Non-homogeneous: the stack asks for the min width of the *visible* page, not the widest
+        // hidden one (the Memory page's spin rows are ~357 px). Otherwise shrinking the sidebar
+        // clips the row's right edge — the queue's ⋮ button vanished long before the minimum.
+        side_stack.set_hhomogeneous(false);
         // Single, not None: GTK disables click activation entirely in NONE mode.
         let wf_list = gtk::ListBox::builder().selection_mode(gtk::SelectionMode::Single).css_classes(["navigation-sidebar"]).build();
         let wf_scroller = gtk::ScrolledWindow::builder().child(&wf_list).vexpand(true).build();
@@ -306,7 +337,11 @@ impl Workspace {
         }
         side_stack.add_titled_with_icon(&wf_page, Some("workflows"), "Workflows", "cg-folder-symbolic");
         let queue_list = gtk::ListBox::builder().selection_mode(gtk::SelectionMode::None).build();
-        let q_scroller = gtk::ScrolledWindow::builder().child(&queue_list).vexpand(true).build();
+        let q_scroller = gtk::ScrolledWindow::builder()
+            .child(&queue_list)
+            .vexpand(true)
+            .hscrollbar_policy(gtk::PolicyType::Never)
+            .build();
         let interrupt = gtk::Button::builder().label("Interrupt").sensitive(false).build();
         interrupt.add_css_class("destructive-action");
         interrupt.set_tooltip_text(Some("Stop the prompt that is running now"));
@@ -385,7 +420,14 @@ impl Workspace {
             .build();
         progress.add_css_class("sampler-progress");
         canvas_pane.append(&progress);
-        canvas_pane.append(&tabs);
+        // Hidden sidebar: a thin translucent bar on the canvas' left edge, shown only while
+        // the pointer is near it. It lives here (not over the whole window) so it spans
+        // exactly the canvas: no crossing the workload tab row or the Log/Preview dock.
+        let bar = gtk::Button::builder().tooltip_text("Show Sidebar").css_classes(["sidebar-reveal"]).halign(gtk::Align::Start).valign(gtk::Align::Fill).can_target(false).visible(false).build();
+        let canvas_overlay = gtk::Overlay::new();
+        canvas_overlay.set_child(Some(&tabs));
+        canvas_overlay.add_overlay(&bar);
+        canvas_pane.append(&canvas_overlay);
 
         let log = gtk::TextView::builder()
             .editable(false)
@@ -627,11 +669,7 @@ impl Workspace {
             handle.add_controller(drag);
         }
 
-        // Hidden sidebar: a long thin translucent bar down the left edge, shown only while the
-        // pointer is near it; clicking it brings the sidebar back.
-        let shell = gtk::Overlay::new();
-        shell.set_child(Some(&split));
-        let bar = gtk::Button::builder().tooltip_text("Show Sidebar").css_classes(["sidebar-reveal"]).halign(gtk::Align::Start).valign(gtk::Align::Fill).can_target(false).visible(false).build();
+        // Shown only while the pointer is near the bar; clicking it brings the sidebar back.
         let motion = gtk::EventControllerMotion::new();
         motion.set_propagation_phase(gtk::PropagationPhase::Capture);
         let (b, sp) = (bar.clone(), split.clone());
@@ -645,7 +683,7 @@ impl Workspace {
             b.set_can_target(false);
             b.remove_css_class("near");
         });
-        shell.add_controller(motion);
+        canvas_overlay.add_controller(motion);
         {
             let tg = toggle.clone();
             bar.connect_clicked(move |_| tg.set_active(true));
@@ -657,10 +695,9 @@ impl Workspace {
             });
             bar.set_visible(!split.shows_sidebar());
         }
-        shell.add_overlay(&bar);
 
         let ws = Self {
-            root: shell.upcast(),
+            root: split.upcast(),
             title,
             log,
             proc: Rc::default(),
@@ -1382,7 +1419,7 @@ impl Workspace {
             row.connect_activated(move |_| {
                 if act.is_empty() { me.open_job_workflow(&pid) } else { me.show_lightbox(&act, 0) }
             });
-            let (me2, id2, imgs) = (self.clone(), run.prompt_id.clone(), items.clone());
+            let (me2, id2, imgs, pic) = (self.clone(), run.prompt_id.clone(), items.clone(), first.cloned());
             let more = gtk::Button::builder()
                 .icon_name("cg-view-more-symbolic")
                 .valign(gtk::Align::Center)
@@ -1399,10 +1436,35 @@ impl Workspace {
                         me3.show_lightbox(&imgs3, 0)
                     }));
                 }
+                if let Some(img) = pic.clone() {
+                    let (me3, i3) = (me2.clone(), img.clone());
+                    entries.push(item_i("cg-view-grid-symbolic", "Open in New Workflow", true, move || {
+                        me3.open_image_in_new_workflow(&i3)
+                    }));
+                    let (me4, i4) = (me2.clone(), img);
+                    entries.push(item_i("cg-folder-symbolic", "Open Item Location", true, move || me4.open_item_location(&i4)));
+                }
                 let (w, h) = (b.width() as f64, b.height() as f64);
                 me2.show_menu(b, w, h, entries);
             });
             row.add_suffix(&more);
+            // Right click anywhere on the row: the two picture actions, where the pointer is.
+            if let Some(img) = first.cloned() {
+                let (me3, row2) = (self.clone(), row.clone());
+                let click = gtk::GestureClick::new();
+                click.set_button(3);
+                click.connect_pressed(move |g, _, x, y| {
+                    let (a, b) = (me3.clone(), img.clone());
+                    let (c2, d2) = (me3.clone(), img.clone());
+                    let entries = vec![
+                        item_i("cg-view-grid-symbolic", "Open in New Workflow", true, move || a.open_image_in_new_workflow(&b)),
+                        item_i("cg-folder-symbolic", "Open Item Location", true, move || c2.open_item_location(&d2)),
+                    ];
+                    let _ = g;
+                    me3.show_menu(&row2, x, y, entries);
+                });
+                row.add_controller(click);
+            }
             self.queue_list.append(&row);
         }
     }
@@ -1837,7 +1899,10 @@ impl Workspace {
             true
         });
         canvas.area.add_controller(drop);
-        let page = self.tabs.append(&canvas.area);
+        // The floating selection toolbox sits over the canvas, so the page is an overlay.
+        let overlay = gtk::Overlay::new();
+        overlay.set_child(Some(&canvas.area));
+        let page = self.tabs.append(&overlay);
         page.set_title(&tabmenu::stem(&file));
         page.set_tooltip(if temp { "Unsaved (temporary) workflow" } else { &file });
         let doc: DocRef = Rc::new(RefCell::new(Doc {
@@ -1865,6 +1930,7 @@ impl Workspace {
             canvas.set_link_mode(self.link_mode.get());
         }
         self.docs.borrow_mut().push(doc.clone());
+        overlay.add_overlay(&self.selection_toolbar(&doc));
         {
             // Double-click: subgraph instance → drill in; empty space → Add Node search.
             let me = self.clone();
@@ -2005,30 +2071,97 @@ impl Workspace {
     /// MTB / file-manager drop of an image without ComfyUI metadata: upload it and drop a
     /// preloaded native `LoadImage` node at `pos` (`reference/MTB.png`).
     fn insert_image_node_at(&self, path: &std::path::Path, pos: (f64, f64)) {
-        let Some(client) = self.client.borrow().clone() else {
-            return self.append_log("[drop] not connected");
-        };
-        let Some(doc) = self.doc_or_blank("dropped") else { return };
         let Ok(bytes) = std::fs::read(path) else {
             return self.append_log(&format!("[drop] cannot read {}", path.display()));
         };
         let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "dropped.png".into());
-        let me = self.clone();
+        let Some(doc) = self.doc_or_blank("dropped") else { return };
+        self.place_image_at(&doc, name, bytes, pos);
+    }
+
+    /// Upload picture bytes and drop a preloaded native `LoadImage` node at `pos` in `doc`.
+    fn place_image_at(&self, doc: &DocRef, name: String, bytes: Vec<u8>, pos: (f64, f64)) {
+        let Some(client) = self.client.borrow().clone() else {
+            return self.append_log("[image] not connected");
+        };
+        let (me, doc) = (self.clone(), doc.clone());
         glib::spawn_future_local(async move {
             let up = gio::spawn_blocking(move || client.upload_image(&name, &bytes)).await;
             match up {
                 Ok(Ok(stored)) => {
-                    me.append_log(&format!("[drop] uploaded {stored} → Load Image"));
+                    me.append_log(&format!("[image] uploaded {stored} → Load Image"));
                     me.create_node(&doc, "LoadImage", pos);
                     let id = doc.borrow().canvas.selected().first().cloned();
                     if let Some(id) = id {
                         me.on_widget(&doc, &id, "0", Value::from(stored), true);
                     }
                 }
-                Ok(Err(e)) => me.append_log(&format!("[drop] {e}")),
-                Err(_) => me.append_log("[drop] upload worker panicked"),
+                Ok(Err(e)) => me.append_log(&format!("[image] {e}")),
+                Err(_) => me.append_log("[image] upload worker panicked"),
             }
         });
+    }
+
+    /// Same, but in the middle of the visible canvas.
+    fn place_image(&self, doc: &DocRef, name: String, bytes: Vec<u8>) {
+        let canvas = doc.borrow().canvas.clone();
+        let (zoom, off) = canvas.view();
+        let pos = (
+            ((canvas.area.width() as f64 / 2.0 - off.0) / zoom - 110.0).max(0.0),
+            ((canvas.area.height() as f64 / 2.0 - off.1) / zoom - 70.0).max(0.0),
+        );
+        self.place_image_at(doc, name, bytes, pos);
+    }
+
+    /// Queue row "Open in New Workflow": a fresh tab holding a `LoadImage` node that shows the
+    /// finished picture — the same thing a dropped file produces, fetched from the server.
+    fn open_image_in_new_workflow(&self, img: &api::OutputImage) {
+        let Some(client) = self.client.borrow().clone() else {
+            return self.append_log("[queue] not connected");
+        };
+        let blank = serde_json::json!({"nodes": [], "links": [], "groups": []});
+        let Ok(wf) = workflow::Workflow::from_json(blank) else { return };
+        self.open_temp(&img.filename, wf);
+        let Some(doc) = self.active_doc() else { return };
+        let (me, q, name) = (self.clone(), img.query(), img.filename.clone());
+        glib::spawn_future_local(async move {
+            match gio::spawn_blocking(move || client.view_query(&q)).await {
+                Ok(Ok(bytes)) => me.place_image(&doc, name, bytes),
+                Ok(Err(e)) => me.append_log(&format!("[queue] {e}")),
+                Err(_) => me.append_log("[queue] preview worker panicked"),
+            }
+        });
+    }
+
+    /// Queue row "Open Item Location": reveal the picture in the desktop's file manager.
+    /// Flatpak builds cannot see the host's `~/ComfyUI`, so the host is asked to do it.
+    fn open_item_location(&self, img: &api::OutputImage) {
+        let Some(root) = self.root_dir.borrow().clone() else {
+            return self.append_log("[queue] no ComfyUI folder known — set it in Settings");
+        };
+        let kind = if img.kind.is_empty() { "output" } else { img.kind.as_str() };
+        let dir = root.join(kind).join(&img.subfolder);
+        let file = dir.join(&img.filename);
+        let script = format!(
+            "f={f}; d={d}; for m in nautilus dolphin; do command -v $m >/dev/null 2>&1 && exec $m --select \"$f\"; done; command -v thunar >/dev/null 2>&1 && exec thunar \"$d\"; exec xdg-open \"$d\"",
+            f = shq(&file.to_string_lossy()),
+            d = shq(&dir.to_string_lossy()),
+        );
+        let mut argv: Vec<std::ffi::OsString> = Vec::new();
+        if backend::in_flatpak() {
+            argv.extend(["flatpak-spawn", "--host"].map(Into::into));
+        }
+        argv.extend(["sh", "-c"].map(Into::into));
+        argv.push(script.into());
+        let argv: Vec<&std::ffi::OsStr> = argv.iter().map(|a| a.as_os_str()).collect();
+        match gio::SubprocessLauncher::new(gio::SubprocessFlags::NONE).spawn(&argv) {
+            Ok(sub) => {
+                glib::spawn_future_local(async move {
+                    let _ = sub.wait_future().await;
+                });
+            }
+            Err(e) => self.append_log(&format!("[queue] could not open the folder: {e}")),
+        }
     }
 
     /// Fetch previews the canvas wants but has not got (LoadImage thumbnails).
@@ -2377,6 +2510,28 @@ impl Workspace {
         self.edited(doc);
     }
 
+    /// Paint the selected nodes: body in `color`, title bar a darker shade (ComfyUI's pairing,
+    /// which is also what the canvas falls back to when only `bgcolor` is set).
+    fn set_node_color(&self, doc: &DocRef, ids: &[String], color: Option<u32>) {
+        {
+            let mut d = doc.borrow_mut();
+            let g = graph_mut(&mut d);
+            for n in g.nodes.iter_mut().filter(|n| ids.contains(&n.id)) {
+                match color {
+                    Some(c) => {
+                        n.bgcolor = Some(format!("#{c:06x}"));
+                        n.color = Some(format!("#{:06x}", shade(c, 0.72)));
+                    }
+                    None => {
+                        n.bgcolor = None;
+                        n.color = None;
+                    }
+                }
+            }
+        }
+        self.edited(doc);
+    }
+
     fn delete_group(&self, doc: &DocRef, gi: usize) {
         {
             let mut d = doc.borrow_mut();
@@ -2573,6 +2728,254 @@ impl Workspace {
     }
 
     /// Context menu for whatever the right click landed on.
+    /// Node actions, shared by the canvas context menu and the floating selection toolbox.
+    fn node_entries(&self, doc: &DocRef, id: &str, ids: &[String]) -> Vec<Entry> {
+        let (mode, collapsed, title, is_sub) = {
+            let d = doc.borrow();
+            match graph_ref(&d).node(id) {
+                Some(n) => (n.mode, n.collapsed, n.title.clone().unwrap_or_default(), d.wf.subgraphs.contains_key(&n.ty)),
+                None => return Vec::new(),
+            }
+        };
+        let bypassed = mode == workflow::MODE_BYPASS;
+        let muted = mode == workflow::MODE_NEVER;
+        let mut entries: Vec<Entry> = Vec::new();
+        {
+            let (me, d, i) = (self.clone(), doc.clone(), ids.to_vec());
+            entries.push(item(
+                if bypassed { "Un-Bypass Node" } else { "Bypass Node (Ctrl+B)" },
+                move || me.bypass(&d, &i),
+            ));
+        }
+        {
+            let (me, d, i) = (self.clone(), doc.clone(), ids.to_vec());
+            entries.push(item(
+                if muted { "Un-Mute Node" } else { "Mute Node (Ctrl+M)" },
+                move || me.mute(&d, &i),
+            ));
+        }
+        {
+            let (me, d, i) = (self.clone(), doc.clone(), ids.to_vec());
+            entries.push(item(if collapsed { "Expand Node" } else { "Collapse Node" }, move || me.collapse(&d, &i)));
+        }
+        entries.push(Entry::Swatches(
+            NODE_COLORS
+                .iter()
+                .map(|(_, rgb)| {
+                    let (me, d, i, rgb2) = (self.clone(), doc.clone(), ids.to_vec(), *rgb);
+                    (rgb2, Box::new(move || me.set_node_color(&d, &i, Some(rgb2))) as Box<dyn Fn()>)
+                })
+                .collect(),
+        ));
+        entries.push(Entry::Line);
+        {
+            let (me, d) = (self.clone(), doc.clone());
+            let (node, initial) = (id.to_owned(), title.clone());
+            entries.push(item("Edit Title…", move || {
+                let (me2, d2, node2, initial2) = (me.clone(), d.clone(), node.clone(), initial.clone());
+                me.text_dialog("Node Title", &initial2, move |t| me2.set_title(&d2, &node2, t));
+            }));
+        }
+        if is_sub {
+            let (me, d) = (self.clone(), doc.clone());
+            let node = id.to_owned();
+            entries.push(item("Open Subgraph", move || me.open_node(&d, &node)));
+        }
+        {
+            let (me, d, i) = (self.clone(), doc.clone(), ids.to_vec());
+            entries.push(item("Duplicate Node", move || me.duplicate_nodes(&d, &i)));
+        }
+        {
+            let (me, d, i) = (self.clone(), doc.clone(), ids.to_vec());
+            entries.push(danger("Delete Node", move || me.delete_nodes(&d, &i)));
+        }
+        entries
+    }
+
+    /// Floating toolbox above the selected node(s) — `reference/Node Selection/`. It only offers
+    /// what this engine can actually do (delete, colour, frame into a group, bypass, the node
+    /// menu); it follows the selection every frame so panning and zooming keep it attached.
+    fn selection_toolbar(&self, doc: &DocRef) -> gtk::Widget {
+        let canvas = doc.borrow().canvas.clone();
+        let bar = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        bar.add_css_class("osd");
+        bar.add_css_class("selection-toolbar");
+        bar.set_halign(gtk::Align::Start);
+        bar.set_valign(gtk::Align::Start);
+        bar.set_visible(false);
+
+        let icon = |name: &str, tip: &str| {
+            gtk::Button::builder().icon_name(name).tooltip_text(tip).css_classes(["flat"]).build()
+        };
+
+        {
+            let (me, d) = (self.clone(), doc.clone());
+            let b = icon("cg-user-trash-symbolic", "Delete Selected Items");
+            b.connect_clicked(move |_| {
+                let ids = d.borrow().canvas.selected();
+                me.delete_nodes(&d, &ids);
+            });
+            bar.append(&b);
+        }
+
+        // Colour: the chip shows the selection's colour, the popover the palette.
+        let chip = gtk::DrawingArea::new();
+        chip.set_content_width(16);
+        chip.set_content_height(16);
+        let shown = Rc::new(Cell::new(u32::MAX));
+        {
+            let shown = shown.clone();
+            chip.set_draw_func(move |_, cr, w, h| {
+                let c = shown.get();
+                let (cx, cy, r) = (w as f64 / 2.0, h as f64 / 2.0, (w.min(h) as f64 / 2.0) - 1.5);
+                cr.arc(cx, cy, r, 0.0, std::f64::consts::TAU);
+                match c {
+                    u32::MAX => {
+                        // No colour on the selection: an empty ring, so the button still reads.
+                        cr.set_source_rgba(1.0, 1.0, 1.0, 0.45);
+                        cr.set_line_width(1.4);
+                        let _ = cr.stroke();
+                    }
+                    c => {
+                        cr.set_source_rgb(((c >> 16) & 0xff) as f64 / 255.0, ((c >> 8) & 0xff) as f64 / 255.0, (c & 0xff) as f64 / 255.0);
+                        let _ = cr.fill();
+                    }
+                }
+            });
+        }
+        let pick = gtk::MenuButton::new();
+        pick.set_child(Some(&chip));
+        pick.set_tooltip_text(Some("Node Colour"));
+        pick.add_css_class("flat");
+        let pop = gtk::Popover::new();
+        pop.set_has_arrow(false);
+        let palette = gtk::Box::new(gtk::Orientation::Vertical, 2);
+        palette.set_margin_top(6);
+        palette.set_margin_bottom(6);
+        palette.set_margin_start(6);
+        palette.set_margin_end(6);
+        {
+            let dot = |c: u32| {
+                let a = gtk::DrawingArea::new();
+                a.set_content_width(18);
+                a.set_content_height(18);
+                a.set_draw_func(move |_, cr, w, h| {
+                    cr.set_source_rgb(((c >> 16) & 0xff) as f64 / 255.0, ((c >> 8) & 0xff) as f64 / 255.0, (c & 0xff) as f64 / 255.0);
+                    cr.arc(w as f64 / 2.0, h as f64 / 2.0, (w.min(h) as f64 / 2.0) - 1.0, 0.0, std::f64::consts::TAU);
+                    let _ = cr.fill();
+                });
+                a
+            };
+            let mut row: Option<gtk::Box> = None;
+            for (i, (_, rgb)) in NODE_COLORS.iter().enumerate() {
+                if i % 4 == 0 {
+                    let r = gtk::Box::new(gtk::Orientation::Horizontal, 2);
+                    palette.append(&r);
+                    row = Some(r);
+                }
+                let b = gtk::Button::builder().css_classes(["flat"]).tooltip_text(format!("#{rgb:06x}")).build();
+                b.set_child(Some(&dot(*rgb)));
+                let (me, d, pop2, rgb) = (self.clone(), doc.clone(), pop.clone(), *rgb);
+                b.connect_clicked(move |_| {
+                    let ids = d.borrow().canvas.selected();
+                    me.set_node_color(&d, &ids, Some(rgb));
+                    pop2.popdown();
+                });
+                if let Some(r) = &row {
+                    r.append(&b);
+                }
+            }
+        }
+        {
+            let (me, d, pop2) = (self.clone(), doc.clone(), pop.clone());
+            let none = gtk::Button::builder().label("No Color").css_classes(["flat"]).build();
+            none.connect_clicked(move |_| {
+                let ids = d.borrow().canvas.selected();
+                me.set_node_color(&d, &ids, None);
+                pop2.popdown();
+            });
+            palette.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+            palette.append(&none);
+        }
+        pop.set_child(Some(&palette));
+        pick.set_popover(Some(&pop));
+        bar.append(&pick);
+
+        // Framing many nodes is a group in this engine (it has no "frame" node), so it only shows
+        // up for multi-selections — same visibility rule as ComfyUI's arrange/frame buttons.
+        let frame = icon("cg-zoom-fit-best-symbolic", "Frame Selected Nodes");
+        {
+            let (me, d) = (self.clone(), doc.clone());
+            frame.connect_clicked(move |_| {
+                let ids = d.borrow().canvas.selected();
+                me.add_group(&d, &ids, None);
+            });
+        }
+        frame.set_visible(false);
+        bar.append(&frame);
+
+        {
+            let (me, d) = (self.clone(), doc.clone());
+            let b = icon("cg-go-next-symbolic", "Bypass/Unbypass Selected Nodes");
+            b.connect_clicked(move |_| {
+                let ids = d.borrow().canvas.selected();
+                me.bypass(&d, &ids);
+            });
+            bar.append(&b);
+        }
+
+        {
+            let b = icon("cg-view-more-symbolic", "More Options");
+            let (me, d, b2) = (self.clone(), doc.clone(), b.clone());
+            b.connect_clicked(move |_| {
+                let ids = d.borrow().canvas.selected();
+                let Some(first) = ids.first().cloned() else { return };
+                let entries = me.node_entries(&d, &first, &ids);
+                let (w, h) = (b2.width() as f64, b2.height() as f64);
+                me.show_menu(&b2, w / 2.0, h, entries);
+            });
+            bar.append(&b);
+        }
+
+        // Follow the selection every frame. The tick lives on the canvas (always mapped) — a
+        // hidden widget gets no frames, so the bar itself cannot own the callback.
+        {
+            let (cv, bar2, chip2, frame2) = (canvas.clone(), bar.clone(), chip.clone(), frame.clone());
+            canvas.area.add_tick_callback(move |_, _| {
+                let Some((x, y, w, _, count)) = cv.selection_box() else {
+                    if bar2.is_visible() {
+                        bar2.set_visible(false);
+                    }
+                    return glib::ControlFlow::Continue;
+                };
+                let c = cv.selection_color().unwrap_or(u32::MAX);
+                if c != shown.get() {
+                    shown.set(c);
+                    chip2.queue_draw();
+                }
+                if frame2.is_visible() != (count > 1) {
+                    frame2.set_visible(count > 1);
+                }
+                let cx = x + w / 2.0;
+                let (mx, my) = (
+                    (cx - bar2.width() as f64 / 2.0).round().max(4.0) as i32,
+                    (y - 16.0 - bar2.height() as f64).round().max(4.0) as i32,
+                );
+                if bar2.margin_start() != mx {
+                    bar2.set_margin_start(mx);
+                }
+                if bar2.margin_top() != my {
+                    bar2.set_margin_top(my);
+                }
+                if !bar2.is_visible() {
+                    bar2.set_visible(true);
+                }
+                glib::ControlFlow::Continue
+            });
+        }
+        bar.upcast()
+    }
+
     fn context_menu(&self, doc: &DocRef, x: f64, y: f64, hit: canvas::Hit) {
         // Pseudo-nodes have no model counterpart: fall back to the canvas menu.
         let hit = match &hit {
@@ -2603,57 +3006,7 @@ impl Workspace {
         }
         match hit {
             canvas::Hit::Widget(..) => {}
-            canvas::Hit::Node(id) => {
-                let (mode, collapsed, title, is_sub) = {
-                    let d = doc.borrow();
-                    match graph_ref(&d).node(&id) {
-                        Some(n) => (n.mode, n.collapsed, n.title.clone().unwrap_or_default(), d.wf.subgraphs.contains_key(&n.ty)),
-                        None => return,
-                    }
-                };
-                let bypassed = mode == workflow::MODE_BYPASS;
-                let muted = mode == workflow::MODE_NEVER;
-                {
-                    let (me, d, i) = (self.clone(), doc.clone(), ids.clone());
-                    entries.push(item(
-                        if bypassed { "Un-Bypass Node" } else { "Bypass Node (Ctrl+B)" },
-                        move || me.bypass(&d, &i),
-                    ));
-                }
-                {
-                    let (me, d, i) = (self.clone(), doc.clone(), ids.clone());
-                    entries.push(item(
-                        if muted { "Un-Mute Node" } else { "Mute Node (Ctrl+M)" },
-                        move || me.mute(&d, &i),
-                    ));
-                }
-                {
-                    let (me, d, i) = (self.clone(), doc.clone(), ids.clone());
-                    entries.push(item(if collapsed { "Expand Node" } else { "Collapse Node" }, move || me.collapse(&d, &i)));
-                }
-                entries.push(Entry::Line);
-                {
-                    let (me, d) = (self.clone(), doc.clone());
-                    let (node, initial) = (id.clone(), title.clone());
-                    entries.push(item("Edit Title…", move || {
-                        let (me2, d2, node2, initial2) = (me.clone(), d.clone(), node.clone(), initial.clone());
-                        me.text_dialog("Node Title", &initial2, move |t| me2.set_title(&d2, &node2, t));
-                    }));
-                }
-                if is_sub {
-                    let (me, d) = (self.clone(), doc.clone());
-                    let node = id.clone();
-                    entries.push(item("Open Subgraph", move || me.open_node(&d, &node)));
-                }
-                {
-                    let (me, d, i) = (self.clone(), doc.clone(), ids.clone());
-                    entries.push(item("Duplicate Node", move || me.duplicate_nodes(&d, &i)));
-                }
-                {
-                    let (me, d, i) = (self.clone(), doc.clone(), ids.clone());
-                    entries.push(danger("Delete Node", move || me.delete_nodes(&d, &i)));
-                }
-            }
+            canvas::Hit::Node(id) => entries.extend(self.node_entries(doc, &id, &ids)),
             canvas::Hit::Group(gi) => {
                 let title = {
                     let d = doc.borrow();

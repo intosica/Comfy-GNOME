@@ -5,7 +5,7 @@ Each phase ends with a runnable build, updated `AGENT-HANDOFF.md`, and screensho
 ## Phase 1 — Shell & Prototype ✅ (session 1)
 - [x] Cargo project, GPL-3.0 headers, LICENSE, Flatpak manifest + `.desktop`
 - [x] Libadwaita splash: ComfyUI folder (auto-detected), optional launch script, extra args, browser-launch blocking, host/port, "Skip — Connect to Running Backend"
-- [x] Folder launch (venv auto-activate) and script launch: own process group, log streamed to panel, killed on close/crash; `flatpak-spawn --host` in Flatpak; main-window ✕ quits the app (hidden Settings/Templates windows no longer keep it alive); subgraph double-click no longer collapses; hover-only edge bar reveals the sidebar; sidebar squeezes down to ~130 px; Flatpak palette/font/icons match native (session 23); Add Node search is a frontend port: link-release type filters, root chips, category tree, native icons (session 24); screenshot protocol uses the ComfyUI_00004 workflow in dark mode (session 25); Flatpak no longer reuses an orphaned backend (stale group reaped on launch, SIGTERM stops backend) (session 26)
+- [x] Folder launch (venv auto-activate) and script launch: own process group, log streamed to panel, killed on close/crash; `flatpak-spawn --host` in Flatpak; main-window ✕ quits the app (hidden Settings/Templates windows no longer keep it alive); subgraph double-click no longer collapses; hover-only edge bar reveals the sidebar; sidebar squeezes down to ~130 px; Flatpak palette/font/icons match native (session 23); Add Node search is a frontend port: link-release type filters, root chips, category tree, native icons (session 24); screenshot protocol uses the ComfyUI_00004 workflow in dark mode (session 25); Flatpak no longer reuses an orphaned backend (stale group reaped on launch, SIGTERM stops backend) (session 26); prompt editors always open (popovers flip/shrink to the room around their row), node text scrolls with a thin scrollbar, the reveal bar stops at the tab and dock rows, sidebar pages are non-homogeneous so ⋮ survives the squeeze, queue rows open a picture in a new workflow or in the file manager, and a floating selection toolbar (delete / colour / frame / bypass / node menu) follows the selection (session 27)
 - [x] Bundled symbolic icons (gresource), `launch-system.sh` / `launch-flatpak.sh` launchers
 - [x] Backend reachability poll (`GET /system_stats`)
 - [x] Workspace: sidebar (Workflows/Queue placeholders), canvas, bottom log panel
@@ -147,3 +147,11 @@ Each phase ends with a runnable build, updated `AGENT-HANDOFF.md`, and screensho
 - [x] Right-click: "Show Item Location" via `org.freedesktop.FileManager1.ShowItems` (falls back to opening the folder) and "Delete N Selected…" behind an "Are you sure?" dialog that **moves to the Trash** — never unlinks
 - [x] Drag a thumbnail onto the canvas: an image with ComfyUI metadata opens its workflow in a new tab, one without it uploads and lands as a preloaded Load Image node at the drop point
 - [x] Full-window Ctrl+A no longer steals focus from search fields
+
+## Phase 4k — Selection toolbar, scrolling text, queue menus ✅ (session 27)
+- [x] Floating selection toolbar above the selected node(s): delete, colour swatches, frame into a group (multi), bypass, node menu; follows pan/zoom every frame
+- [x] Node colours from the menu or the toolbox (`bgcolor` + darkened title bar, same eight swatches as groups)
+- [x] Multiline widget text scrolls with the wheel (never stealing canvas zoom) and shows a thin white scrollbar
+- [x] Every widget popover (prompt editor, combo list) is sized and flipped to the room around its row, so a click never silently fails to open it
+- [x] Sidebar reveal bar is bounded by the tab row and the Log/Preview dock; sidebar pages are non-homogeneous so row actions (⋮) stay visible down to the minimum width
+- [x] Queue history rows: right-click (or ⋮) → "Open in New Workflow" (preloaded LoadImage in a temp tab) and "Open Item Location" (host file manager)

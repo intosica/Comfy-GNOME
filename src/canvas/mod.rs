@@ -215,6 +215,8 @@ struct State {
     sel: HashSet<String>,
     /// Decoded previews by `/view` query; `None` while loading or when undecodable.
     images: HashMap<String, Option<gtk::cairo::ImageSurface>>,
+    /// Multiline text widgets scrolled with the wheel: node id → widget key → canvas px.
+    text_scroll: HashMap<String, HashMap<String, f64>>,
     /// Host node id currently executing (green outline).
     running: Option<String>,
     /// Snap node moves/resizes to `snap_grid` (`Comfy.SnapToGrid.GridSize`).
@@ -225,6 +227,31 @@ struct State {
     /// Subgraph collapse waiting out the double-click interval (a double-click enters the
     /// subgraph instead of collapsing it).
     pending_collapse: Option<gtk::glib::SourceId>,
+}
+
+impl State {
+    /// Wheel over a multiline text widget scrolls its text instead of zooming the
+    /// canvas. Returns whether the wheel was consumed.
+    fn scroll_text(&mut self, dy: f64) -> bool {
+        let c = self.view.to_canvas(self.pointer);
+        let Some(&i) = self.order.iter().rev().find(|&&i| self.nodes[i].contains(c)) else { return false };
+        let n = &self.nodes[i];
+        let Some((wi, _)) = n.widget_at(c) else { return false };
+        let Some(w) = n.widgets.get(wi).filter(|w| w.multiline()) else { return false };
+        let r = n.row(wi);
+        let max = widgets::text_content_h(w.value.as_str().unwrap_or(""), r[2]) - r[3];
+        if max <= 0.5 {
+            return false;
+        }
+        let off = self.text_scroll.entry(n.id.clone()).or_default().entry(w.key.clone()).or_insert(0.0);
+        let next = (*off + dy * 3.0 * widgets::LINE_H).clamp(0.0, max);
+        // At either end the wheel goes back to zooming instead of being swallowed.
+        if (next - *off).abs() < 0.5 {
+            return false;
+        }
+        *off = next;
+        true
+    }
 }
 
 /// litegraph `snapPoint`: round to the nearest multiple; `0` keeps the value.
@@ -404,6 +431,13 @@ impl Canvas {
         s.links = links;
         s.groups = groups;
         s.drag = None;
+        // Widgets are rebuilt per scene: keep scroll only for widgets that still exist.
+        let State { nodes, text_scroll, .. } = &mut *s;
+        text_scroll.retain(|id, m| {
+            let Some(n) = nodes.iter().find(|n| &n.id == id) else { return false };
+            m.retain(|k, _| n.widgets.iter().any(|w| &w.key == k));
+            !m.is_empty()
+        });
         drop(s);
         self.pending_fit.set(true);
         self.fit_view();
@@ -724,6 +758,30 @@ impl Canvas {
         v
     }
 
+    /// Bounds of the selection in area coordinates, plus how many nodes it holds. `None` when
+    /// nothing is selected — the floating toolbox uses this to follow the nodes.
+    pub fn selection_box(&self) -> Option<(f64, f64, f64, f64, usize)> {
+        let s = self.state.borrow();
+        if s.sel.is_empty() {
+            return None;
+        }
+        let mut b = [f64::MAX, f64::MAX, f64::MIN, f64::MIN];
+        for n in s.nodes.iter().filter(|n| s.sel.contains(&n.id)) {
+            b = [b[0].min(n.pos.0), b[1].min(n.pos.1 - TITLE_H), b[2].max(n.pos.0 + n.size.0), b[3].max(n.pos.1 + n.body_h())];
+        }
+        if b[0] > b[2] {
+            return None;
+        }
+        let (x, y) = s.view.to_screen((b[0], b[1]));
+        Some((x, y, (b[2] - b[0]) * s.view.zoom, (b[3] - b[1]) * s.view.zoom, s.sel.len()))
+    }
+
+    /// Body colour of the first selected node, for the toolbox swatch.
+    pub fn selection_color(&self) -> Option<u32> {
+        let s = self.state.borrow();
+        s.nodes.iter().find(|n| s.sel.contains(&n.id)).and_then(|n| n.bgcolor)
+    }
+
     pub fn select(&self, ids: &[String]) {
         self.state.borrow_mut().sel = ids.iter().cloned().collect();
         self.area.queue_draw();
@@ -817,6 +875,11 @@ impl Canvas {
         let (st, area) = (self.state.clone(), self.area.clone());
         scroll.connect_scroll(move |_, _, dy| {
             let mut s = st.borrow_mut();
+            if s.scroll_text(dy) {
+                drop(s);
+                area.queue_draw();
+                return gtk::glib::Propagation::Stop;
+            }
             let p = s.pointer;
             s.view.zoom_at(p, 1.1f64.powf(-dy));
             drop(s);
@@ -1550,7 +1613,8 @@ fn draw(cr: &gtk::cairo::Context, s: &State, w: f64, h: f64) {
             if matches!(w.kind, WKind::Cloud(..)) {
                 widgets::draw_cloud(cr, w, [x + r[0], y + r[1], r[2], r[3]], &s.images);
             } else {
-                widgets::draw(cr, w, [x + r[0], y + r[1], r[2], r[3]], linked);
+                let scroll = s.text_scroll.get(&n.id).and_then(|m| m.get(&w.key)).copied().unwrap_or(0.0);
+                widgets::draw(cr, w, [x + r[0], y + r[1], r[2], r[3]], linked, scroll);
             }
         }
         if let (Some(r), Some(key)) = (n.img_rect, n.images.first()) {

@@ -15,6 +15,10 @@ use std::time::Duration;
 pub const ROW_H: f64 = 20.0;
 pub const GAP: f64 = 4.0;
 pub const MULTI_MIN: f64 = 60.0;
+/// Multiline text metrics, shared by `draw` and the scroll math in `mod.rs`.
+pub const LINE_H: f64 = 14.0;
+const TEXT_TOP: f64 = 15.0;
+const TEXT_INSET: f64 = 8.0;
 
 /// Backend used for prompt autocomplete. The editor silently stays plain when the
 /// Lora Manager routes are absent, so this is safe for every text widget.
@@ -174,8 +178,9 @@ fn label_of(mode: CloudMode, t: &Value) -> String {
     if i.is_empty() { n } else { format!("{n} {i}") }
 }
 
-/// Pill rects (relative to the row origin) and total height for a cloud of `width`.
-pub fn cloud_layout(w: &Widget, width: f64) -> (Vec<Pill>, f64) {
+/// Scratch context for measuring text with the widget font. Nothing is painted
+/// with it, so a 1×1 surface is enough; cloning hands out a cheap reference.
+fn scratch() -> Context {
     thread_local! {
         static SCRATCH: Context = {
             let s = gtk::cairo::ImageSurface::create(gtk::cairo::Format::ARgb32, 1, 1).expect("scratch surface");
@@ -184,7 +189,26 @@ pub fn cloud_layout(w: &Widget, width: f64) -> (Vec<Pill>, f64) {
             cr
         };
     }
+    SCRATCH.with(|c| c.clone())
+}
+
+/// Wrapped lines of a multiline text widget `rw` wide, exactly as `draw` lays them out.
+pub fn text_lines(text: &str, rw: f64) -> Vec<String> {
+    wrap(&scratch(), text, (rw - 2.0 * TEXT_INSET).max(24.0))
+}
+
+/// Total height of a multiline text widget's wrapped text, `draw`'s geometry.
+pub fn text_content_h(text: &str, rw: f64) -> f64 {
+    if text.is_empty() {
+        return 0.0;
+    }
+    (text_lines(text, rw).len() as f64 - 1.0) * LINE_H + TEXT_TOP + 6.0
+}
+
+/// Pill rects (relative to the row origin) and total height for a cloud of `width`.
+pub fn cloud_layout(w: &Widget, width: f64) -> (Vec<Pill>, f64) {
     let WKind::Cloud(mode) = &w.kind else { return (vec![], ROW_H) };
+    let cr = scratch();
     let mode = *mode;
     let tags = w.value.as_array().cloned().unwrap_or_default();
     let mut out = vec![];
@@ -223,17 +247,15 @@ pub fn cloud_layout(w: &Widget, width: f64) -> (Vec<Pill>, f64) {
         }
         _ => {}
     }
-    SCRATCH.with(|cr| {
-        for (i, t) in tags.iter().enumerate().filter(|(_, t)| shown(t)) {
-            let pw = (super::text::width(cr, &label_of(mode, t)) + 10.0).min(width);
-            if x + pw > width && x > 0.0 {
-                x = 0.0;
-                y += 25.0;
-            }
-            out.push(Pill { r: [x, y, pw, 20.0], hit: CHit::Tag(i) });
-            x += pw + 5.0;
+    for (i, t) in tags.iter().enumerate().filter(|(_, t)| shown(t)) {
+        let pw = (super::text::width(&cr, &label_of(mode, t)) + 10.0).min(width);
+        if x + pw > width && x > 0.0 {
+            x = 0.0;
+            y += 25.0;
         }
-    });
+        out.push(Pill { r: [x, y, pw, 20.0], hit: CHit::Tag(i) });
+        x += pw + 5.0;
+    }
     (out, y + 20.0)
 }
 
@@ -356,6 +378,10 @@ pub fn fit(cr: &Context, s: &str, max: f64) -> String {
 }
 
 fn pill(cr: &Context, r: [f64; 4], fill: u32) {
+    pill_a(cr, r, fill, 1.0);
+}
+
+fn pill_a(cr: &Context, r: [f64; 4], fill: u32, a: f64) {
     let (x, y, w, h, rad) = (r[0], r[1], r[2], r[3], 6.0f64.min(r[3] / 2.0));
     cr.new_sub_path();
     cr.arc(x + w - rad, y + rad, rad, -PI / 2.0, 0.0);
@@ -363,7 +389,7 @@ fn pill(cr: &Context, r: [f64; 4], fill: u32) {
     cr.arc(x + rad, y + h - rad, rad, PI / 2.0, PI);
     cr.arc(x + rad, y + rad, rad, PI, 1.5 * PI);
     cr.close_path();
-    rgb(cr, fill);
+    rgb_a(cr, fill, a);
     cr.fill().ok();
 }
 
@@ -395,8 +421,9 @@ fn wrap(cr: &Context, text: &str, max: f64) -> Vec<String> {
     lines
 }
 
-/// Paint one widget into absolute rect `r`. `linked`: its input socket is wired.
-pub fn draw(cr: &Context, w: &Widget, r: [f64; 4], linked: bool) {
+/// Paint one widget into absolute rect `r`. `linked`: its input socket is wired;
+/// `scroll`: the text offset of a multiline widget, in canvas pixels.
+pub fn draw(cr: &Context, w: &Widget, r: [f64; 4], linked: bool, scroll: f64) {
     let [x, y, rw, rh] = r;
     let base = if matches!(w.kind, WKind::Button) { 0x3a3a3a } else { 0x222222 };
     let (dim, txt) = if linked { (0x555555, 0x777777) } else { (0x888888, 0xdddddd) };
@@ -444,23 +471,34 @@ pub fn draw(cr: &Context, w: &Widget, r: [f64; 4], linked: bool) {
         }
         WKind::Text { multiline: true } => {
             let text = w.value.as_str().unwrap_or("");
+            let content = text_content_h(text, rw);
+            let max = (content - rh).max(0.0);
+            let off = scroll.clamp(0.0, max);
             cr.save().ok();
             cr.rectangle(x + 2.0, y + 2.0, rw - 4.0, rh - 4.0);
             cr.clip();
             if text.is_empty() {
                 rgb(cr, 0x666666);
-                cr.move_to(x + 8.0, y + 15.0);
+                cr.move_to(x + TEXT_INSET, y + TEXT_TOP);
                 super::text::show(cr, &w.label);
             } else {
                 rgb(cr, txt);
-                for (i, line) in wrap(cr, text, rw - 16.0).iter().enumerate() {
-                    let ly = y + 15.0 + i as f64 * 14.0;
-                    if ly > y + rh {
+                for (i, line) in text_lines(text, rw).iter().enumerate() {
+                    let ly = y + TEXT_TOP + i as f64 * LINE_H - off;
+                    if ly > y + rh + LINE_H {
                         break;
                     }
-                    cr.move_to(x + 8.0, ly);
+                    if ly < y + TEXT_TOP - LINE_H {
+                        continue;
+                    }
+                    cr.move_to(x + TEXT_INSET, ly);
                     super::text::show(cr, line);
                 }
+            }
+            if max > 0.0 {
+                let track = rh - 12.0;
+                let thumb = (track * rh / content).max(10.0);
+                pill_a(cr, [x + rw - 7.5, y + 6.0 + (track - thumb) * (off / max), 4.0, thumb], 0xffffff, 0.6);
             }
             cr.restore().ok();
         }
@@ -523,11 +561,32 @@ pub fn draw(cr: &Context, w: &Widget, r: [f64; 4], linked: bool) {
 
 // ---- popover editors -------------------------------------------------------------
 
+/// Vertical space a popover spends outside its content (shadow, padding, footer row).
+const POPOVER_CHROME: f64 = 104.0;
+
+/// Vertical room above and below widget rect `r` (area coords), in window pixels.
+/// A popover that does not fit the window is never mapped at all, so editors size
+/// themselves to whatever the window actually leaves them.
+fn room(area: &gtk::DrawingArea, r: [i32; 4]) -> (f64, f64) {
+    let Some(win) = area.root().and_then(|w| w.downcast::<gtk::Window>().ok()) else { return (600.0, 600.0) };
+    let top = area.compute_bounds(&win).map_or(0.0, |b| b.y() as f64);
+    let y = top + r[1] as f64;
+    ((y - 8.0).max(0.0), (win.height() as f64 - y - r[3] as f64 - 8.0).max(0.0))
+}
+
+/// Height a popover child may spend on its own content: the room on the better side
+/// of `r`, minus the popover chrome (shadow, padding, footer row) and a side margin.
+fn budget(area: &gtk::DrawingArea, r: [i32; 4]) -> f64 {
+    let (above, below) = room(area, r);
+    (above.max(below) - 10.0 - POPOVER_CHROME).max(80.0)
+}
+
 fn popover(area: &gtk::DrawingArea, r: [i32; 4]) -> gtk::Popover {
     let p = gtk::Popover::new();
     p.set_parent(area);
     p.set_pointing_to(Some(&gdk::Rectangle::new(r[0], r[1], r[2], r[3])));
-    p.set_position(gtk::PositionType::Bottom);
+    let (above, below) = room(area, r);
+    p.set_position(if above > below { gtk::PositionType::Top } else { gtk::PositionType::Bottom });
     let a = area.clone();
     p.connect_closed(move |p| {
         let (p, a) = (p.clone(), a.clone());
@@ -644,7 +703,10 @@ pub fn edit_combo(area: &gtk::DrawingArea, r: [i32; 4], options: &[String], curr
             b.emit_clicked();
         }
     });
-    let sc = gtk::ScrolledWindow::builder().child(&list).min_content_height(280).min_content_width(300).build();
+    // Same fit rule as the text editor: a popover taller than the window side is never
+    // mapped, so the list shrinks to whatever room the node leaves.
+    let list_h = (budget(area, r) - 60.0).clamp(120.0, 280.0) as i32;
+    let sc = gtk::ScrolledWindow::builder().child(&list).min_content_height(list_h).min_content_width(300).build();
     let bx = gtk::Box::new(gtk::Orientation::Vertical, 6);
     bx.append(&search);
     bx.append(&sc);
@@ -754,13 +816,18 @@ pub fn edit_text(
             gtk::glib::Propagation::Stop
         });
         tv.add_controller(keys);
-        // As wide as the widget on screen (min 420), tall enough to read a real prompt.
+        // As wide as the widget on screen (min 420), tall enough to read a real prompt,
+        // and never taller than the side of the window it opens into.
+        let fit = budget(area, r);
+        let show_sug = completion.is_some() && fit >= 200.0;
+        let sug_h = if show_sug { 140.0f64.min(fit - 120.0) } else { 0.0 };
+        let editor_h = (fit - sug_h).clamp(110.0, 260.0);
         let w = r[2].clamp(420, 900);
         let sc = gtk::ScrolledWindow::builder()
             .child(&tv)
             .min_content_width(w)
             // Fixed height: a popover that changes size while open gets dismissed on X11.
-            .min_content_height(260)
+            .min_content_height(editor_h as i32)
             .width_request(w)
             .hscrollbar_policy(gtk::PolicyType::Never)
             .build();
@@ -773,9 +840,9 @@ pub fn edit_text(
         sug_list.set_placeholder(Some(&gtk::Label::builder().label("Suggestions appear as you type").css_classes(["dim-label", "caption"]).build()));
         let sug_sc = gtk::ScrolledWindow::builder()
             .child(&sug_list)
-            .min_content_height(140)
+            .min_content_height(sug_h.max(70.0) as i32)
             .hscrollbar_policy(gtk::PolicyType::Never)
-            .visible(completion.is_some())
+            .visible(show_sug)
             .build();
         if let Some(comp) = completion {
             let prefs = Rc::new(RefCell::new(crate::api::LmPrefs::default()));

@@ -1,6 +1,6 @@
 # AGENT HANDOFF
 
-_Last updated: session 26 (Flatpak orphaned-backend "Broken pipe" fix; real result image in the demo — see the last section).
+_Last updated: session 27 (prompt editor always opens, scrolling node text, sidebar squeeze, queue menus, floating selection toolbar — see the last section).
 
 Project: **Comfy-GNOME** at `/home/montel/Documents/Comfy-GNOME` (renamed from `GNOME-Comfyu` → `GNOME-ComfyUI` → this).
 Crate/binary `comfy-gnome`, app id `io.github.comfygnome.ComfyGnome` (`APP_ID` in `src/main.rs`).
@@ -952,3 +952,60 @@ Old harbour leftovers in the mock (`PROMPTS`, `SUBGRAPH_ID`, `TEMPLATES`, `harbo
   `tools/demo/workflow.json` is 555 px tall so the node preview (which appears only after pressing Run, because the
   frame needs a run doc) is big enough to read. `docs/screenshots/{graph,queue}.png` regenerated.
 - Scratch tip: delete `/tmp/demo-config/comfy-gnome/session.json` between demo runs, otherwise the old tabs restore.
+
+## Session 27 — prompt editor, scrolling text, squeeze, queue menus, selection toolbar
+
+Director's list (session 27 request): "clicking on prompt can sometimes not open the editor"; node text boxes need real
+scrolling with a thin white scrollbar and a wheel that does **not** zoom the canvas; the reveal bar must not run past the
+tab row or the Log/Preview bar; the sidebar squeeze must keep the ⋮ buttons visible until it hits its minimum width;
+right-click a queue image for "Open in New Workflow" / "Open Item Location"; and the floating selection toolbar from
+`reference/Node Selection/`. Plus the standing rule: *robust, generic translations — no gerryrigging*, so future nodes
+work without the node author adapting to our UI.
+
+- **Prompt editor never opened (root cause)**: `edit_text`'s popover was 484×507 px (editor 260 + suggestions 140 +
+  chrome ~104). Anchored below a widget row near the bottom of the window it did not fit, and GTK simply never mapped it —
+  no window, no warning (proof: `DISPLAY=:96 xwininfo -root -tree | grep comfy-gnome` showed no second toplevel; panning
+  the same node 110 px up made the identical click open `484x507+573+290`). Fix in `src/canvas/widgets.rs`:
+  `fn room(area, r) -> (above, below)` measures the free space around the row (window height minus the area's offset),
+  `fn budget(area, r) -> f64 = (above.max(below) - 10.0 - POPOVER_CHROME).max(80.0)`, `popover()` flips to
+  `PositionType::Top` when `above > below`, and `edit_text`/`edit_combo` size their editor and option list from that
+  budget (suggestions appear only when `fit >= 200`, editor `clamp(110, 260)`). Verified: single click now opens a
+  484×392 popover **above** a bottom-of-window node.
+- **Scrolling node text**: `State.text_scroll: HashMap<node id, HashMap<widget key, px>>` survives re-scenes (pruned in
+  `set_graph`); `widgets::text_lines`/`text_content_h` measure with the shared 1×1 pangocairo scratch context (12 pt, the
+  same font widgets are drawn with); `widgets::draw` takes the offset, clips, and paints a white (`pill_a`, α 0.6)
+  4 px scrollbar with a proportional thumb; `State::scroll_text(dy)` hit-tests the wheel pointer, only consumes it over an
+  overflowing multiline row (and not at the ends), so `connect_scroll` zooms otherwise — zoom stays 47 % while the prompt
+  scrolls.
+- **Reveal bar bounded**: the translucent `button.sidebar-reveal` no longer spans the window (`shell` Overlay is gone).
+  The tab strip now lives in a `gtk::Overlay` (`canvas_overlay`) and the bar is one overlay child, so it runs exactly from
+  under the tab row to the top of the Log/Preview dock.
+- **Sidebar squeeze**: the ⋮ suffix buttons were clipped long before the minimum width because `adw::ViewStack` is
+  homogeneous — its min width is the widest *hidden* page, and the Memory page (`reaper::page`) measures 357 px
+  (label + SpinButton rows), so the pane was cut at 298 px. One line fixes it for every page:
+  `side_stack.set_hhomogeneous(false)` (min becomes the visible page's 171 px). Queue rows also set
+  `hscrollbar_policy(Never)` so a narrow pane never grows a horizontal scrollbar at the bottom.
+- **Node colours**: `Workspace::set_node_color(doc, ids, Option<u32>)` writes ComfyUI's pairing (`bgcolor` = body,
+  `color` = `shade(c, 0.72)` title bar) as hex strings; `NODE_COLORS` = the same eight swatches groups use; the node
+  context menu gained the `Entry::Swatches` row.
+- **Floating selection toolbar** (`Workspace::selection_toolbar`, `reference/Node Selection/`): the tab page is an
+  Overlay whose second child is a `box.osd.selection-toolbar` holding Delete, Colour (`MenuButton` + palette popover,
+  empty ring when the selection has no colour), Frame (`add_group`, multi-selection only), Bypass and ⋮ (the full node
+  menu). Position comes from `Canvas::selection_box()` (area coords, union of the selected nodes incl. title bar) and
+  `Canvas::selection_color()`; a **tick callback on the canvas** (not on the bar — a hidden widget gets no frame clock)
+  re-centres it every frame, so it tracks pan and zoom. The menu entries are shared with the context menu via
+  `Workspace::node_entries(doc, id, ids)`. Not ported: the frontend's ⓘ info button (no data source in this engine) and
+  "convert to subgraph" (no engine support) — the 4-arrow button frames the selection into a group instead.
+- **Queue row menus**: right-click on a history row (and the ⋮ menu) now offers **Open in New Workflow** —
+  `open_image_in_new_workflow` opens a blank temp tab, fetches `/view`, uploads it and drops a preloaded native
+  `LoadImage` node in the middle of the view (`place_image`/`place_image_at`, shared with file drops) — and
+  **Open Item Location** — `open_item_location` reveals `output/<subfolder>/<file>` with
+  `nautilus|dolphin --select` (else `thunar`, else `xdg-open`), through `flatpak-spawn --host` in Flatpak.
+  Verified: a `nautilus --select …/harbour_00003_.png` process appears.
+- **Demo harness**: `tools/demo/mock_backend.py` now serves history images in the real wire shape
+  (`outputs[node].images` = list of `{filename, subfolder, type}` **objects** — a list made every row show an empty
+  filename), accepts multipart `POST /upload/image` (it used to `json.loads` the bytes and 500), and has a `LoadImage`
+  definition with `image_upload` so "Open in New Workflow" can create its node.
+- Scratch tips: openbox reparents windows, so count popovers with `xwininfo -root -tree`, not `-children`; a hidden GTK
+  widget never runs a tick callback; `xdotool mousemove X Y click 1` in one call can lose the move for a widget that
+  re-lays out each frame — separate the move from the click when a click "does nothing".

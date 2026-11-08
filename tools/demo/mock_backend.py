@@ -38,6 +38,9 @@ NODES = {
                           "latent_image": ["LATENT"], "denoise": ["FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01}]}),
     "VAEDecode": dict(cat="latent", out=["IMAGE"], req={"samples": ["LATENT"], "vae": ["VAE"]}),
     "SaveImage": dict(cat="image", out=[], req={"images": ["IMAGE"], "filename_prefix": ["STRING", {"default": "ComfyUI"}]}),
+    # Target of "Open in New Workflow" and of a dropped picture (`image_upload` adds the picker).
+    "LoadImage": dict(cat="image", out=["IMAGE", "MASK"],
+                      req={"image": [["example.png", "harbour_00003_.png"], {"image_upload": True}]}),
     "LoraLoader": dict(cat="loaders", out=["MODEL", "CLIP"],
                        req={"model": ["MODEL"], "clip": ["CLIP"],
                             "lora_name": [["anime_linework_xl.safetensors", "film_grain_xl.safetensors", "detail_slider_xl.safetensors"]],
@@ -100,6 +103,7 @@ def node_info():
 RESULT = open(os.path.join(os.path.dirname(__file__), "result.jpg"), "rb").read()
 
 STATE = dict(queue=[], history={}, counter=0)
+NOW = time.time()
 PROMPTS = [
     ("3f9c11aa-0b6e-4a3e-9c02-5f8d1b7e5a10", 100.0, "harbour"),
     ("b2d40c77-1a9d-4f21-8a63-2ee71c4b9d38", 74.5, "harbour_seed41"),
@@ -193,10 +197,15 @@ class Handler(BaseHTTPRequestHandler):
         if p == "/history":
             items = {}
             for pid, dur, prefix in PROMPTS:
-                stamps = [[f"harbour_{i:05d}_.png", {"workflow": graph_for(""), "prompt": {}}] for i in (3, 2, 1)]
+                # Real wire shape: one object per image (`/history` nests them under
+                # outputs[node].images); a list here shows up as an empty filename.
+                stamps = [dict(filename=f"harbour_{i:05d}_.png", subfolder="", type="output")
+                          for i in (3, 2, 1)]
+                end = NOW - 60.0 * (len(items) + 1)
                 items[pid] = dict(prompt=[0, pid, {}, {"client_id": "comfy-gnome-demo"}, ["469"]],
                                   outputs={"469": dict(images=stamps)}, status=dict(status_str="success", completed=True,
-                                                                                  messages=[["execution_start", {"timestamp": 0}]]),
+                                                                                  messages=[["execution_start", {"timestamp": (end - dur) * 1000}],
+                                                                                            ["execution_success", {"timestamp": end * 1000}]]),
                                   meta=dict())
             return self.send(200, items)
         if p == "/history/":
@@ -221,7 +230,17 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         p = unquote(urlparse(self.path).path)
         n = int(self.headers.get("Content-Length") or 0)
-        body = json.loads(self.rfile.read(n) or b"{}")
+        raw = self.rfile.read(n)
+        if p == "/upload/image":
+            # Multipart form: remember the filename the way ComfyUI's input folder does.
+            name = "uploaded.png"
+            marker = b'filename="'
+            if marker in raw:
+                start = raw.index(marker) + len(marker)
+                name = raw[start:raw.index(b'"', start)].decode("utf-8", "replace")
+            STATE.setdefault("uploads", []).append(name)
+            return self.send(200, dict(name=name, subfolder="", type="input"))
+        body = json.loads(raw or b"{}")
         if p == "/prompt":
             STATE["counter"] += 1
             pid = f"demo-{STATE['counter']}"
