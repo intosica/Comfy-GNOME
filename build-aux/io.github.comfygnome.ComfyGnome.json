@@ -14,7 +14,8 @@
         "--socket=wayland",
         "--device=dri",
         "--filesystem=home",
-        "--talk-name=org.freedesktop.Flatpak"
+        "--talk-name=org.freedesktop.Flatpak",
+        "--env=GDK_BACKEND=x11"
     ],
     "build-options": {
         "append-path": "/usr/lib/sdk/rust-stable/bin",

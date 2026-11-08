@@ -1,7 +1,7 @@
 # Translation Notes (Helvum → Comfy-GNOME)
 
-Helvum (`/home/montel/Documents/helvum-main`, GPL-3.0-only, © Tom A. Wagner et al.) was the reference.
-Visual constants come from ComfyUI_frontend 1.60.0 litegraph (`/home/montel/Documents/ComfyUI_frontend-1.60.0`, GPL-3.0).
+Helvum (GPL-3.0-only, © Tom A. Wagner et al.) was the reference.
+Visual constants come from ComfyUI_frontend 1.60.0 litegraph (GPL-3.0).
 
 ## Helvum's model (`src/ui/graph/`)
 - `GraphView` (`graph_view.rs`): custom `gtk::Widget` implementing `Scrollable`. Nodes are child widgets

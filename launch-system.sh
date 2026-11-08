@@ -5,6 +5,8 @@
 set -euo pipefail
 cd "$(dirname "$(readlink -f "$0")")"
 export GDK_BACKEND="${GDK_BACKEND:-x11}"
+# App shortcuts inherit the session PATH, which usually lacks ~/.cargo/bin.
+export PATH="$HOME/.cargo/bin:$HOME/.local/bin:$PATH"
 LOG="${XDG_RUNTIME_DIR:-/tmp}/comfy-gnome-build.log"
 
 BIN=target/release/comfy-gnome

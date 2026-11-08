@@ -91,7 +91,7 @@ pub fn build(window: &adw::ApplicationWindow, on_start: impl Fn(LaunchConfig) + 
     body.append(&conn_group);
 
     let status = adw::StatusPage::builder()
-        .icon_name("applications-graphics-symbolic")
+        .icon_name(crate::APP_ID)
         .title("Comfy-GNOME")
         .description("Native GTK frontend for ComfyUI")
         .child(&adw::Clamp::builder().maximum_size(520).child(&body).build())

@@ -52,6 +52,8 @@ pub struct Node {
     pub outputs: Vec<Output>,
     /// Array (usual) or object (e.g. VideoHelperSuite) of widget values.
     pub widgets_values: Value,
+    /// Raw `properties` (rgthree matchTitle, proxyWidgets…), read-only.
+    pub properties: Value,
     pub color: Option<String>,
     pub bgcolor: Option<String>,
     pub collapsed: bool,
@@ -110,6 +112,7 @@ impl Node {
                 .map(|(ty, name)| Output { name: name.clone(), ty: ty.clone(), links: Vec::new() })
                 .collect(),
             widgets_values: Value::Array(crate::prompt::default_widgets(def)),
+            properties: Value::Null,
             color: None,
             bgcolor: None,
             collapsed: false,
@@ -139,7 +142,6 @@ pub struct SubgraphIo {
 
 #[derive(Debug, Clone)]
 pub struct Subgraph {
-    pub id: String,
     pub name: String,
     pub graph: Graph,
     pub inputs: Vec<SubgraphIo>,
@@ -147,6 +149,9 @@ pub struct Subgraph {
     /// Canvas rects [x, y, w, h] of the boundary input / output pseudo-nodes.
     pub input_node: Option<[f64; 4]>,
     pub output_node: Option<[f64; 4]>,
+    /// Inputs this session added by dropped wires (never loaded from a file): they are
+    /// removed again as soon as their last link is severed.
+    pub auto: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -167,15 +172,15 @@ impl Workflow {
             .filter_map(|s| {
                 let id = s["id"].as_str()?.to_owned();
                 Some((
-                    id.clone(),
+                    id,
                     Subgraph {
-                        id,
                         name: s["name"].as_str().unwrap_or("Subgraph").to_owned(),
                         graph: parse_graph(s)?,
                         inputs: parse_io(&s["inputs"]),
                         outputs: parse_io(&s["outputs"]),
                         input_node: rect(&s["inputNode"]["bounding"]),
                         output_node: rect(&s["outputNode"]["bounding"]),
+                        auto: Vec::new(),
                     },
                 ))
             })
@@ -231,9 +236,17 @@ fn write_graph(s: &mut Value, g: &Graph, object_links: bool) {
     for nv in s["nodes"].as_array_mut().into_iter().flatten() {
         let Some(n) = id_of(&nv["id"]).and_then(|id| g.nodes.iter().find(|n| n.id == id)) else { continue };
         nv["pos"] = serde_json::json!([n.pos.0, n.pos.1]);
+        // Only when it changed: untouched nodes keep the size the file already had.
+        let same = nv["size"].as_array().is_some_and(|a| a.len() == 2 && a[0].as_f64() == Some(n.size.0) && a[1].as_f64() == Some(n.size.1));
+        if !same {
+            nv["size"] = serde_json::json!([n.size.0, n.size.1]);
+        }
         // Node state the canvas can change. ComfyUI always serialises `mode`, folds
         // "collapsed" into `flags`, and only writes a title that differs from the type.
         nv["mode"] = Value::from(n.mode);
+        if !n.widgets_values.is_null() {
+            nv["widgets_values"] = n.widgets_values.clone(); // edited in the canvas
+        }
         match &n.title {
             Some(t) if !t.is_empty() => nv["title"] = Value::from(t.as_str()),
             _ => {
@@ -244,8 +257,8 @@ fn write_graph(s: &mut Value, g: &Graph, object_links: bool) {
         }
         if n.collapsed {
             nv["flags"]["collapsed"] = Value::Bool(true);
-        } else if let Some(f) = nv.get_mut("flags").and_then(|f| f.as_object_mut()) {
-            f.remove("collapsed");
+        } else if nv["flags"]["collapsed"].as_bool() == Some(true) {
+            nv["flags"]["collapsed"] = Value::Bool(false);
         }
         for (i, iv) in nv["inputs"].as_array_mut().into_iter().flatten().enumerate() {
             if let Some(src) = n.inputs.get(i) {
@@ -278,14 +291,16 @@ fn write_graph(s: &mut Value, g: &Graph, object_links: bool) {
                     v
                 }
             };
-            serde_json::json!({
-                "id": id,
-                "title": gr.title,
-                "bounding": gr.bounding,
-                "color": gr.color.clone().unwrap_or_else(|| "#3f789e".to_string()),
-                "font_size": 24,
-                "flags": {},
-            })
+            // Start from the stored group (keeps font_size, int-vs-float bounds, extras).
+            let mut v = s["groups"].get(i).cloned().filter(|o| o.is_object()).unwrap_or_else(|| serde_json::json!({"font_size": 24, "flags": {}}));
+            v["id"] = id;
+            v["title"] = gr.title.clone().into();
+            let same = v["bounding"].as_array().is_some_and(|b| b.len() == 4 && b.iter().zip(&gr.bounding).all(|(a, n)| a.as_f64() == Some(*n)));
+            if !same {
+                v["bounding"] = serde_json::json!(gr.bounding);
+            }
+            v["color"] = gr.color.clone().unwrap_or_else(|| "#3f789e".to_string()).into();
+            v
         })
         .collect();
     s["groups"] = Value::Array(groups);
@@ -428,6 +443,7 @@ fn parse_node(n: &Value) -> Option<Node> {
         inputs,
         outputs,
         widgets_values: n["widgets_values"].clone(),
+        properties: n["properties"].clone(),
         color: n["color"].as_str().map(str::to_owned),
         bgcolor: n["bgcolor"].as_str().map(str::to_owned),
         collapsed: n["flags"]["collapsed"].as_bool().unwrap_or(false),

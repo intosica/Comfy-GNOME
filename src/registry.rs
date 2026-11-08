@@ -51,6 +51,9 @@ impl Input {
     }
     /// Socket type string as used for link compatibility checks.
     pub fn type_name(&self) -> &str {
+        if let Some(t) = self.opts["__union"].as_str() {
+            return t;
+        }
         match &self.kind {
             Kind::Int => "INT",
             Kind::Float => "FLOAT",
@@ -68,11 +71,9 @@ pub struct NodeDef {
     pub display_name: String,
     pub category: String,
     pub description: String,
-    pub python_module: String,
     pub inputs: Vec<Input>,
     /// (type, name)
     pub outputs: Vec<(String, String)>,
-    pub output_node: bool,
     pub deprecated: bool,
 }
 
@@ -118,8 +119,34 @@ impl Registry {
         }
     }
 
+    pub fn len(&self) -> usize {
+        self.nodes.len()
+    }
+
     pub fn get(&self, name: &str) -> Option<&NodeDef> {
         self.nodes.get(name)
+    }
+
+    /// Apply custom-node translations from ComfyUI's `GET /i18n`.
+    ///
+    /// The V3 node schema reports a `null` display_name (it ignores
+    /// `NODE_DISPLAY_NAME_MAPPINGS`), so `/object_info` alone shows raw ids such as
+    /// `easy wildcards`. The frontend overlays the locale's `nodeDefs.<id>.display_name`
+    /// from the same endpoint; do the same here. English is the base locale the
+    /// frontend itself falls back to.
+    pub fn apply_display_names(&mut self, i18n: &Value) {
+        let defs = i18n
+            .get("en")
+            .or_else(|| i18n.as_object().and_then(|o| o.values().next()))
+            .and_then(|l| l.get("nodeDefs"));
+        let Some(defs) = defs.and_then(Value::as_object) else { return };
+        for (name, tr) in defs {
+            if let (Some(def), Some(display)) = (self.nodes.get_mut(name), tr["display_name"].as_str()) {
+                if !display.is_empty() {
+                    def.display_name = display.to_owned();
+                }
+            }
+        }
     }
 
     /// Category tree: "loaders/model" → nodes, sorted. For the node library sidebar.
@@ -154,10 +181,8 @@ fn parse_node(key: &str, d: &Value) -> Option<NodeDef> {
         display_name: if display.is_empty() { key.to_owned() } else { display },
         category: s("category"),
         description: s("description"),
-        python_module: s("python_module"),
         inputs,
         outputs,
-        output_node: d["output_node"].as_bool().unwrap_or(false),
         deprecated: d["deprecated"].as_bool().unwrap_or(false),
     })
 }
@@ -187,8 +212,22 @@ fn parse_inputs(input: &Value, order: &Value) -> Vec<Input> {
 }
 
 fn parse_input(name: String, spec: &Value, optional: bool) -> Input {
-    let head = &spec[0];
-    let opts = spec.get(1).cloned().unwrap_or(Value::Null);
+    let mut head = spec[0].clone();
+    let mut opts = spec.get(1).cloned().unwrap_or(Value::Null);
+    // A union socket ("FLOAT,INT", "AUTOCOMPLETE_TEXT_PROMPT,STRING") with `widgetType`
+    // is still a widget (frontend: `widgetType ?? type`); keep the union for linking.
+    let union = head.as_str().filter(|u| u.contains(',')).map(str::to_owned);
+    if let (Some(u), Some(w)) = (union, opts["widgetType"].as_str().map(str::to_owned)) {
+        let w = if w.starts_with("AUTOCOMPLETE_TEXT") {
+            opts["multiline"] = true.into(); // LoRA Manager prompt box: our text editor autocompletes
+            "STRING".to_owned()
+        } else {
+            w
+        };
+        opts["__union"] = u.into();
+        head = w.into();
+    }
+    let head = &head;
     let strings = |a: &Value| -> Vec<String> {
         a.as_array()
             .map(|a| a.iter().map(|x| x.as_str().map(str::to_owned).unwrap_or_else(|| x.to_string())).collect())
@@ -242,5 +281,16 @@ mod tests {
         assert!(k.inputs[3].optional);
         assert_eq!(k.outputs, vec![("LATENT".into(), "LATENT".into())]);
         assert_eq!(r.by_category()["sampling"].len(), 1);
+    }
+
+    #[test]
+    fn union_with_widget_type_is_a_widget() {
+        let i = parse_input("text".into(), &serde_json::json!(["AUTOCOMPLETE_TEXT_PROMPT,STRING", {"widgetType": "AUTOCOMPLETE_TEXT_PROMPT"}]), false);
+        assert!(i.is_widget());
+        assert_eq!(i.kind, Kind::String);
+        assert_eq!(i.type_name(), "AUTOCOMPLETE_TEXT_PROMPT,STRING");
+        let f = parse_input("fps".into(), &serde_json::json!(["FLOAT,INT", {"widgetType": "FLOAT"}]), false);
+        assert_eq!(f.kind, Kind::Float);
+        assert!(!parse_input("x".into(), &serde_json::json!(["A,B", {}]), false).is_widget());
     }
 }

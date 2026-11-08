@@ -9,5 +9,15 @@
     <file preprocess="xml-stripblanks">icons/scalable/actions/sidebar-show-symbolic.svg</file>
     <file preprocess="xml-stripblanks">icons/scalable/actions/view-list-symbolic.svg</file>
     <file preprocess="xml-stripblanks">icons/scalable/actions/zoom-original-symbolic.svg</file>
+    <file preprocess="xml-stripblanks">icons/scalable/actions/emblem-system-symbolic.svg</file>
+    <file preprocess="xml-stripblanks">icons/scalable/actions/network-wired-symbolic.svg</file>
+    <file preprocess="xml-stripblanks">icons/scalable/actions/node-graph-symbolic.svg</file>
+    <file preprocess="xml-stripblanks">icons/scalable/actions/package-x-generic-symbolic.svg</file>
+    <file preprocess="xml-stripblanks">icons/scalable/actions/application-x-addon-symbolic.svg</file>
+    <file preprocess="xml-stripblanks">icons/scalable/actions/input-keyboard-symbolic.svg</file>
+    <file preprocess="xml-stripblanks">icons/scalable/actions/help-about-symbolic.svg</file>
+    <file preprocess="xml-stripblanks">icons/scalable/actions/avatar-default-symbolic.svg</file>
+    <file preprocess="xml-stripblanks">icons/scalable/actions/power-profile-performance-symbolic.svg</file>
+    <file alias="icons/scalable/apps/io.github.comfygnome.ComfyGnome.svg" preprocess="xml-stripblanks">icons/hicolor/scalable/apps/io.github.comfygnome.ComfyGnome.svg</file>
   </gresource>
 </gresources>

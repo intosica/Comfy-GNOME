@@ -168,9 +168,9 @@ fn wrap(v: &Value) -> Value {
     if v.is_array() { json!({ "__value__": v }) } else { v.clone() }
 }
 
-/// Number of UI-only `widgets_values` slots (not sent to the backend) that follow
-/// widget `i`: the control_after_generate combo and the upload button.
-fn extra_slots(i: &Input) -> usize {
+/// UI-only `widgets_values` slots (not sent to the backend) that follow widget `i`:
+/// (control_after_generate combo, upload button).
+fn extra_kinds(i: &Input) -> (bool, bool) {
     let cag = &i.opts["control_after_generate"];
     let control = match i.kind {
         // useIntWidget: `control_after_generate ?? ['seed','noise_seed'].includes(name)`
@@ -182,7 +182,74 @@ fn extra_slots(i: &Input) -> usize {
         _ => false,
     };
     let upload = ["image_upload", "video_upload", "audio_upload"].iter().any(|k| truthy(&i.opts[k]));
-    control as usize + upload as usize
+    (control, upload)
+}
+
+fn extra_slots(i: &Input) -> usize {
+    let (c, u) = extra_kinds(i);
+    c as usize + u as usize
+}
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Role {
+    Value,
+    /// control_after_generate combo following `name`.
+    Control,
+    /// Upload button following `name`.
+    Upload,
+}
+
+/// One positional `widgets_values` entry, resolved against the node definition.
+pub struct WSlot {
+    pub input: Input,
+    /// Widget name (`parent.child` for dynamic-combo children).
+    pub name: String,
+    /// Index into `widgets_values`.
+    pub idx: usize,
+    pub value: Value,
+    pub role: Role,
+}
+
+/// Mirrors `widget_map`'s array branch but keeps positions and the UI-only slots,
+/// so the canvas can edit values in place.
+pub fn widget_slots(node: &Node, def: &NodeDef) -> Vec<WSlot> {
+    let Value::Array(vals) = &node.widgets_values else { return Vec::new() };
+    let inputs: Vec<Input> = def
+        .inputs
+        .iter()
+        .map(|i| match &i.kind {
+            Kind::Socket(t) if !t.ends_with("_V3") && !node.inputs.iter().any(|n| n.name == i.name) => {
+                Input { kind: Kind::Custom(t.clone()), ..i.clone() }
+            }
+            _ => i.clone(),
+        })
+        .collect();
+    let (mut out, mut pos) = (Vec::new(), 0);
+    collect_slots(&inputs, vals, &mut pos, "", &mut out);
+    out
+}
+
+fn collect_slots(inputs: &[Input], vals: &[Value], pos: &mut usize, prefix: &str, out: &mut Vec<WSlot>) {
+    for i in inputs.iter().filter(|i| i.is_widget()) {
+        let idx = *pos;
+        let Some(v) = vals.get(idx).or(i.opts.get("default")) else { continue };
+        *pos += 1;
+        let name = format!("{prefix}{}", i.name);
+        let mk = |idx, value: &Value, role, name: &str| WSlot { input: i.clone(), name: name.to_owned(), idx, value: value.clone(), role };
+        out.push(mk(idx, v, Role::Value, &name));
+        if prefix.is_empty() {
+            let (c, u) = extra_kinds(i);
+            for role in [(c, Role::Control), (u, Role::Upload)].into_iter().filter(|r| r.0).map(|r| r.1) {
+                out.push(mk(*pos, vals.get(*pos).unwrap_or(&Value::Null), role, &name));
+                *pos += 1;
+            }
+        }
+        if let Kind::DynCombo(opts) = &i.kind {
+            if let Some((_, children)) = opts.iter().find(|o| Some(o.0.as_str()) == v.as_str()) {
+                collect_slots(children, vals, pos, &format!("{name}."), out);
+            }
+        }
+    }
 }
 
 /// `widgets_values` for a freshly created node: each widget's default followed by its

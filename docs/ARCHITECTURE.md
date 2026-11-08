@@ -189,6 +189,25 @@ means the body paints over them). Muted (`mode: 2`) nodes are drawn at 40 % alph
 `with_selection` and their right-click falls back to the canvas menu; double-clicking a subgraph *instance* pushes its
 `uuid` onto `Doc.path` and re-renders from `definitions.subgraphs`.
 
+The Inputs node ends in one bare socket (`label` and `ty` empty, which `compatible()` accepts against anything):
+that is the "plug a new input here" dot. A wire dropped there makes `sync_doc` call `graph_view::grow_inputs`, which
+appends a `SubgraphIo` named after the node input it feeds (deduplicated `_2`, `_3`, …), fixes the link's `type`, and
+pushes the same `Input` onto every host instance, so the parameter shows up on the subgraph node too. The change
+callback re-renders once the input count grows, and the add-socket stays the last row.
+
+
+**Widget sockets, resize, snapping.** Every widget row carries the socket the web UI draws there, so a
+parameter can be turned into a link without a convert step (1.60 keeps sockets and widgets side by side). Files
+only store those inputs once converted, so `graph_view::scene` appends a socket for every declared widget input
+that the file lacks (`prune_extra_slots` drops the ones a special-cased builder never drew); `sync` writes the
+real `Input` only once a wire lands on one, so untouched nodes save unchanged. rgthree's Power Lora rows are built
+in JS and have no declared inputs at all: `grow_widget_slots` names one `lora_N` socket per row (the name the
+backend expects) and the same sync path materialises it. Pulling an unconnected input socket starts a wire looking
+for an output (`LinkDrag { out: false }`), which is how a widget dot becomes a link. Nodes resize from a grip at the
+body's bottom-right corner (`Drag::Resize`, minimum 120×44, height re-grown by `relayout`), and `write_graph` now
+persists `size` when it differs from the file. Dragging or resizing snaps to `Comfy.SnapToGrid.GridSize` when the
+gesture holds Shift or `pysssss.SnapToGrid` is on (litegraph's `snapPoint`, `snap_to`); the workspace fetches both
+settings on connect and mirrors them onto every canvas (new tabs included), and settings edits apply live.
 
 **Link colours** come from the litegraph palette (`LGraphCanvas.link_type_colors`, ported to
 `canvas::type_color`): MODEL `#b39ddb`, CLIP `#ffd500`, VAE `#ff6e6e`, CONDITIONING `#ffa931`,
@@ -197,6 +216,16 @@ LATENT `#ff9cf9`, IMAGE `#64b5f6`, MASK `#81c784`, and a hashed fallback for unk
 **Viewport restore vs auto-fit:** `set_graph` marks `pending_fit`; the resize callback fits once
 the widget is allocated. `set_view` (saved `extra.ds`) clears that flag, so a restored viewport
 always wins and auto-fit only happens for graphs without one.
+
+## Session 5 additions: widgets
+- `canvas/widgets.rs` owns widget kinds, cairo painting and popover editors; `Node` carries `widgets`, cached row
+  layout (`relayout`) and image keys. Pointer path: `drag_begin` → slot, then widget row (`Drag::Widget`), then node.
+- The canvas never writes the model. Edits fire `connect_widget`; the workspace calls `graph_view::apply_widget`
+  (the only write path: root widgets, promoted subgraph widgets, Power Lora rows, Fast Groups toggles).
+  Structural edits sync canvas→model and re-render; value edits only mark the doc dirty.
+- Widget slots come from the registry via `prompt::widget_slots` (same positional rules as `prompt::map_widgets`,
+  so display, editing and prompt building cannot diverge).
+- Images: async `/view` fetch → `gdk::Texture` → cairo `ImageSurface` cache keyed by view query string.
 
 ## Prompt conversion invariants (learned from real captures)
 1. Node ids are strings; subgraph execution ids are `<host path>:<node id>`.
@@ -209,3 +238,127 @@ always wins and auto-fit only happens for graphs without one.
    (control_after_generate, upload buttons, autocomplete metadata) that are skipped.
 6. Arrays are wrapped as `{"__value__": [...]}` or the backend reads them as links.
 7. Anything unknown to `/object_info` is dropped with a warning (frontend "virtual" nodes).
+
+## Text, tab menu, EreNodes (session 6)- `canvas/text.rs`: pangocairo FFI (`width`, `show`); every canvas string goes through it for glyph fallback.
+- `workspace/tabmenu.rs`: tab context menu (plain Popover buttons), temp-doc variant, close guard; `pngmeta.rs` reads PNG workflow metadata.
+- `erenodes.rs` + `workspace/ere.rs` + `WKind::Cloud` (`widgets.rs`): tag widgets backed by `properties._tagDataJSON`; ops that need the
+  workspace (load group, add tag, convert) are emitted from the canvas as `"ere"` objects `{op, at}`.
+
+## Breadcrumb and Templates (session 7)
+- `Workspace::show_trail` rebuilds `crumbs: gtk::Box` (flat buttons) on every render: home = workflow stem, then one
+  button per `Doc::path` level, active one suffixed `▾` and opening a two-item popover (`Rename`, `Clear Workflow`).
+  All navigation is `Doc::path.truncate(n)` + `render_doc` — the canvas never owns subgraph state.
+- `Workspace::rename_subgraph` writes the name into `workflow::Subgraph.name` and into `Node.title` of every node
+  whose `type == subgraph id` (root **and** other subgraph graphs), which is what makes the host node label change.
+- `tabmenu::clear_workflow` branches on `!doc.path.is_empty()`: subgraph clear keeps `SUBGRAPH_INPUT_ID` /
+  `SUBGRAPH_OUTPUT_ID` nodes and drops links+groups, root clear drops everything.
+- `workspace/templates.rs` is self-contained UI over three endpoints (`/templates/index.json`,
+  `/api/workflow_templates`, `/templates/{name}.json` + `/templates/{name}-1.webp`); it only talks to the rest of the
+  app through `api::view_query` and `Workspace::open_temp`, so it can be replaced without touching the canvas.
+
+## Queue history, lightbox, job menus (session 8)
+- `api::HistoryEntry` (parsed by `HistoryEntry::parse`) mirrors one `GET /history` entry: `prompt[0]` = queue number,
+  `outputs.<node>.images[]` = results, `status.messages` = `execution_start` / `execution_success` epoch-ms stamps
+  (`duration()`).
+- `Workspace` keeps the ledger: `history: Rc<RefCell<Vec<api::HistoryEntry>>>`, `queue_done: Cell<bool>` (filter),
+  `thumbs` (queue-row textures), `preview_items` (what the Preview tab is showing). `set_queue` renders live rows when
+  the All filter is on, then day headers + finished rows newest-first; `queue_key` includes the history length so an
+  unchanged `/queue` still re-renders when a run finishes.
+- `Workspace::show_lightbox` is the only image viewer: `adw::Dialog` (90 % of the window, dim background), one
+  `gtk::Picture` at natural resolution, OSD nav buttons + arrow keys, and a decode generation counter.
+- `api::Client::job_workflow(prompt_id)` is the single source for "the graph this job ran": it looks in
+  `/history/{id}` first (`prompt[3].extra_pnginfo.workflow`, the same blob `queue_prompt` sends as `extra_data`) and
+  falls back to `/queue` for jobs that are still running or pending.
+
+## Batch count, DaSiWa hooks, backend lifecycle (session 9)
+
+- `Workspace::queue_prompt` loops `copies = count.value()` times: `dasiwa::before_queue(&mut wf)` → `prompt::build` →
+  `client.queue_prompt(..., front)` → `graph_view::bump_controls`, then one log line with every returned prompt id.
+  `dasiwa::before_queue` is where extension behaviour lives (status switches, seed rolls) — nothing else in the pipeline
+  knows about custom packs.
+- `src/dasiwa.rs` also owns the two widget surfaces' data: `SeedState` (`{mode,last_seed,recent}` ⇄ `seed_control_state`) and
+  `stack_rows`/`stack_set` (`stack_data` JSON string ⇄ `WKind::Lora` rows). `graph_view::apply_widget` writes `stack:` /
+  `stack+` keys back into `widgets_values[2]` **and** `properties.stack_data`, mirroring the pack's JS.
+- `WKind::Seed` is a click-only row (left: mode, right: 🎲) so the canvas never has to edit raw JSON in place.
+- `Backend::stop_hard()` is the only teardown path: TERM the group, wait, KILL the group; `main.rs` calls it from
+  `close-request` and `connect_shutdown`. A spawn that dies immediately is reported as "served by an already-running backend",
+  and such a backend is never signalled.
+
+## Extension node UIs and Settings (session 10)
+
+- **Widget interpretation lives in one place.** `graph_view::build_widgets` switches on `node.ty` for the packs whose JS
+  replaces the stock widget set, and `graph_view::apply_widget` mirrors the writes back:
+  - `easy wildcards` — the two pickers keep their placeholder as the stored value; we show the registry's real options and
+    append a pick to the prompt (`<lora:NAME:1>` / `__token__`) instead of writing it into the combo.
+  - `Lora Loader (LoraManager)` — `widgets_values = [state, text, parsed]`; `lm_tags`/`lm_set_tag` parse and rewrite the
+    `<lora:name:strength>` tags in `text`, and each tag is a Lora row (`lm:{i}`) with `➕ Add LoRA` (`lm+`).
+  - `ShowText|pysssss` — the value is a list of lines; one text row per line (`show:{i}`).
+  - `DaSiWa_SeedControl` / `DaSiWa_LTX2LoraLoader` — see session 9.
+  Anything else with an array or object value that is not a known shape still falls back to a read-only row, never to a crash.
+- **Job → workflow.** `queue_prompt` stores the exact graph it sent in `Workspace::job_wf` keyed by prompt id; the server's
+  `prompt[3].extra_pnginfo.workflow` is only a fallback (`api::Client::job_workflow`). That is the difference between "our job"
+  and "someone else's job", and it is what makes *Open Workflow in New Tab* reliable.
+- **Settings** (`src/workspace/settings.rs` + `src/settings_defs.rs`): values from `GET /api/settings`, definitions scraped
+  from the served frontend's JS chunks and every `/extensions` file (tolerant JS tokenizer, cached per process, loaded with
+  `gio::spawn_blocking` so the dialog opens instantly). Grouping mirrors `useSettingUI.ts` (`category || id.split('.')`:
+  [0] sidebar entry, [1] section). Writes are optimistic, `POST /api/settings/{key}`; Extension page edits
+  `Comfy.Extension.Disabled`; settings with JS-function widgets are read-only.
+- **Popover input trap (X11):** a tooltip window can sit above a `gtk::Popover` and swallow the click that should hit a menu
+  item. Menu-opening buttons therefore carry no tooltip; if a menu item ever "does nothing", check for a tooltip first.
+- **Prompt editing** (session 11): `canvas/attention.rs` is a pure port of the web `editAttention.ts` on char offsets;
+  `edit_text` wires it to Ctrl+↑/↓ through a capture-phase key controller and applies it as one delete+insert user action
+  so GTK's built-in undo covers it. `/queue` entries are the bare `[number, id, prompt, extra_data, outputs]` array —
+  only `/history` nests it under `prompt`.
+- **Picker combos** are detected generically from the option list (first option "Select … add … text"), not by node
+  type; their widget key `pick:idx:text_idx:placeholder` carries everything `apply_widget` needs, since it has no registry.
+- **Undo** is snapshot-based and hooks `set_dirty(doc, true)` — the one call every edit path already makes. New edit
+  paths get undo for free as long as they mark the doc dirty.
+- **Combo previews** are a plug-in: `canvas::widgets` exposes `set_preview_provider(Rc<dyn Fn(option, callback)>)` and
+  knows nothing about models; the workspace installs a provider backed by `model_preview` (backend model index +
+  LoRA Manager / core preview endpoints). Any combo listing model files gets previews, whatever node it belongs to.
+- **Bypass passthrough** is part of the link pass: mode-4 nodes draw a dashed wire from the matching input to the output
+  *before* the node loop, so node bodies always cover it.
+
+
+## Session 15 additions: auto inputs, widget row menus, queue list, link modes
+
+- **Auto inputs are pruned.** `graph_view::grow_inputs` records the names it invents in `Subgraph::auto`, and `graph_view::prune_inputs`
+  removes any of them whose `link_ids` is empty, shifting the `origin_slot` of the surviving boundary links down and dropping the
+  mirrored `Input` from every host instance. `sync_doc` runs prune → sync_io, and the `connect_change` closure re-renders when the
+  input count changes either way, so cutting a wire makes the parameter vanish from the Inputs node *and* the host node.
+- **Widget row menus are generic.** `canvas::widgets::menu(ws, i)` returns the row's context entries plus an `Action`
+  (`Toggle`, `MoveUp`, `MoveDown`, `Remove`); `Hit::Widget(id, row)` carries the row from the canvas to `Workspace::widget_row_action`,
+  which applies them through the same `graph_view::apply_widget` path the canvas uses. `WKind::Lora` is the first implementation
+  (rgthree's Power Lora Loader menu); any new widget kind only has to answer `menu`.
+- **Queue rows are one iterator.** `set_queue` builds `running`/`pending` with `chain`ed `map`s — the old `once(true).zip(...).chain(...)`
+  could only ever emit one row per list, which is why only two queued jobs showed.
+- **Link Render Mode** (`Comfy.LinkRenderMode`, litegraph's `LinkRenderType`): `canvas::link_path(mode, …)` draws Straight (jut 10 +
+  orthogonal H), Linear (jut 15 + diagonal) or Spline (`curve_to`, control distance `max(30, hypot*0.25)`), and `-1` skips the whole
+  link pass. The value is mirrored onto every canvas from `/api/settings`, re-applied on connect and live from the Settings dialog.
+- **Settings scraper and imported enums.** Combo options in the built bundle can be `[{value:Y.STRAIGHT_LINK,text:'Straight'}, …]`, where
+  `Y` is an import alias, so `settings_defs` resolves such member names through a small table (`HIDDEN_LINK` → −1 … `SPLINE_LINK` → 2);
+  `options: {key: label}` objects keep the key as the stored value.
+- **Collapsible Log/Preview.** A `pan-down-symbolic` toggle at the right of the bottom switcher hides the whole dock (switcher + content)
+  so the canvas gets the space; the last `Paned` position above 40 px is remembered and restored when it comes back.
+
+## Session 16 additions: Node Library, MTB browser, panel strip
+
+- `src/workspace/library.rs` builds the sidebar "Nodes" page from `Registry` (4 700+ definitions): a search entry
+  filtered on `display_name`, node name, category and description, a flat capped result list, and one lazily filled
+  `GtkExpander` per first category segment when the query is empty. Picking a node calls `Workspace::create_node`
+  at the centre of the visible viewport.
+- `src/workspace/media.rs` is the MTB panel: root (`input`/`output`) + subfolder path → absolute directory, a
+  `Gio.ListStore` of paths (folders first), a `GtkFlowBox` of tiles (`Gtk.Image` with `pixel_size`, so a cell is the
+  thumbnail size and the widget does not steal drags), a size slider and a sort combo. Thumbnails decode on a
+  blocking pool and are dropped when the page generation moves on.
+- Pointer handling is a single `GtkEventControllerLegacy` in `PropagationPhase::Capture` that never claims:
+  Ctrl+press on empty space drags a rubber band (`select_rect` intersects every `FlowBoxChild`'s bounds), a press on
+  a tile followed by a move of more than 12 px drops that file on the canvas. Event coordinates are surface
+  coordinates, so every hit test translates through the overlay (`compute_bounds(&root)`) and then into the flow box.
+- `Workspace::open_dropped_at` decides what a drop means: a PNG with a `workflow` chunk opens as a temporary tab,
+  anything else is uploaded (`/upload/image`) and becomes a `LoadImage` node with its `image` widget already set.
+  `doc_or_blank` creates an empty workflow when the drop (or a library click) arrives with no open tab.
+- The trash is written by hand (`Trash/files` + `Trash/info`), because gio's implementation unlinks when it cannot
+  reach a portal; `rename` is retried as `copy` + `remove_file` when the target is on another filesystem.
+- The bottom `GtkPaned` end child hides only its switcher and page: the bar holding the `▼` toggle stays, which is
+  what makes the panel re-openable.
