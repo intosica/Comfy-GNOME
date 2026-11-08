@@ -66,9 +66,13 @@ fn build_window(app: &adw::Application) {
     stack.add_named(&ws.root, Some("workspace"));
     {
         let ws = ws.clone();
+        let app = app.clone();
         // Not connect_destroy: it never fires when the app quits via the last window closing.
         window.connect_close_request(move |_| {
             ws.stop_backend();
+            // The hidden Settings/Templates windows are still registered with the app and keep
+            // it alive after the main window is gone (zombie process holding the D-Bus name).
+            app.quit();
             adw::glib::Propagation::Proceed
         });
     }

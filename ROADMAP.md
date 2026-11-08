@@ -5,7 +5,7 @@ Each phase ends with a runnable build, updated `AGENT-HANDOFF.md`, and screensho
 ## Phase 1 — Shell & Prototype ✅ (session 1)
 - [x] Cargo project, GPL-3.0 headers, LICENSE, Flatpak manifest + `.desktop`
 - [x] Libadwaita splash: ComfyUI folder (auto-detected), optional launch script, extra args, browser-launch blocking, host/port, "Skip — Connect to Running Backend"
-- [x] Folder launch (venv auto-activate) and script launch: own process group, log streamed to panel, killed on close/crash; `flatpak-spawn --host` in Flatpak
+- [x] Folder launch (venv auto-activate) and script launch: own process group, log streamed to panel, killed on close/crash; `flatpak-spawn --host` in Flatpak; main-window ✕ quits the app (hidden Settings/Templates windows no longer keep it alive)
 - [x] Bundled symbolic icons (gresource), `launch-system.sh` / `launch-flatpak.sh` launchers
 - [x] Backend reachability poll (`GET /system_stats`)
 - [x] Workspace: sidebar (Workflows/Queue placeholders), canvas, bottom log panel

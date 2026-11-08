@@ -1,6 +1,6 @@
 # AGENT HANDOFF
 
-_Last updated: session 21. Phases 1–3 complete (output gallery still open). Phase 4 live: in-node widgets, subgraph breadcrumb (exit / rename / clear), Templates browser, EreNodes tag widgets, hotkeys. Session 19 fixed launching from app-menu shortcuts (native + Flatpak); session 20 restored live previews (TAESD/Latent2RGB) and added the thin sampler progress strip under the tabs; session 21 puts those previews on the running node (KSampler, SamplerCustom, custom samplers) — see the last sections. Next: undo/redo, copy/paste, output gallery._
+_Last updated: session 22 (window X now quits the app — see the last section). Phases 1–3 complete (output gallery still open). Phase 4 live: in-node widgets, subgraph breadcrumb (exit / rename / clear), Templates browser, EreNodes tag widgets, hotkeys. Session 19 fixed launching from app-menu shortcuts (native + Flatpak); session 20 restored live previews (TAESD/Latent2RGB) and added the thin sampler progress strip under the tabs; session 21 puts those previews on the running node (KSampler, SamplerCustom, custom samplers) — see the last sections. Next: undo/redo, copy/paste, output gallery._
 
 Project: **Comfy-GNOME** at `/home/montel/Documents/Comfy-GNOME` (renamed from `GNOME-Comfyu` → `GNOME-ComfyUI` → this).
 Crate/binary `comfy-gnome`, app id `io.github.comfygnome.ComfyGnome` (`APP_ID` in `src/main.rs`).
@@ -852,3 +852,17 @@ rendered at 512 px and is what the README now embeds (GitHub's SVG cache shows t
 
 Not covered: the preview lives only while the run's document is open and `run_doc` is set; a hard crash still
 leaks a host backend (see session 19).
+
+## Session 22 — window ✕ did nothing / app lingered (native + Flatpak)
+Symptom: after opening Settings (or Templates) once, closing the main window removed the window and killed the
+backend, but the **process stayed alive**. Those utility windows hide instead of closing (`settings.rs`
+`connect_close_request` → `set_visible(false)` + `Stop`) and stay registered with the `GtkApplication`, so it never
+reached "no windows left". The zombie held the D-Bus name `io.github.comfygnome.ComfyGnome`; the next launch from
+*either* shortcut (native or Flatpak share the app id) just activated the zombie instead of starting, which looks
+like "the window won't close / the Flatpak shortcut opens a stale window" (a native zombie was found 8 h old).
+Reproduced in the Flatpak on Xvfb+openbox: connect → gear → Esc → ✕ ⇒ no windows, `comfy-gnome` still running. After the fix (Flatpak rebuilt + installed) the same sequence exits the process and frees :8188.
+Fix: `src/main.rs` main-window `connect_close_request` now calls `app.quit()` after `ws.stop_backend()`.
+Check for a repeat: `pgrep -x comfy-gnome` / `flatpak ps` after closing; kill leftovers with `pkill -x comfy-gnome`.
+Testing note: native and Flatpak instances share the session D-Bus name, so launching a "test" instance while any
+other one runs only activates that one. Stop the other first. `pkill -f <script>` from bash kills your own shell if
+the script name is in the command line.
