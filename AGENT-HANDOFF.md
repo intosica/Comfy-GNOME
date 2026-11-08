@@ -1,6 +1,6 @@
 # AGENT HANDOFF
 
-_Last updated: session 25 (screenshot protocol: dark mode + ComfyUI_00004 workflow — see the last section).
+_Last updated: session 26 (Flatpak orphaned-backend "Broken pipe" fix; real result image in the demo — see the last section).
 
 Project: **Comfy-GNOME** at `/home/montel/Documents/Comfy-GNOME` (renamed from `GNOME-Comfyu` → `GNOME-ComfyUI` → this).
 Crate/binary `comfy-gnome`, app id `io.github.comfygnome.ComfyGnome` (`APP_ID` in `src/main.rs`).
@@ -933,3 +933,22 @@ outputs to `469`. `tools/demo/start.sh` now runs `./target/release/comfy-gnome` 
 `GSETTINGS_BACKEND=keyfile` did NOT work). Recipe: `tools/demo/start.sh`, `openbox &` on `:96`, double-click the
 workflow in the sidebar, `.` to fit, `scrot -o docs/screenshots/graph.png`; queue tab + `scrot` → `queue.png`.
 Old harbour leftovers in the mock (`PROMPTS`, `SUBGRAPH_ID`, `TEMPLATES`, `harbour_*.png` stamps) are cosmetic.
+
+## Session 26 — Flatpak `[Errno 32] Broken pipe` + real result image in the demo
+- **Broken pipe**: after reloading the Flatpak app, running a workflow failed with `ERROR KSampler (node 462): [Errno 32]
+  Broken pipe`. Cause: a previous app instance died without `Backend::stop()` (killed with SIGTERM — GTK ignores it —
+  or crashed), so the host ComfyUI (own process group via `setsid`, started through `flatpak-spawn --host`) was orphaned
+  with stdout/stderr = a pipe nobody reads any more; the next launch reconnected to that backend on the same port, and
+  every `print`/tqdm write (KSampler progress) raised EPIPE. Found by scanning `/proc/*/fd` for the pipe inode: the
+  python process was its only holder.
+- **Fix**: `src/backend.rs` `kill_host_group(pidfile)` (TERM, wait ≤3 s, KILL on the group recorded in
+  `cache/backend.pid`) is shared by `Backend::stop()` and is also called at the start of `spawn()` in Flatpak, so a stale
+  group is reaped before a new backend starts. `src/main.rs` handles SIGTERM/SIGINT/SIGHUP with
+  `glib::unix_signal_add_local` → `stop_backend()` + `app.quit()`, so a plain `kill`/logout stops the backend too.
+  **A backend that was orphaned *before* this fix has no pidfile and still has the dead pipe — restart it once
+  (`kill <pid>` of its `python main.py` and relaunch from the app).**
+- **Demo image**: `tools/demo/result.jpg` (512 px copy of `ComfyUI_00004.png`) replaces the generated gradient:
+  live type-4 preview frames, `/view` and the history thumbnails all serve it. KSampler 462 in
+  `tools/demo/workflow.json` is 555 px tall so the node preview (which appears only after pressing Run, because the
+  frame needs a run doc) is big enough to read. `docs/screenshots/{graph,queue}.png` regenerated.
+- Scratch tip: delete `/tmp/demo-config/comfy-gnome/session.json` between demo runs, otherwise the old tabs restore.

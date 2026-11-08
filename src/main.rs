@@ -105,6 +105,18 @@ fn build_window(app: &adw::Application) {
         });
     }
     {
+        // `kill`/`pkill`/logout deliver SIGTERM/SIGHUP/SIGINT: GTK ignores them by default, so
+        // the app died without stop() and the backend was orphaned (see backend::spawn).
+        for sig in [libc::SIGTERM, libc::SIGINT, libc::SIGHUP] {
+            let (ws, app) = (ws.clone(), app.clone());
+            adw::glib::unix_signal_add_local(sig, move || {
+                ws.stop_backend();
+                app.quit();
+                adw::glib::ControlFlow::Break
+            });
+        }
+    }
+    {
         // Safety net for the other exit paths (Ctrl+Q from the app menu, D-Bus quit,
         // a crash in another window): never leave a spawned ComfyUI behind.
         let ws = ws.clone();

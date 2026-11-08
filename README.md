@@ -116,7 +116,8 @@ lists what was adapted from Helvum and ComfyUI_frontend.
 The screenshots above are taken in **dark mode** from the mock backend in `tools/demo` (`tools/demo/start.sh` starts a
 fake ComfyUI on port 8198 plus an Xvfb display, and launches the app with `ADW_DEBUG_COLOR_SCHEME=prefer-dark`), so
 nothing here needs model weights. The graph shown is `tools/demo/workflow.json`, the workflow embedded in a real
-`ComfyUI_00004.png` (Anima: UNETLoader, CLIPLoader, VAELoader, KSampler, SaveImageAdvanced).
+`ComfyUI_00004.png` (Anima: UNETLoader, CLIPLoader, VAELoader, KSampler, SaveImageAdvanced). The simulated result — on
+the KSampler node, in the Preview pane and in the queue thumbnails — is that same image, downsized to `tools/demo/result.jpg`.
 
 ## License
 

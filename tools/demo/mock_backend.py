@@ -12,11 +12,9 @@ import base64
 import hashlib
 import itertools
 import json
-import math
 import os
 import struct
 import time
-import zlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, unquote, urlparse
 
@@ -98,22 +96,8 @@ def node_info():
     return out
 
 
-def png(w, h, hue):
-    """A small RGB gradient PNG (no PIL dependency)."""
-    rows = bytearray()
-    for y in range(h):
-        rows.append(0)
-        for x in range(w):
-            r = int(40 + 120 * (x / w))
-            g = int(40 + 100 * (y / h))
-            b = int(60 + 90 * hue + 60 * math.sin((x + y) / 22.0))
-            rows += bytes((r % 256, g % 256, b % 256))
-    def chunk(t, data):
-        c = struct.pack(">I", len(data)) + t + data
-        return c + struct.pack(">I", zlib.crc32(t + data) & 0xFFFFFFFF)
-    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0))
-            + chunk(b"IDAT", zlib.compress(bytes(rows), 6)) + chunk(b"IEND", b""))
-
+# The simulated result: ComfyUI_00004.png (the workflow's own output), downsized to 512 px.
+RESULT = open(os.path.join(os.path.dirname(__file__), "result.jpg"), "rb").read()
 
 STATE = dict(queue=[], history={}, counter=0)
 PROMPTS = [
@@ -179,7 +163,7 @@ class Handler(BaseHTTPRequestHandler):
                         "462": {"state": "running", "value": step, "max": 20}}}}).encode())
                     meta = json.dumps({"node_id": "462", "display_node_id": "462", "parent_node_id": None,
                                        "real_node_id": "462", "prompt_id": pid}).encode()
-                    self.ws_send(2, struct.pack(">II", 4, len(meta)) + meta + png(256, 160, 0.55 + step / 60.0))
+                    self.ws_send(2, struct.pack(">II", 4, len(meta)) + meta + RESULT)
                     time.sleep(0.25)
             except Exception:
                 return
@@ -229,7 +213,7 @@ class Handler(BaseHTTPRequestHandler):
         if p.startswith("/api/lm/") and p.endswith("/preview-url"):
             return self.send(200, dict(success=True, preview_url="/demo/preview.png"))
         if p == "/demo/preview.png" or p.startswith("/view"):
-            return self.send(200, png(320, 448, 0.5), "image/png")
+            return self.send(200, RESULT, "image/jpeg")
         if p == "/extensions":
             return self.send(200, ["easy-use", "rgthree-comfy", "comfyui-lora-manager", "KJNodes"])
         return self.send(404, dict(error="not found", path=p))

@@ -6,7 +6,7 @@
 use adw::{gio, glib, prelude::*};
 use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 pub const DEFAULT_HOST: &str = "127.0.0.1";
@@ -175,6 +175,27 @@ impl Drop for Backend {
     }
 }
 
+/// Flatpak: TERM (then KILL after 3 s) the host process group recorded in `pidfile`.
+/// Dash's `kill` rejects `--`, hence no `--` in the host snippet.
+fn kill_host_group(pidfile: &Path) {
+    let Ok(pid) = std::fs::read_to_string(pidfile) else { return };
+    let pid = pid.trim();
+    if pid.is_empty() {
+        return;
+    }
+    let _ = std::process::Command::new("flatpak-spawn")
+        .args([
+            "--host", "sh", "-c",
+            "p=$1; kill -TERM -\"$p\" 2>/dev/null; i=0; \
+             while kill -0 -\"$p\" 2>/dev/null && [ $i -lt 30 ]; do sleep 0.1; i=$((i+1)); done; \
+             kill -KILL -\"$p\" 2>/dev/null",
+            "sh", pid,
+        ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+}
+
 impl Backend {
     /// Kill the whole process group (the script plus the python it spawned).
     pub fn stop(&self) {
@@ -182,22 +203,7 @@ impl Backend {
             // Flatpak: the group lives in the host pid namespace; ask the portal
             // to TERM it, wait up to 3 s, then KILL. Dash's `kill` rejects `--`,
             // hence no `--` in the host snippet.
-            if let Ok(pid) = std::fs::read_to_string(pf) {
-                let pid = pid.trim().to_string();
-                if !pid.is_empty() {
-                    let _ = std::process::Command::new("flatpak-spawn")
-                        .args([
-                            "--host", "sh", "-c",
-                            "p=$1; kill -TERM -\"$p\" 2>/dev/null; i=0; \
-                             while kill -0 -\"$p\" 2>/dev/null && [ $i -lt 30 ]; do sleep 0.1; i=$((i+1)); done; \
-                             kill -KILL -\"$p\" 2>/dev/null",
-                            "sh", pid.as_str(),
-                        ])
-                        .stdout(std::process::Stdio::null())
-                        .stderr(std::process::Stdio::null())
-                        .status();
-                }
-            }
+            kill_host_group(pf);
             let _ = std::fs::remove_file(pf);
             self.proc.send_signal(15);
             return;
@@ -280,6 +286,12 @@ pub fn spawn(cfg: &LaunchConfig, on_line: impl Fn(&str) + 'static) -> Result<Bac
         prefix += &format!("PATH='{}':\"$PATH\" ", d.display());
     }
     let host_files = if in_flatpak() { Some(flatpak_host_files().map_err(io_err)?) } else { None };
+    // A previous app instance that died without stop() (SIGTERM/crash) leaves its host group
+    // running with a stdout pipe nobody reads: every print in ComfyUI then fails with
+    // "[Errno 32] Broken pipe" (KSampler's progress bar). Reap it before starting a new one.
+    if let Some((_, pidfile)) = &host_files {
+        kill_host_group(pidfile);
+    }
     let launch = match &host_files {
         Some((helper, pidfile)) => format!("exec setsid {} {} ", shell_quote(helper), shell_quote(pidfile)),
         None => "exec setsid ".to_string(),
