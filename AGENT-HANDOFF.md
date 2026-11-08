@@ -1,6 +1,6 @@
 # AGENT HANDOFF
 
-_Last updated: session 23 (collapse vs double-click, hover reveal bar, sidebar squeeze, Flatpak look parity — see the last section).
+_Last updated: session 24 (frontend-faithful Add Node search — see the last section).
 
 Project: **Comfy-GNOME** at `/home/montel/Documents/Comfy-GNOME` (renamed from `GNOME-Comfyu` → `GNOME-ComfyUI` → this).
 Crate/binary `comfy-gnome`, app id `io.github.comfygnome.ComfyGnome` (`APP_ID` in `src/main.rs`).
@@ -887,3 +887,38 @@ the script name is in the command line.
   `data/resources.gresource.xml`, and use the `cg-` name.** Verified Flatpak vs native screenshots: icons identical,
   palette/font match; ~6.9k px (of 1.6M) differ, text antialiasing only.
 - Tests: `cargo test --release` 39 passed / 4 ignored. Not covered: Wayland/real compositor (tested on Xvfb).
+
+## Session 24 — Add Node search = frontend NodeSearchBox v2 (link release, filters, categories)
+Reference: `reference/Node Browser.png`; source: `~/Documents/ComfyUI_frontend-1.60.0`.
+Double-click on empty canvas, the context menu and **releasing a dragged link on empty canvas** all open
+`Workspace::add_node_dialog` (`src/workspace/addnode.rs`, widgets only). Everything it *decides* lives in
+`src/nodesearch/`, a function-by-function Rust port of the frontend so a frontend update = re-port one file:
+
+| `src/nodesearch/`      | Frontend 1.60.0 source                                                              |
+|------------------------|--------------------------------------------------------------------------------------|
+| `fuse.rs`              | Fuse.js 7 (bitap, extended `'` `^` `!` `\|` operators, 32-bit chunking, field norm)   |
+| `fuse_util.rs`         | `src/utils/fuseUtil.ts` (`calcAuxScores`, `compareAux`, `matchesFilters`, wildcard `*`) |
+| `mod.rs`               | `src/services/nodeSearchService.ts` (+ `FuseSearch`, `top_node_defs` = `useNodeFrequencyStore`) |
+| `content.rs`           | `components/searchbox/v2/NodeSearchContent.vue`, `NodeSearchCategorySidebar.vue`, `useNodeAvailability` (root chips Blueprints/Comfy/Partner/Extensions, category tree, `displayedResults`) |
+| `source.rs`            | `src/types/nodeSource.ts` (`getNodeSource`, Core/Custom/Blueprint, pill text)          |
+| `slot_types.rs`        | `schemas/nodeDef/searchableSlotTypes.ts` + `inputSpecInterpreter.ts` (dynamic/MatchType slot types) |
+
+Link-release rule (`NodeSearchBoxPopover.showNewSearchBox`): dragging from an **output** of type T pre-applies
+filter `Input: T` (the new node must take T); from an **input** → `Output: T`. Results are then ordered like
+the web UI (fuse score → aux score → frequency; wildcard-`*` nodes appended). Untyped/`*` links apply no filter.
+`NodeDef` (`src/registry.rs`) gained `python_module, search_aliases, dev_only, api_node, input_types, output_types`;
+`deprecated` defaults to "category is empty" like `ComfyNodeDefImpl`.
+Native look: Lucide-style icons, drawn fill-only (`cg-lucide-*-symbolic.svg`, see session 23 for why), chips
+(`button.ns-chip` + `.active/.has-sel/.ns-applied`), category buttons `ns-cat`, source pill `ns-pill`; dots use
+`canvas::type_color`. Dialog is a plain undecorated `gtk::Window` (880×660, class `addnode`).
+**Re-syncing with a new frontend:** `tools/sync_frontend_data.py <frontend dir>` refreshes
+`data/frontend/node-frequency.json` (from `public/assets/sorted-custom-node-map.json`); then diff the files in the
+table above against the frontend ones, port changes, `cargo test --release nodesearch` (13 tests, frequency order
+and root counts are asserted against a small fixture).
+Tests/verification: `cargo test --release` ok; live on Xvfb with a real ComfyUI (1012 node types, 308 partner): empty
+search shows frequency order (Load Image, Load Diffusion Model, Load CLIP…), "ksam" → KSampler first with bold
+match, MODEL-output drop pre-applies `Input: ● MODEL ×` and Enter adds KSampler **connected**, Input popover
+(search, "N items selected", Clear all, check/dot rows), Partner chip + category tree work.
+Not ported (ponytail): virtual list (capped to 300 rows), favourites chip, Blueprints (not in `/object_info`),
+Essentials, hover-only chevrons. Known quirk: Esc while an Input/Output popover is open does not dismiss it
+(click elsewhere); Esc otherwise closes the dialog.

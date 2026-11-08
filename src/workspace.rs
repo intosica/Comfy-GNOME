@@ -82,6 +82,7 @@ pub struct Workspace {
     session_queued: Rc<std::cell::Cell<bool>>,
 }
 
+mod addnode;
 mod ere;
 mod library;
 mod media;
@@ -219,6 +220,23 @@ fn load_css() {
          box.mtb-thumb, window.mtb-thumb { border-radius: 4px; }
          box.mtb-tile { padding: 4px; border-radius: 8px; }
          box.mtb-tile.mtb-selected { background: alpha(@accent_bg_color, 0.32); box-shadow: inset 0 0 0 2px @accent_bg_color; }
+         window.addnode { border-radius: 12px; border: 1px solid @borders; }
+         text.ns-input, .ns-input { font-size: 1.05em; }
+         button.ns-chip { border-radius: 999px; padding: 3px 12px; min-height: 0; background: alpha(@window_fg_color, 0.08); font-size: 0.92em; }
+         button.ns-chip.active { background: @window_fg_color; color: @window_bg_color; }
+         button.ns-chip.has-sel, button.ns-chip.ns-applied { box-shadow: inset 0 0 0 1px alpha(@window_fg_color, 0.55); }
+         button.ns-chip > box, menubutton.ns-chip > button { padding: 0; }
+         menubutton.ns-chip > button { border-radius: 999px; padding: 3px 12px; min-height: 0; background: alpha(@window_fg_color, 0.08); }
+         menubutton.ns-chip.has-sel > button { box-shadow: inset 0 0 0 1px alpha(@window_fg_color, 0.55); }
+         button.ns-cat { font-weight: normal; border-radius: 6px; padding: 6px 10px; min-height: 0; background: none; box-shadow: none; }
+         button.ns-cat:hover { background: alpha(@window_fg_color, 0.06); }
+         button.ns-cat.exp { background: alpha(@window_fg_color, 0.1); }
+         button.ns-cat.sel { background: alpha(@window_fg_color, 0.16); }
+         label.ns-pill { border-radius: 999px; padding: 0 8px; font-size: 0.78em; background: alpha(@window_fg_color, 0.14); }
+         list.ns-list { background: none; }
+         list.ns-list > row { border-radius: 8px; margin: 2px 8px; }
+         popover.ns-pop > contents { padding: 8px; }
+         popover.ns-pop button.ns-opt, popover.ns-pop button { font-weight: normal; }
          .side-s { font-size: 0.92em; }
          .side-s searchentry, .side-s entry { min-width: 0; }
          .side-s row, .side-s list > row { padding-left: 0; padding-right: 0; }
@@ -2703,142 +2721,6 @@ impl Workspace {
             }
         }
         self.show_menu(&area, x, y, entries);
-    }
-
-    /// One-button-per-result node search over `/object_info`.
-    fn add_node_dialog(&self, doc: &DocRef, pos: (f64, f64), link: Option<(String, usize, bool, String)>) {
-        let Some(win) = self.root.root().and_downcast::<gtk::Window>() else { return };
-        let dlg = gtk::Window::builder()
-            .title("Add Node")
-            .transient_for(&win)
-            .modal(true)
-            .default_width(460)
-            .default_height(560)
-            .build();
-        let hb = gtk::HeaderBar::new();
-        dlg.set_titlebar(Some(&hb));
-        let search = gtk::SearchEntry::builder().placeholder_text("Search nodes…").margin_top(12).margin_start(12).margin_end(12).build();
-        let results = gtk::Box::new(gtk::Orientation::Vertical, 0);
-        results.add_css_class("boxed-list");
-        let scrolled = gtk::ScrolledWindow::builder()
-            .child(&results)
-            .vexpand(true)
-            .margin_top(6)
-            .margin_bottom(12)
-            .margin_start(12)
-            .margin_end(12)
-            .build();
-        let bx = gtk::Box::new(gtk::Orientation::Vertical, 0);
-        bx.append(&search);
-        bx.append(&scrolled);
-        dlg.set_child(Some(&bx));
-
-        let fill: Rc<dyn Fn(&str)> = {
-            let me = self.clone();
-            let doc = doc.clone();
-            let dlg = dlg.clone();
-            let results = results.clone();
-            let link = link.clone();
-            Rc::new(move |q: &str| {
-                while let Some(c) = results.first_child() {
-                    results.remove(&c);
-                }
-                let q = q.to_lowercase();
-                let words: Vec<&str> = q.split_whitespace().collect();
-                let reg = me.registry.borrow();
-                // Every word must match name, class or category; rank like the web search box:
-                // exact name, then name prefix, then word-start, then anywhere.
-                let mut hits: Vec<(u8, &crate::registry::NodeDef)> = reg
-                    .nodes
-                    .values()
-                    .filter_map(|def| {
-                        let name = def.display_name.to_lowercase();
-                        let hay = format!("{name} {} {}", def.name.to_lowercase(), def.category.to_lowercase());
-                        if !words.iter().all(|w| hay.contains(w)) {
-                            return None;
-                        }
-                        // When the picker was opened by dropping a wire, only nodes that can
-                        // take that wire are useful (the web UI shows the same filtered menu).
-                        if let Some((_, _, out, ty)) = link.as_ref() {
-                            let ok = if *out {
-                                def.inputs.iter().any(|i| canvas::compatible(ty, i.type_name()))
-                            } else {
-                                def.outputs.iter().any(|o| canvas::compatible(&o.0, ty))
-                            };
-                            if !ok {
-                                return None;
-                            }
-                        }
-                        let rank = if q.is_empty() {
-                            0
-                        } else if name == q || def.name.to_lowercase() == q.replace(' ', "") {
-                            0
-                        } else if name.starts_with(&q) {
-                            1
-                        } else if name.contains(&q) && name.split(|c: char| !c.is_alphanumeric()).any(|w| w.starts_with(words[0])) {
-                            2
-                        } else if name.contains(&q) {
-                            3
-                        } else {
-                            4
-                        };
-                        Some((rank, def))
-                    })
-                    .collect();
-                hits.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.display_name.len().cmp(&b.1.display_name.len())).then(a.1.display_name.cmp(&b.1.display_name)));
-                // 4775 rows would be slow to build; show the first matches only.
-                hits.truncate(60);
-                let shown = hits.len();
-                for (_, def) in hits {
-                    let name = gtk::Label::builder().label(&def.display_name).xalign(0.0).build();
-                    let cat = gtk::Label::builder().label(&def.category).xalign(0.0).build();
-                    cat.add_css_class("dim-label");
-                    cat.add_css_class("caption");
-                    let col = gtk::Box::new(gtk::Orientation::Vertical, 2);
-                    col.append(&name);
-                    col.append(&cat);
-                    let b = gtk::Button::builder().child(&col).build();
-                    b.add_css_class("flat");
-                    b.set_halign(gtk::Align::Fill);
-                    let me2 = me.clone();
-                    let doc2 = doc.clone();
-                    let dlg2 = dlg.clone();
-                    let ty = def.name.clone();
-                    let link2 = link.clone();
-                    b.connect_clicked(move |_| {
-                        if let Some(new_id) = me2.create_node(&doc2, &ty, pos) {
-                            if let Some(req) = link2.clone() {
-                                me2.connect_new(&doc2, &new_id, &req);
-                            }
-                        }
-                        dlg2.close();
-                    });
-                    results.append(&b);
-                }
-                if shown == 0 {
-                    let l = gtk::Label::builder().label("No matching nodes").margin_top(18).build();
-                    l.add_css_class("dim-label");
-                    results.append(&l);
-                }
-            })
-        };
-        {
-            let fill = fill.clone();
-            search.connect_search_changed(move |e| fill(&e.text()));
-        }
-        // Enter adds the top hit, Esc closes — the keyboard flow of the web search box.
-        {
-            let results = results.clone();
-            search.connect_activate(move |_| {
-                if let Some(b) = results.first_child().and_downcast::<gtk::Button>() {
-                    b.emit_clicked();
-                }
-            });
-            let d = dlg.clone();
-            search.connect_stop_search(move |_| d.close());
-        }
-        fill("");
-        dlg.present();
     }
 
     fn text_dialog(&self, title: &str, initial: &str, on_ok: impl Fn(String) + 'static) {

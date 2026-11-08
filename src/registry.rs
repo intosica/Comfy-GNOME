@@ -75,11 +75,24 @@ pub struct NodeDef {
     /// (type, name)
     pub outputs: Vec<(String, String)>,
     pub deprecated: bool,
+    /// `python_module` of the node's origin ("nodes", "custom_nodes.ComfyUI-X", "blueprint"…).
+    pub python_module: String,
+    pub search_aliases: Vec<String>,
+    /// Hidden from search by default (frontend `ComfyNodeDefImpl.dev_only`).
+    pub dev_only: bool,
+    /// Partner/API node (`api_node`): shown under the Partner filter.
+    pub api_node: bool,
+    /// Slot types the node can take / produce, incl. dynamic controls (see `nodesearch::slot_types`).
+    pub input_types: Vec<String>,
+    pub output_types: Vec<String>,
 }
 
 #[derive(Debug, Default)]
 pub struct Registry {
     pub nodes: BTreeMap<String, NodeDef>,
+    /// Node names in `/object_info` order (core nodes first): the frontend's list order,
+    /// which breaks ties in search and orders the category tree.
+    pub order: Vec<String>,
 }
 
 impl Registry {
@@ -88,7 +101,8 @@ impl Registry {
             .as_object()
             .map(|m| m.iter().filter_map(|(k, d)| Some((k.clone(), parse_node(k, d)?))).collect())
             .unwrap_or_default();
-        let mut r = Self { nodes };
+        let order = v.as_object().map(|m| m.keys().filter(|k| nodes_has(&nodes, k)).cloned().collect()).unwrap_or_default();
+        let mut r = Self { nodes, order };
         r.mark_custom_widgets();
         r
     }
@@ -162,6 +176,10 @@ impl Registry {
     }
 }
 
+fn nodes_has(nodes: &BTreeMap<String, NodeDef>, k: &str) -> bool {
+    nodes.contains_key(k)
+}
+
 fn parse_node(key: &str, d: &Value) -> Option<NodeDef> {
     let s = |k: &str| d[k].as_str().unwrap_or_default().to_owned();
     let inputs = parse_inputs(&d["input"], &d["input_order"]);
@@ -176,14 +194,22 @@ fn parse_node(key: &str, d: &Value) -> Option<NodeDef> {
         })
         .collect();
     let display = s("display_name");
+    let category = s("category");
     Some(NodeDef {
         name: key.to_owned(),
         display_name: if display.is_empty() { key.to_owned() } else { display },
-        category: s("category"),
+        // `ComfyNodeDefImpl`: an uncategorised node counts as deprecated.
+        deprecated: d["deprecated"].as_bool().unwrap_or(category.is_empty()),
+        category,
         description: s("description"),
         inputs,
         outputs,
-        deprecated: d["deprecated"].as_bool().unwrap_or(false),
+        python_module: s("python_module"),
+        search_aliases: d["search_aliases"].as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_owned)).collect()).unwrap_or_default(),
+        dev_only: d["dev_only"].as_bool().unwrap_or(false),
+        api_node: d["api_node"].as_bool().unwrap_or(false),
+        input_types: crate::nodesearch::slot_types::input_types(d),
+        output_types: crate::nodesearch::slot_types::output_types(d),
     })
 }
 

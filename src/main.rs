@@ -8,6 +8,7 @@ mod dasiwa;
 mod erenodes;
 mod graph_view;
 mod model_preview;
+mod nodesearch;
 mod pngmeta;
 mod prompt;
 mod registry;
