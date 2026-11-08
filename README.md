@@ -113,8 +113,10 @@ tools/demo/            mock ComfyUI backend used for the screenshots and UI work
 `docs/ARCHITECTURE.md` has the design notes and the coordinate/geometry maths; `docs/TRANSLATION-NOTES.md`
 lists what was adapted from Helvum and ComfyUI_frontend.
 
-The screenshots above come from the mock backend in `tools/demo` (`tools/demo/start.sh` starts a fake ComfyUI on
-port 8198 plus an Xvfb display), so nothing here needs model weights.
+The screenshots above are taken in **dark mode** from the mock backend in `tools/demo` (`tools/demo/start.sh` starts a
+fake ComfyUI on port 8198 plus an Xvfb display, and launches the app with `ADW_DEBUG_COLOR_SCHEME=prefer-dark`), so
+nothing here needs model weights. The graph shown is `tools/demo/workflow.json`, the workflow embedded in a real
+`ComfyUI_00004.png` (Anima: UNETLoader, CLIPLoader, VAELoader, KSampler, SaveImageAdvanced).
 
 ## License
 

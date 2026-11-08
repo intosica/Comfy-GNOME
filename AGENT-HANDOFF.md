@@ -1,6 +1,6 @@
 # AGENT HANDOFF
 
-_Last updated: session 24 (frontend-faithful Add Node search — see the last section).
+_Last updated: session 25 (screenshot protocol: dark mode + ComfyUI_00004 workflow — see the last section).
 
 Project: **Comfy-GNOME** at `/home/montel/Documents/Comfy-GNOME` (renamed from `GNOME-Comfyu` → `GNOME-ComfyUI` → this).
 Crate/binary `comfy-gnome`, app id `io.github.comfygnome.ComfyGnome` (`APP_ID` in `src/main.rs`).
@@ -922,3 +922,14 @@ match, MODEL-output drop pre-applies `Input: ● MODEL ×` and Enter adds KSampl
 Not ported (ponytail): virtual list (capped to 300 rows), favourites chip, Blueprints (not in `/object_info`),
 Essentials, hover-only chevrons. Known quirk: Esc while an Input/Output popover is open does not dismiss it
 (click elsewhere); Esc otherwise closes the dialog.
+
+## Session 25 — screenshot protocol: dark mode + real workflow
+`tools/demo/` is the screenshot protocol. Changes: the mock backend serves `tools/demo/workflow.json` (the workflow
+embedded in `/media/montel/Elements/SD-AI/Gallery/output/ComfyUI_00004.png`, 9 nodes, `extra` cut down to `ds`) as
+"ComfyUI_00004" instead of the old hand-made harbour graph; it knows the node types UNETLoader/VAELoader/CLIPLoader/
+SaveImageAdvanced, sampler `exp_heun_2_x0`, scheduler `beta`; live previews are keyed to KSampler `462`, history
+outputs to `469`. `tools/demo/start.sh` now runs `./target/release/comfy-gnome` with `ADW_DEBUG_COLOR_SCHEME=prefer-dark`
+(the app runs with `DBUS_SESSION_BUS_ADDRESS=disabled:`, so there is no settings portal and it would be light;
+`GSETTINGS_BACKEND=keyfile` did NOT work). Recipe: `tools/demo/start.sh`, `openbox &` on `:96`, double-click the
+workflow in the sidebar, `.` to fit, `scrot -o docs/screenshots/graph.png`; queue tab + `scrot` → `queue.png`.
+Old harbour leftovers in the mock (`PROMPTS`, `SUBGRAPH_ID`, `TEMPLATES`, `harbour_*.png` stamps) are cosmetic.
