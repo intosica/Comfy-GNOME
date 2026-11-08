@@ -444,16 +444,16 @@ fn build_nav(br: &std::rc::Rc<Browser>, nav: &gtk::ListBox) {
         nav.append(&row);
         pages.push(page);
     };
-    add("All Templates", Some("view-grid-symbolic"), Page::All, false);
-    add("Popular", Some("starred-symbolic"), Page::Popular, false);
+    add("All Templates", Some("cg-view-grid-symbolic"), Page::All, false);
+    add("Popular", Some("cg-starred-symbolic"), Page::Popular, false);
     for (i, c) in br.cats.borrow().iter().enumerate() {
         let icon = match c.kind.as_str() {
-            "image" => "image-x-generic-symbolic",
-            "video" => "video-x-generic-symbolic",
-            "audio" => "audio-x-generic-symbolic",
-            "3d" => "applications-graphics-symbolic",
-            "llm" => "utilities-terminal-symbolic",
-            _ => "view-app-grid-symbolic",
+            "image" => "cg-image-x-generic-symbolic",
+            "video" => "cg-video-x-generic-symbolic",
+            "audio" => "cg-audio-x-generic-symbolic",
+            "3d" => "cg-applications-graphics-symbolic",
+            "llm" => "cg-utilities-terminal-symbolic",
+            _ => "cg-view-app-grid-symbolic",
         };
         add(&c.title, Some(icon), Page::Cat(i), false);
     }
@@ -462,7 +462,7 @@ fn build_nav(br: &std::rc::Rc<Browser>, nav: &gtk::ListBox) {
         let mut mods: Vec<String> = br.modules.borrow().keys().cloned().collect();
         mods.sort();
         for m in mods {
-            add(&m.clone(), Some("folder-templates-symbolic"), Page::Module(m), false);
+            add(&m.clone(), Some("cg-folder-templates-symbolic"), Page::Module(m), false);
         }
     }
     let br2 = br.clone();

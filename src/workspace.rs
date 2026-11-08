@@ -4,7 +4,7 @@
 use crate::{api, backend, canvas, graph_view, prompt, registry, workflow};
 use adw::{gio, glib, gtk, prelude::*};
 use serde_json::Value;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -208,23 +208,6 @@ fn install_model_previews(client: api::Client) {
     }));
 }
 
-/// Sum of the natural widths of the switcher's tab buttons (= every tab touching its neighbour).
-fn tabs_width(w: &impl IsA<gtk::Widget>) -> f64 {
-    let mut sum = 0;
-    let mut stack: Vec<gtk::Widget> = w.first_child().into_iter().collect();
-    while let Some(c) = stack.pop() {
-        if let Some(n) = c.next_sibling() {
-            stack.push(n);
-        }
-        if c.is::<gtk::ToggleButton>() {
-            sum += c.measure(gtk::Orientation::Horizontal, -1).1;
-        } else if let Some(f) = c.first_child() {
-            stack.push(f);
-        }
-    }
-    sum as f64
-}
-
 /// A few static rules on top of libadwaita (no animations, no blur: nothing that costs GPU).
 fn load_css() {
     let css = gtk::CssProvider::new();
@@ -236,8 +219,19 @@ fn load_css() {
          box.mtb-thumb, window.mtb-thumb { border-radius: 4px; }
          box.mtb-tile { padding: 4px; border-radius: 8px; }
          box.mtb-tile.mtb-selected { background: alpha(@accent_bg_color, 0.32); box-shadow: inset 0 0 0 2px @accent_bg_color; }
-         button.sidebar-reveal { background: alpha(white, 0.94); color: #2e3436; min-width: 20px; min-height: 52px; padding: 0 2px; border-radius: 0 999px 999px 0; box-shadow: 0 1px 8px alpha(black, 0.45); }
-         button.sidebar-reveal:hover { background: white; }
+         .side-s { font-size: 0.92em; }
+         .side-s searchentry, .side-s entry { min-width: 0; }
+         .side-s row, .side-s list > row { padding-left: 0; padding-right: 0; }
+         .side-s headerbar { padding-left: 2px; padding-right: 2px; }
+         .side-xs { font-size: 0.82em; }
+         .side-xs searchentry > text { min-width: 0; }
+         .side-xs togglebutton { padding: 4px 3px; min-width: 0; }
+         .side-xs button { padding: 3px 4px; min-width: 0; }
+         .side-xs headerbar { padding-left: 0; padding-right: 0; min-height: 36px; }
+         .side-xs row { min-height: 0; padding-top: 2px; padding-bottom: 2px; }
+         button.sidebar-reveal { background: alpha(black, 0.55); border: 1px solid alpha(white, 0.14); min-width: 5px; min-height: 0; padding: 0; margin: 8px 3px; border-radius: 999px; box-shadow: none; opacity: 0; transition: opacity 150ms; }
+         button.sidebar-reveal.near { opacity: 1; }
+         button.sidebar-reveal:hover { background: alpha(black, 0.8); border-color: alpha(white, 0.35); }
          box.dock-bar { padding: 3px 6px; border-top: 1px solid alpha(currentColor, 0.12); background: alpha(currentColor, 0.04); }
          togglebutton.dock-tab { padding: 2px 12px; min-height: 22px; border-radius: 999px; }
          togglebutton.dock-tab:checked { background: alpha(@accent_bg_color, 0.2); color: @accent_color; }
@@ -271,7 +265,7 @@ impl Workspace {
         let wf_list = gtk::ListBox::builder().selection_mode(gtk::SelectionMode::Single).css_classes(["navigation-sidebar"]).build();
         let wf_scroller = gtk::ScrolledWindow::builder().child(&wf_list).vexpand(true).build();
         let search = gtk::SearchEntry::builder().placeholder_text("Search workflows").hexpand(true).build();
-        let reload = gtk::Button::builder().icon_name("view-refresh-symbolic").tooltip_text("Reload list").build();
+        let reload = gtk::Button::builder().icon_name("cg-view-refresh-symbolic").tooltip_text("Reload list").build();
         let wf_bar = gtk::Box::new(gtk::Orientation::Horizontal, 6);
         wf_bar.set_margin_top(6);
         wf_bar.set_margin_bottom(6);
@@ -292,7 +286,7 @@ impl Workspace {
                 });
             });
         }
-        side_stack.add_titled_with_icon(&wf_page, Some("workflows"), "Workflows", "folder-symbolic");
+        side_stack.add_titled_with_icon(&wf_page, Some("workflows"), "Workflows", "cg-folder-symbolic");
         let queue_list = gtk::ListBox::builder().selection_mode(gtk::SelectionMode::None).build();
         let q_scroller = gtk::ScrolledWindow::builder().child(&queue_list).vexpand(true).build();
         let interrupt = gtk::Button::builder().label("Interrupt").sensitive(false).build();
@@ -300,7 +294,7 @@ impl Workspace {
         interrupt.set_tooltip_text(Some("Stop the prompt that is running now"));
         let q_clear = gtk::Button::builder().label("Clear queue").tooltip_text("Remove every pending prompt").sensitive(false).build();
         q_clear.add_css_class("flat");
-        let q_reload = gtk::Button::builder().icon_name("view-refresh-symbolic").tooltip_text("Reload queue").build();
+        let q_reload = gtk::Button::builder().icon_name("cg-view-refresh-symbolic").tooltip_text("Reload queue").build();
         q_reload.add_css_class("flat");
         let q_bar = gtk::Box::new(gtk::Orientation::Horizontal, 6);
         q_bar.set_margin_top(6);
@@ -326,18 +320,18 @@ impl Workspace {
         queue_page.append(&q_bar);
         queue_page.append(&q_tabs);
         queue_page.append(&q_scroller);
-        side_stack.add_titled_with_icon(&queue_page, Some("queue"), "Queue", "view-list-symbolic");
+        side_stack.add_titled_with_icon(&queue_page, Some("queue"), "Queue", "cg-view-list-symbolic");
         // Nodes + MTB pages are added after the Workspace exists (they hold a clone of it).
         let side_stack_late = side_stack.clone();
         // Icon-only tabs, so the sidebar can narrow until the icons just touch.
         let switcher = gtk::Box::builder().spacing(0).halign(gtk::Align::Center).css_classes(["linked"]).build();
         let mut first: Option<gtk::ToggleButton> = None;
         for (name, icon, tip) in [
-            ("workflows", "folder-symbolic", "Workflows"),
-            ("queue", "view-list-symbolic", "Queue"),
-            ("nodes", "node-graph-symbolic", "Nodes"),
-            ("media", "folder-pictures-symbolic", "MTB"),
-            ("memory", "power-profile-performance-symbolic", "Memory"),
+            ("workflows", "cg-folder-symbolic", "Workflows"),
+            ("queue", "cg-view-list-symbolic", "Queue"),
+            ("nodes", "cg-node-graph-symbolic", "Nodes"),
+            ("media", "cg-folder-pictures-symbolic", "MTB"),
+            ("memory", "cg-power-profile-performance-symbolic", "Memory"),
         ] {
             let b = gtk::ToggleButton::builder().icon_name(icon).tooltip_text(tip).build();
             match &first {
@@ -394,7 +388,7 @@ impl Workspace {
             .build();
         let preview_caption = gtk::Label::builder().ellipsize(gtk::pango::EllipsizeMode::Middle).css_classes(["dim-label", "caption"]).visible(false).build();
         let preview_empty = gtk::Box::builder().orientation(gtk::Orientation::Horizontal).spacing(10).halign(gtk::Align::Center).valign(gtk::Align::Center).vexpand(true).css_classes(["dim-label"]).build();
-        preview_empty.append(&gtk::Image::builder().icon_name("image-x-generic-symbolic").pixel_size(32).build());
+        preview_empty.append(&gtk::Image::builder().icon_name("cg-image-x-generic-symbolic").pixel_size(32).build());
         let hint = gtk::Box::new(gtk::Orientation::Vertical, 2);
         hint.append(&gtk::Label::builder().label("No preview yet").xalign(0.0).css_classes(["heading"]).build());
         hint.append(&gtk::Label::builder().label("Images appear here while a prompt runs").xalign(0.0).css_classes(["caption"]).build());
@@ -410,8 +404,8 @@ impl Workspace {
         preview_page.append(&preview_caption);
 
         let bottom = adw::ViewStack::new();
-        bottom.add_titled_with_icon(&log_scroller, Some("log"), "Log", "utilities-terminal-symbolic");
-        bottom.add_titled_with_icon(&preview_page, Some("preview"), "Preview", "image-x-generic-symbolic");
+        bottom.add_titled_with_icon(&log_scroller, Some("log"), "Log", "cg-utilities-terminal-symbolic");
+        bottom.add_titled_with_icon(&preview_page, Some("preview"), "Preview", "cg-image-x-generic-symbolic");
         // Slim pill tabs (icon + label inline) instead of the tall icon-over-label switcher.
         let dock_tab = |icon: &str, label: &str| {
             let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
@@ -419,11 +413,11 @@ impl Workspace {
             row.append(&gtk::Label::new(Some(label)));
             gtk::ToggleButton::builder().css_classes(["flat", "dock-tab"]).child(&row).build()
         };
-        let log_tab = dock_tab("utilities-terminal-symbolic", "Log");
-        let prev_tab = dock_tab("image-x-generic-symbolic", "Preview");
+        let log_tab = dock_tab("cg-utilities-terminal-symbolic", "Log");
+        let prev_tab = dock_tab("cg-image-x-generic-symbolic", "Preview");
         prev_tab.set_group(Some(&log_tab));
         log_tab.set_active(true);
-        let clear_log = gtk::Button::builder().icon_name("edit-clear-all-symbolic").tooltip_text("Clear log").css_classes(["flat"]).build();
+        let clear_log = gtk::Button::builder().icon_name("cg-edit-clear-all-symbolic").tooltip_text("Clear log").css_classes(["flat"]).build();
         {
             let (b, c) = (bottom.clone(), clear_log.clone());
             let (lt, pt) = (log_tab.clone(), prev_tab.clone());
@@ -445,7 +439,7 @@ impl Workspace {
         bottom_switcher.append(&prev_tab);
         // Collapse strip: hides the whole Log/Preview dock (and gives the canvas the space).
         let collapse = gtk::ToggleButton::builder()
-            .icon_name("pan-down-symbolic")
+            .icon_name("cg-pan-down-symbolic")
             .tooltip_text("Hide Log & Preview")
             .css_classes(["flat"])
             .build();
@@ -481,7 +475,7 @@ impl Workspace {
                 bp.set_visible(true);
                 if show {
                     paned.set_position(saved.get());
-                    b.set_icon_name("pan-down-symbolic");
+                    b.set_icon_name("cg-pan-down-symbolic");
                     b.set_tooltip_text(Some("Hide Log & Preview"));
                 } else {
                     let p = paned.position();
@@ -489,7 +483,7 @@ impl Workspace {
                         saved.set(p);
                     }
                     paned.set_position(i32::MAX / 2);
-                    b.set_icon_name("pan-up-symbolic");
+                    b.set_icon_name("cg-pan-up-symbolic");
                     b.set_tooltip_text(Some("Show Log & Preview"));
                 }
             });
@@ -498,18 +492,18 @@ impl Workspace {
         // Header -----------------------------------------------------------------
         let title = adw::WindowTitle::new("Comfy-GNOME", "Not connected");
         let header = adw::HeaderBar::builder().title_widget(&title).show_start_title_buttons(false).build();
-        let toggle = gtk::ToggleButton::builder().icon_name("sidebar-show-symbolic").active(true).tooltip_text("Toggle Sidebar").build();
-        let reset = gtk::Button::builder().icon_name("zoom-original-symbolic").tooltip_text("Reset View").build();
-        let fit = gtk::Button::builder().icon_name("zoom-fit-best-symbolic").tooltip_text("Fit All Nodes").build();
+        let toggle = gtk::ToggleButton::builder().icon_name("cg-sidebar-show-symbolic").active(true).tooltip_text("Toggle Sidebar").build();
+        let reset = gtk::Button::builder().icon_name("cg-zoom-original-symbolic").tooltip_text("Reset View").build();
+        let fit = gtk::Button::builder().icon_name("cg-zoom-fit-best-symbolic").tooltip_text("Fit All Nodes").build();
         let run = gtk::Button::builder()
-            .icon_name("media-playback-start-symbolic")
+            .icon_name("cg-media-playback-start-symbolic")
             .tooltip_text("Queue Prompt (Ctrl+Enter)")
             .css_classes(["suggested-action"])
             .build();
         // Web parity (`reference/Top Bar.png`): red X directly right of Run cancels the
         // current execution; insensitive when nothing is running.
         let stop = gtk::Button::builder()
-            .icon_name("process-stop-symbolic")
+            .icon_name("cg-process-stop-symbolic")
             .tooltip_text("Cancel current run (Ctrl+Alt+Enter)")
             .css_classes(["destructive-action"])
             .sensitive(false)
@@ -520,12 +514,12 @@ impl Workspace {
         count.set_digits(0);
         count.set_width_chars(2);
         count.set_tooltip_text(Some("Batch count — copies of this prompt queued per Run"));
-        let lora = gtk::Button::builder().icon_name("application-x-addon-symbolic").tooltip_text("LoRA Manager").build();
+        let lora = gtk::Button::builder().icon_name("cg-application-x-addon-symbolic").tooltip_text("LoRA Manager").build();
         header.pack_start(&toggle);
-        let back = gtk::Button::builder().icon_name("go-previous-symbolic").tooltip_text("Leave subgraph").visible(false).build();
+        let back = gtk::Button::builder().icon_name("cg-go-previous-symbolic").tooltip_text("Leave subgraph").visible(false).build();
         let crumbs = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-        let tmpl = gtk::Button::builder().icon_name("folder-templates-symbolic").tooltip_text("Templates").build();
-        let gear = gtk::Button::builder().icon_name("emblem-system-symbolic").tooltip_text("Settings (Ctrl+,)").build();
+        let tmpl = gtk::Button::builder().icon_name("cg-folder-templates-symbolic").tooltip_text("Templates").build();
+        let gear = gtk::Button::builder().icon_name("cg-emblem-system-symbolic").tooltip_text("Settings (Ctrl+,)").build();
         header.pack_start(&back);
         header.pack_start(&crumbs);
         header.pack_start(&tmpl);
@@ -535,7 +529,7 @@ impl Workspace {
         // toolbar buttons around under the pointer.
         let monitor = gtk::Label::builder().width_chars(17).xalign(0.0).build();
         let mon_box = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-        mon_box.append(&gtk::Image::from_icon_name("power-profile-performance-symbolic"));
+        mon_box.append(&gtk::Image::from_icon_name("cg-power-profile-performance-symbolic"));
         mon_box.append(&monitor);
         let mon_btn = gtk::MenuButton::builder().child(&mon_box).always_show_arrow(false).tooltip_text("Backend system monitor (DaSiWa nodes)").build();
         let mon_pop = gtk::Popover::new();
@@ -546,7 +540,7 @@ impl Workspace {
         header.pack_end(&run);
         header.pack_end(&stop);
         header.pack_end(&count);
-        let save = gtk::Button::builder().icon_name("document-save-symbolic").tooltip_text("Save Workflow (Ctrl+S)").build();
+        let save = gtk::Button::builder().icon_name("cg-document-save-symbolic").tooltip_text("Save Workflow (Ctrl+S)").build();
         header.pack_end(&save);
         header.pack_end(&fit);
         header.pack_end(&reset);
@@ -564,6 +558,22 @@ impl Workspace {
         side_tb.set_hexpand(true);
         side_box.append(&side_tb);
         side_box.append(&handle);
+        // Size classes: the sidebar squeezes its padding/fonts in steps as it narrows.
+        let last = Cell::new(i32::MAX);
+        let (r1, r2) = (reload.clone(), q_reload.clone());
+        side_box.add_tick_callback(move |b, _| {
+            let w = b.width();
+            if w != last.get() {
+                last.set(w);
+                // The least useful buttons give way first.
+                r1.set_visible(w >= 230);
+                r2.set_visible(w >= 230);
+                for (c, on) in [("side-s", w < 300), ("side-xs", w < 230)] {
+                    if on { b.add_css_class(c) } else { b.remove_css_class(c) }
+                }
+            }
+            gtk::glib::ControlFlow::Continue
+        });
         let split = adw::OverlaySplitView::builder()
             .sidebar(&side_box)
             .content(&content_tb)
@@ -577,7 +587,7 @@ impl Workspace {
         toggle.bind_property("active", &split, "show-sidebar").bidirectional().sync_create().build();
         {
             let drag = gtk::GestureDrag::new();
-            let (sp2, sw, tg, hd) = (split.clone(), switcher.clone(), toggle.clone(), handle.clone());
+            let (sp2, tg, hd) = (split.clone(), toggle.clone(), handle.clone());
             drag.connect_drag_update(move |g, dx, _| {
                 // Pointer x in split coordinates (the handle itself moves while resizing, so a
                 // plain `dx` would feed back on itself).
@@ -585,7 +595,8 @@ impl Workspace {
                 let Some(p) = hd.compute_point(&sp2, &gtk::graphene::Point::new((sx + dx) as f32, sy as f32)) else { return };
                 let w = p.x() as f64 + 3.0;
                 // Narrowest width: the switcher's tabs just touching. Dragging well past it hides the sidebar.
-                let min_w = tabs_width(&sw) + 24.0;
+                // Below that the tabs squeeze (see the side-s / side-xs CSS) instead of stopping.
+                let min_w = 128.0;
                 if w < min_w - 40.0 {
                     tg.set_active(false);
                     return;
@@ -598,30 +609,37 @@ impl Workspace {
             handle.add_controller(drag);
         }
 
-        // Hidden sidebar: a thin hot zone on the left edge reveals a small white arrow to bring it back.
+        // Hidden sidebar: a long thin translucent bar down the left edge, shown only while the
+        // pointer is near it; clicking it brings the sidebar back.
         let shell = gtk::Overlay::new();
         shell.set_child(Some(&split));
-        let reveal_btn = gtk::Button::builder().icon_name("go-next-symbolic").tooltip_text("Show Sidebar").css_classes(["sidebar-reveal"]).build();
-        let reveal = gtk::Revealer::builder().transition_type(gtk::RevealerTransitionType::SlideRight).transition_duration(120).valign(gtk::Align::Center).child(&reveal_btn).build();
-        let edge = gtk::Box::builder().width_request(14).halign(gtk::Align::Start).valign(gtk::Align::Fill).margin_top(48).build();
-        edge.append(&reveal);
+        let bar = gtk::Button::builder().tooltip_text("Show Sidebar").css_classes(["sidebar-reveal"]).halign(gtk::Align::Start).valign(gtk::Align::Fill).can_target(false).visible(false).build();
         let motion = gtk::EventControllerMotion::new();
-        let r = reveal.clone();
-        motion.connect_enter(move |_, _, _| r.set_reveal_child(true));
-        let r = reveal.clone();
-        motion.connect_leave(move |_| r.set_reveal_child(false));
-        edge.add_controller(motion);
+        motion.set_propagation_phase(gtk::PropagationPhase::Capture);
+        let (b, sp) = (bar.clone(), split.clone());
+        motion.connect_motion(move |_, x, _| {
+            let near = !sp.shows_sidebar() && x < 36.0;
+            b.set_can_target(near);
+            if near { b.add_css_class("near") } else { b.remove_css_class("near") }
+        });
+        let b = bar.clone();
+        motion.connect_leave(move |_| {
+            b.set_can_target(false);
+            b.remove_css_class("near");
+        });
+        shell.add_controller(motion);
         {
             let tg = toggle.clone();
-            reveal_btn.connect_clicked(move |_| tg.set_active(true));
-            let (e, r) = (edge.clone(), reveal.clone());
+            bar.connect_clicked(move |_| tg.set_active(true));
+            let b = bar.clone();
             split.connect_show_sidebar_notify(move |sp| {
-                e.set_visible(!sp.shows_sidebar());
-                r.set_reveal_child(false);
+                b.set_visible(!sp.shows_sidebar());
+                b.set_can_target(false);
+                b.remove_css_class("near");
             });
-            edge.set_visible(!split.shows_sidebar());
+            bar.set_visible(!split.shows_sidebar());
         }
-        shell.add_overlay(&edge);
+        shell.add_overlay(&bar);
 
         let ws = Self {
             root: shell.upcast(),
@@ -900,11 +918,11 @@ impl Workspace {
             });
         }
         // Node Library (`reference/Node Library.png`): search + category tree over `/object_info`.
-        side_stack_late.add_titled_with_icon(&library::page(&ws), Some("nodes"), "Nodes", "node-graph-symbolic");
+        side_stack_late.add_titled_with_icon(&library::page(&ws), Some("nodes"), "Nodes", "cg-node-graph-symbolic");
         // MTB browser (`reference/MTB.png`): input/ and output/ with subfolders and thumbnails.
-        side_stack_late.add_titled_with_icon(&media::page(&ws), Some("media"), "MTB", "folder-pictures-symbolic");
+        side_stack_late.add_titled_with_icon(&media::page(&ws), Some("media"), "MTB", "cg-folder-pictures-symbolic");
         // Resource Reaper (`reference/Memory and what to use.png`): ComfyUI_Cleaner's /reaper/* routes.
-        side_stack_late.add_titled_with_icon(&reaper::page(&ws), Some("memory"), "Memory", "power-profile-performance-symbolic");
+        side_stack_late.add_titled_with_icon(&reaper::page(&ws), Some("memory"), "Memory", "cg-power-profile-performance-symbolic");
         ws
     }
 
@@ -1217,7 +1235,7 @@ impl Workspace {
                 let (me, id) = (self.clone(), item.prompt_id.clone());
                 row.connect_activated(move |_| me.open_job_workflow(&id));
                 let btn = gtk::Button::builder()
-                    .icon_name(if running { "media-playback-stop-symbolic" } else { "edit-delete-symbolic" })
+                    .icon_name(if running { "cg-media-playback-stop-symbolic" } else { "cg-edit-delete-symbolic" })
                     .tooltip_text(if running { "Interrupt" } else { "Remove from queue" })
                     .valign(gtk::Align::Center)
                     .css_classes(["flat"])
@@ -1242,7 +1260,7 @@ impl Workspace {
                 row.add_suffix(&btn);
                 let (me2, id2) = (self.clone(), item.prompt_id.clone());
                 let more = gtk::Button::builder()
-                    .icon_name("view-more-symbolic")
+                    .icon_name("cg-view-more-symbolic")
                     .tooltip_text("Job actions")
                     .valign(gtk::Align::Center)
                     .css_classes(["flat"])
@@ -1253,7 +1271,7 @@ impl Workspace {
                         move || me3.open_job_workflow(&id3)
                     };
                     let entries = vec![
-                        item_i("document-open-symbolic", "Open Workflow in New Tab", true, f),
+                        item_i("cg-document-open-symbolic", "Open Workflow in New Tab", true, f),
                         Entry::Line,
                         if running {
                             danger("Interrupt", { let me3 = me2.clone(); move || me3.interrupt() })
@@ -1317,7 +1335,7 @@ impl Workspace {
             thumb.set_pixel_size(44);
             thumb.set_css_classes(&["card", "queue-thumb"]);
             if first.is_none() {
-                thumb.set_icon_name(Some("document-open-symbolic"));
+                thumb.set_icon_name(Some("cg-document-open-symbolic"));
                 thumb.set_pixel_size(20);
                 thumb.set_size_request(44, 44);
             }
@@ -1348,18 +1366,18 @@ impl Workspace {
             });
             let (me2, id2, imgs) = (self.clone(), run.prompt_id.clone(), items.clone());
             let more = gtk::Button::builder()
-                .icon_name("view-more-symbolic")
+                .icon_name("cg-view-more-symbolic")
                 .valign(gtk::Align::Center)
                 .css_classes(["flat"])
                 .build();
             more.connect_clicked(move |b| {
-                let mut entries = vec![item_i("document-open-symbolic", "Open Workflow in New Tab", true, {
+                let mut entries = vec![item_i("cg-document-open-symbolic", "Open Workflow in New Tab", true, {
                     let (me3, id3) = (me2.clone(), id2.clone());
                     move || me3.open_job_workflow(&id3)
                 })];
                 if !imgs.is_empty() {
                     let (me3, imgs3) = (me2.clone(), imgs.clone());
-                    entries.push(item_i("zoom-in-symbolic", "Open Image at Full Size", true, move || {
+                    entries.push(item_i("cg-zoom-in-symbolic", "Open Image at Full Size", true, move || {
                         me3.show_lightbox(&imgs3, 0)
                     }));
                 }
@@ -1615,13 +1633,13 @@ impl Workspace {
             b.connect_clicked(move |_| step(d));
             b
         };
-        let prev = nav("go-previous-symbolic", gtk::Align::Start, -1, "Previous image");
-        let next = nav("go-next-symbolic", gtk::Align::End, 1, "Next image");
+        let prev = nav("cg-go-previous-symbolic", gtk::Align::Start, -1, "Previous image");
+        let next = nav("cg-go-next-symbolic", gtk::Align::End, 1, "Next image");
         overlay.add_overlay(&prev);
         overlay.add_overlay(&next);
         overlay.add_overlay(&caption);
         let close = gtk::Button::builder()
-            .icon_name("window-close-symbolic")
+            .icon_name("cg-window-close-symbolic")
             .halign(gtk::Align::End)
             .valign(gtk::Align::Start)
             .margin_top(8)
@@ -1731,7 +1749,7 @@ impl Workspace {
                 None => adw::ActionRow::builder().title(glib::markup_escape_text(f.trim_end_matches(".json"))).build(),
             };
             if self.bookmarks.borrow().contains(f) {
-                row.add_prefix(&gtk::Image::from_icon_name("starred-symbolic"));
+                row.add_prefix(&gtk::Image::from_icon_name("cg-starred-symbolic"));
             }
             row.set_tooltip_text(Some(f));
             row.set_widget_name(f);
@@ -2069,9 +2087,9 @@ impl Workspace {
                     let (x, y) = (bx.width() as f64 / 2.0, bx.height() as f64);
                     let (me, d, id) = (me.clone(), d.clone(), id.clone());
                     me.show_menu(&bx, x, y, vec![
-                        Entry::Item { label: "Rename".into(), danger: false, enabled: true, icon: Some("document-edit-symbolic"), f: Box::new({ let (me, d, id) = (me.clone(), d.clone(), id.clone()); move || me.rename_subgraph(&d, &id) }) },
+                        Entry::Item { label: "Rename".into(), danger: false, enabled: true, icon: Some("cg-document-edit-symbolic"), f: Box::new({ let (me, d, id) = (me.clone(), d.clone(), id.clone()); move || me.rename_subgraph(&d, &id) }) },
                         Entry::Line,
-                        Entry::Item { label: "Clear Workflow".into(), danger: true, enabled: true, icon: Some("edit-clear-all-symbolic"), f: Box::new({ let (me, d) = (me.clone(), d.clone()); move || me.clear_workflow(&d) }) },
+                        Entry::Item { label: "Clear Workflow".into(), danger: true, enabled: true, icon: Some("cg-edit-clear-all-symbolic"), f: Box::new({ let (me, d) = (me.clone(), d.clone()); move || me.clear_workflow(&d) }) },
                     ]);
                 });
             } else {

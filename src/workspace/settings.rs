@@ -112,7 +112,7 @@ pub(super) fn open(ws: &Workspace) {
 
     // Sidebar: "⚙ Settings", search, navigation list.
     let side_title = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-    side_title.append(&gtk::Image::from_icon_name("emblem-system-symbolic"));
+    side_title.append(&gtk::Image::from_icon_name("cg-emblem-system-symbolic"));
     side_title.append(&gtk::Label::builder().label("Settings").css_classes(["heading"]).build());
     let side_hb = adw::HeaderBar::builder().title_widget(&side_title).show_end_title_buttons(false).build();
     let search = gtk::SearchEntry::builder().placeholder_text("Search Settings...").margin_top(6).margin_bottom(6).margin_start(10).margin_end(10).build();
@@ -231,12 +231,12 @@ fn install_css() {
 
 fn cat_icon(c: &str) -> &'static str {
     match c {
-        "Comfy" => "emblem-system-symbolic",
-        "LiteGraph" => "network-wired-symbolic",
-        "Appearance" => "applications-graphics-symbolic",
-        "Mask Editor" => "document-edit-symbolic",
-        "3D" => "package-x-generic-symbolic",
-        _ => "application-x-addon-symbolic",
+        "Comfy" => "cg-emblem-system-symbolic",
+        "LiteGraph" => "cg-network-wired-symbolic",
+        "Appearance" => "cg-applications-graphics-symbolic",
+        "Mask Editor" => "cg-document-edit-symbolic",
+        "3D" => "cg-package-x-generic-symbolic",
+        _ => "cg-application-x-addon-symbolic",
     }
 }
 
@@ -244,7 +244,7 @@ fn fill_nav(d: &Rc<Dlg>) {
     d.nav.remove_all();
     d.pages.borrow_mut().clear();
     caption(d, "ACCOUNT");
-    item(d, "User", "avatar-default-symbolic", Page::User);
+    item(d, "User", "cg-avatar-default-symbolic", Page::User);
     caption(d, "APPLICATION SETTINGS");
     let cat = d.cat.borrow().clone();
     match cat {
@@ -267,9 +267,9 @@ fn fill_nav(d: &Rc<Dlg>) {
         }
     }
     caption(d, "SPECIAL SETTINGS");
-    item(d, "Keybinding", "input-keyboard-symbolic", Page::Keybinding);
-    item(d, "Extension", "application-x-addon-symbolic", Page::Extension);
-    item(d, "About", "help-about-symbolic", Page::About);
+    item(d, "Keybinding", "cg-input-keyboard-symbolic", Page::Keybinding);
+    item(d, "Extension", "cg-application-x-addon-symbolic", Page::Extension);
+    item(d, "About", "cg-help-about-symbolic", Page::About);
 }
 
 fn select(d: &Rc<Dlg>, page: &Page) {
@@ -512,7 +512,7 @@ fn commit(d: &Rc<Dlg>, key: &str, v: Value) {
 fn user(d: &Rc<Dlg>) {
     title(d, "My Account Settings");
     d.body.append(&gtk::Label::builder().label("Log in to your account").xalign(0.0).margin_top(6).build());
-    let btn = gtk::Button::builder().child(&adw::ButtonContent::builder().icon_name("avatar-default-symbolic").label("Sign In / Sign Up").build()).css_classes(["suggested-action"]).halign(gtk::Align::Start).build();
+    let btn = gtk::Button::builder().child(&adw::ButtonContent::builder().icon_name("cg-avatar-default-symbolic").label("Sign In / Sign Up").build()).css_classes(["suggested-action"]).halign(gtk::Align::Start).build();
     let (win, status) = (d.win.clone(), d.status.clone());
     btn.connect_clicked(move |_| {
         let status = status.clone();

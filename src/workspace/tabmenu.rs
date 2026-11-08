@@ -138,22 +138,22 @@ impl Workspace {
             move || w.close_tabs(which, &p)
         };
         let entries = vec![
-            item_i("document-edit-symbolic", "Rename", !temp, me(Workspace::rename_dialog)),
-            item_i("edit-copy-symbolic", "Duplicate", true, me(Workspace::duplicate_tab)),
-            item_i("user-bookmarks-symbolic", if marked { "Remove from Bookmarks" } else { "Add to Bookmarks" }, !temp, me(Workspace::toggle_bookmark)),
+            item_i("cg-document-edit-symbolic", "Rename", !temp, me(Workspace::rename_dialog)),
+            item_i("cg-edit-copy-symbolic", "Duplicate", true, me(Workspace::duplicate_tab)),
+            item_i("cg-user-bookmarks-symbolic", if marked { "Remove from Bookmarks" } else { "Add to Bookmarks" }, !temp, me(Workspace::toggle_bookmark)),
             Entry::Line,
-            item_i("document-save-symbolic", "Save", true, me(|w, d| w.save_doc(d, None))),
-            item_i("document-save-as-symbolic", "Save As", true, me(|w, d| w.save_as_dialog(d, None))),
+            item_i("cg-document-save-symbolic", "Save", true, me(|w, d| w.save_doc(d, None))),
+            item_i("cg-document-save-as-symbolic", "Save As", true, me(|w, d| w.save_as_dialog(d, None))),
             Entry::Line,
-            item_i("document-send-symbolic", "Export", true, me(|w, d| w.export(d, false))),
-            item_i("document-send-symbolic", "Export (API)", true, me(|w, d| w.export(d, true))),
+            item_i("cg-document-send-symbolic", "Export", true, me(|w, d| w.export(d, false))),
+            item_i("cg-document-send-symbolic", "Export (API)", true, me(|w, d| w.export(d, true))),
             Entry::Line,
-            item_i("user-trash-symbolic", "Clear Workflow", true, me(Workspace::clear_workflow)),
+            item_i("cg-user-trash-symbolic", "Clear Workflow", true, me(Workspace::clear_workflow)),
             Entry::Line,
-            item_i("window-close-symbolic", "Close Tab", true, close(0)),
-            item_i("window-close-symbolic", "Close Tabs to Left", pos > 0, close(1)),
-            item_i("window-close-symbolic", "Close Tabs to Right", pos + 1 < n, close(2)),
-            item_i("window-close-symbolic", "Close Other Tabs", n > 1, close(3)),
+            item_i("cg-window-close-symbolic", "Close Tab", true, close(0)),
+            item_i("cg-window-close-symbolic", "Close Tabs to Left", pos > 0, close(1)),
+            item_i("cg-window-close-symbolic", "Close Tabs to Right", pos + 1 < n, close(2)),
+            item_i("cg-window-close-symbolic", "Close Other Tabs", n > 1, close(3)),
         ];
         self.show_menu(bar, x, y, entries);
     }

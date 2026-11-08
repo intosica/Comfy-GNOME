@@ -20,6 +20,7 @@ use std::collections::{HashMap, HashSet};
 use std::f64::consts::PI;
 use serde_json::Value;
 use std::rc::Rc;
+use std::time::Duration;
 use transform::View;
 use widgets::{WKind, Widget, Zone};
 
@@ -221,6 +222,9 @@ struct State {
     snap_grid: f64,
     /// `Comfy.LinkRenderMode`: -1 hidden, 0 straight, 1 linear, 2 spline (litegraph values).
     link_mode: i32,
+    /// Subgraph collapse waiting out the double-click interval (a double-click enters the
+    /// subgraph instead of collapsing it).
+    pending_collapse: Option<gtk::glib::SourceId>,
 }
 
 /// litegraph `snapPoint`: round to the nearest multiple; `0` keeps the value.
@@ -229,6 +233,13 @@ fn snap_to(v: f64, grid: f64) -> f64 {
 }
 
 impl State {
+    fn toggle_collapse(&mut self, id: &str) {
+        if let Some(n) = self.nodes.iter_mut().find(|n| n.id == id) {
+            n.collapsed = !n.collapsed;
+            n.relayout();
+        }
+    }
+
     /// Topmost socket within `r` canvas units of `p`.
     fn hit_slot(&self, p: (f64, f64), r: f64) -> Option<(usize, bool, usize)> {
         for &i in self.order.iter().rev() {
@@ -236,6 +247,10 @@ impl State {
             for (out, slots) in [(true, &n.outputs), (false, &n.inputs)] {
                 for (si, _) in slots.iter().enumerate() {
                     let (sx, sy) = n.slot_pos(out, si);
+                    // A collapsed node's input socket sits under its collapse button: the button wins.
+                    if n.collapsed && !out && p.0 > sx + 3.0 {
+                        continue;
+                    }
                     if (sx - p.0).hypot(sy - p.1) <= r {
                         return Some((i, out, si));
                     }
@@ -928,7 +943,7 @@ impl Canvas {
                     // Litegraph's collapse button: the square at the node's top-left title
                     // corner (one click toggles). It sits above the body, so test it before
                     // the widget/body paths.
-                    let n = &s.nodes[oi];
+                    let n = &s.nodes[s.order[oi]];
                     let collapse_hit = c.0 >= n.pos.0
                         && c.0 <= n.pos.0 + TITLE_H
                         && c.1 >= n.pos.1 - TITLE_H
@@ -936,18 +951,40 @@ impl Canvas {
                     if collapse_hit {
                         let idx = s.order.remove(oi);
                         s.order.push(idx);
-                        s.nodes[idx].collapsed = !s.nodes[idx].collapsed;
-                        s.nodes[idx].relayout();
                         let id = s.nodes[idx].id.clone();
                         if !s.sel.contains(&id) {
                             s.sel.clear();
-                            s.sel.insert(id);
+                            s.sel.insert(id.clone());
                         }
                         s.drag = None;
+                        let mut changed = false;
+                        if !s.nodes[idx].subgraph {
+                            s.toggle_collapse(&id);
+                            changed = true;
+                        } else if let Some(src) = s.pending_collapse.take() {
+                            // Second press of a double-click: cancel; the activate gesture enters it.
+                            src.remove();
+                        } else {
+                            let delay = gtk::Settings::default().map_or(400, |g| g.gtk_double_click_time().max(0) as u64);
+                            let (st2, area2, change2) = (st.clone(), area.clone(), change.clone());
+                            s.pending_collapse = Some(gtk::glib::timeout_add_local_once(Duration::from_millis(delay), move || {
+                                {
+                                    let mut s = st2.borrow_mut();
+                                    s.pending_collapse = None;
+                                    s.toggle_collapse(&id);
+                                }
+                                area2.queue_draw();
+                                if let Some(f) = change2.borrow().as_ref() {
+                                    f();
+                                }
+                            }));
+                        }
                         drop(s);
                         area.queue_draw();
-                        if let Some(f) = change.borrow().as_ref() {
-                            f();
+                        if changed {
+                            if let Some(f) = change.borrow().as_ref() {
+                                f();
+                            }
                         }
                         return;
                     }

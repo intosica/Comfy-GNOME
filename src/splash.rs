@@ -25,7 +25,7 @@ pub fn build(window: &adw::ApplicationWindow, on_start: impl Fn(LaunchConfig) + 
             None => "Not found — select your ComfyUI folder".into(),
         })
         .build();
-    let browse_dir = icon_button("folder-symbolic", "Select Folder…");
+    let browse_dir = icon_button("cg-folder-symbolic", "Select Folder…");
     dir_row.add_suffix(&browse_dir);
     dir_row.set_activatable_widget(Some(&browse_dir));
 
@@ -34,9 +34,9 @@ pub fn build(window: &adw::ApplicationWindow, on_start: impl Fn(LaunchConfig) + 
         .title("Launch Script (optional)")
         .subtitle("Runs instead of the folder's main.py")
         .build();
-    let clear = icon_button("edit-clear-symbolic", "Clear Script");
+    let clear = icon_button("cg-edit-clear-symbolic", "Clear Script");
     clear.set_visible(false);
-    let browse = icon_button("document-open-symbolic", "Browse…");
+    let browse = icon_button("cg-document-open-symbolic", "Browse…");
     script_row.add_suffix(&clear);
     script_row.add_suffix(&browse);
     script_row.set_activatable_widget(Some(&browse));

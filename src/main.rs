@@ -30,8 +30,35 @@ fn main() -> adw::glib::ExitCode {
     // (derived from APP_ID) automatically, so they work under any icon theme.
     adw::gio::resources_register_include!("comfy-gnome.gresource").expect("register resources");
     let app = adw::Application::builder().application_id(APP_ID).build();
+    app.connect_startup(|_| match_system_look());
     app.connect_activate(build_window);
     app.run()
+}
+
+/// The Flatpak runtime ships a newer libadwaita (other palette) and has no host fonts, so the same
+/// binary looked different there. Pin the 1.5 palette the native build uses, and the font the
+/// host's generic "Sans" resolves to.
+fn match_system_look() {
+    use adw::gtk;
+    if adw::minor_version() > 5 {
+        let provider = gtk::CssProvider::new();
+        if let Some(d) = gtk::gdk::Display::default() {
+            gtk::style_context_add_provider_for_display(&d, &provider, gtk::STYLE_PROVIDER_PRIORITY_APPLICATION);
+        }
+        let apply = move |sm: &adw::StyleManager| {
+            provider.load_from_string(if sm.is_dark() { include_str!("../data/adw-1.5-dark.css") } else { include_str!("../data/adw-1.5-light.css") })
+        };
+        let sm = adw::StyleManager::default();
+        apply(&sm);
+        sm.connect_dark_notify(apply);
+    }
+    if backend::in_flatpak() {
+        // GNOME 50's default UI font differs from the host's; use the one the native build gets.
+        if let Some(s) = gtk::Settings::default() {
+            let size = s.gtk_font_name().and_then(|f| f.rsplit_once(' ').map(|(_, n)| n.to_owned())).unwrap_or_else(|| "9".into());
+            s.set_gtk_font_name(Some(&format!("Noto Sans {size}")));
+        }
+    }
 }
 
 thread_local! {

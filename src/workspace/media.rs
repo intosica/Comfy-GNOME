@@ -90,14 +90,14 @@ pub(super) fn page(ws: &Workspace) -> gtk::Widget {
     chooser.set_expression(Some(gtk::PropertyExpression::new(gtk::StringObject::static_type(), None::<gtk::Expression>, "string")));
     chooser.set_search_match_mode(gtk::StringFilterMatchMode::Substring);
     chooser.set_tooltip_text(Some("Choose a folder (type to filter)"));
-    let back = gtk::Button::builder().icon_name("go-previous-symbolic").tooltip_text("Up one folder").sensitive(false).build();
+    let back = gtk::Button::builder().icon_name("cg-go-previous-symbolic").tooltip_text("Up one folder").sensitive(false).build();
     let status = gtk::Label::builder().xalign(0.0).hexpand(true).css_classes(["dim-label", "caption"]).ellipsize(gtk::pango::EllipsizeMode::Middle).build();
     // The root chooser is fixed-width so the path field gets the room the paths need.
     let root = gtk::DropDown::from_strings(&["Input", "Output"]);
     root.set_hexpand(false);
     root.set_tooltip_text(Some("Browse input/ or output/"));
     root.set_valign(gtk::Align::Center);
-    let refresh = gtk::Button::builder().icon_name("view-refresh-symbolic").tooltip_text("Reload folder").build();
+    let refresh = gtk::Button::builder().icon_name("cg-view-refresh-symbolic").tooltip_text("Reload folder").build();
     let zoom = Rc::new(Cell::new(88));
     let sort = gtk::DropDown::from_strings(&["Modified", "Name"]);
     sort.set_tooltip_text(Some("Sort order"));
@@ -601,7 +601,7 @@ impl Media {
         if is_dir {
             let ov = gtk::Overlay::new();
             ov.set_child(Some(&gtk::Box::new(gtk::Orientation::Vertical, 0)));
-            let icon = gtk::Image::builder().icon_name("folder-symbolic").pixel_size(px / 2).halign(gtk::Align::Center).valign(gtk::Align::Center).css_classes(["dim-label"]).build();
+            let icon = gtk::Image::builder().icon_name("cg-folder-symbolic").pixel_size(px / 2).halign(gtk::Align::Center).valign(gtk::Align::Center).css_classes(["dim-label"]).build();
             ov.add_overlay(&icon);
             ov.set_size_request(px, px);
             holder.append(&ov);

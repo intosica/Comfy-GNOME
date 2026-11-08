@@ -1,6 +1,6 @@
 # AGENT HANDOFF
 
-_Last updated: session 22 (window X now quits the app — see the last section). Phases 1–3 complete (output gallery still open). Phase 4 live: in-node widgets, subgraph breadcrumb (exit / rename / clear), Templates browser, EreNodes tag widgets, hotkeys. Session 19 fixed launching from app-menu shortcuts (native + Flatpak); session 20 restored live previews (TAESD/Latent2RGB) and added the thin sampler progress strip under the tabs; session 21 puts those previews on the running node (KSampler, SamplerCustom, custom samplers) — see the last sections. Next: undo/redo, copy/paste, output gallery._
+_Last updated: session 23 (collapse vs double-click, hover reveal bar, sidebar squeeze, Flatpak look parity — see the last section).
 
 Project: **Comfy-GNOME** at `/home/montel/Documents/Comfy-GNOME` (renamed from `GNOME-Comfyu` → `GNOME-ComfyUI` → this).
 Crate/binary `comfy-gnome`, app id `io.github.comfygnome.ComfyGnome` (`APP_ID` in `src/main.rs`).
@@ -866,3 +866,24 @@ Check for a repeat: `pgrep -x comfy-gnome` / `flatpak ps` after closing; kill le
 Testing note: native and Flatpak instances share the session D-Bus name, so launching a "test" instance while any
 other one runs only activates that one. Stop the other first. `pkill -f <script>` from bash kills your own shell if
 the script name is in the command line.
+
+## Session 23 — collapse/double-click, reveal bar, narrow sidebar, Flatpak look parity
+- **Subgraph glyph**: the collapse square and the subgraph glyph share one spot. `State::toggle_collapse`
+  (`src/canvas/mod.rs`): normal nodes collapse on press; a *subgraph* node's collapse is deferred by GTK's
+  double-click time (`pending_collapse`) and cancelled by the second press, so double-click enters the subgraph
+  without collapsing it and a single click still collapses. Also fixed `nodes[order[oi]]` indexing and made
+  `hit_slot` ignore a collapsed node's input socket under the button.
+- **Reveal bar** (`src/workspace.rs`): the white arrow tab is a thin translucent dark pill (`button.sidebar-reveal`,
+  in a `gtk::Overlay` over the content). It is untargetable/invisible until the pointer is within 36 px of the left
+  edge (`near` class); click reopens the sidebar.
+- **Narrow sidebar**: drag handle min is 128 px (below ~88 hides it). A tick on `side_box` adds `side-s` (<300 px)
+  and `side-xs` (<230 px, also hides the two reload buttons); CSS shrinks font/padding. Readable at ~140 px.
+- **Flatpak ≈ native**: the runtime is GNOME 50 (libadwaita ≥1.8) vs the host's 1.5. `match_system_look()`
+  (`src/main.rs`) loads `data/adw-1.5-{dark,light}.css` (extracted from host libadwaita 1.5) when
+  `adw::minor_version() > 5`, and under Flatpak sets font "Noto Sans <size>" (host "Sans" resolves to it; the
+  runtime gave DejaVu). Runtime icon theme beats bundled icons of the same name, so every used icon is bundled as
+  `cg-<name>-symbolic` (`data/icons/scalable/actions/cg-*.svg`, from host Adwaita 46; `node-graph` redrawn with
+  filled shapes) and referenced by that name in `src/**/*.rs`. **New icons: add `cg-<name>.svg` + a line in
+  `data/resources.gresource.xml`, and use the `cg-` name.** Verified Flatpak vs native screenshots: icons identical,
+  palette/font match; ~6.9k px (of 1.6M) differ, text antialiasing only.
+- Tests: `cargo test --release` 39 passed / 4 ignored. Not covered: Wayland/real compositor (tested on Xvfb).
