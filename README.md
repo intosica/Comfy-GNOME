@@ -66,7 +66,8 @@ the backend's `userdata` folder.
 ```sh
 ./launch-system.sh             # native release build; rebuilds when sources change
 ./launch-flatpak.sh            # Flatpak (GNOME 50 runtime + rust-stable SDK); installs on first run
-./launch-flatpak.sh --rebuild  # rebuild + reinstall after code changes
+                               # and rebuilds by itself when the sources are newer than the last build
+./launch-flatpak.sh --rebuild  # force a rebuild + reinstall
 cargo run                      # debug build for development
 ```
 

@@ -47,7 +47,11 @@ Flatpak verified (session 3, release build of the current tree): `flatpak-builde
 *from* the Flatpak when no backend is already running (untested because :8188 was busy), and window-close teardown
 in script mode.
 Rebuild after code changes: `./launch-flatpak.sh --rebuild` (or the raw `flatpak-builder` line above); it takes
-~3–4 min because it does a release build inside the sandbox.
+~3–4 min because it does a release build inside the sandbox. Since session 27 the launcher also rebuilds **by itself**
+when `src/`, `data/`, `build.rs`, `Cargo.toml` or `Cargo.lock` are newer than `${XDG_CACHE_HOME:-~/.cache}/comfy-gnome/flatpak-build.stamp`
+(touched after every successful install; the installed binary carries flatpak's zeroed mtimes, so the stamp is the only
+honest comparison point). Fix for the session 27 report "I see changes on the system version but no Flatpak": the
+bundle was last installed before the work, and the launcher only rebuilt on `--rebuild` or a missing install.
 Why the user "couldn't launch": old `run.sh` did a silent multi-minute first release build — looked like nothing happened.
 
 Env: rustc 1.95, GTK 4.14.5, libadwaita 1.5.0 (crates: libadwaita 0.8 `v1_5`, gtk4 0.10 `v4_14`, libc,
@@ -1006,6 +1010,13 @@ work without the node author adapting to our UI.
   (`outputs[node].images` = list of `{filename, subfolder, type}` **objects** — a list made every row show an empty
   filename), accepts multipart `POST /upload/image` (it used to `json.loads` the bytes and 500), and has a `LoadImage`
   definition with `image_upload` so "Open in New Workflow" can create its node.
+- **Flatpak went stale** (user: "I see changes on System version but no Flatpak"): the bundle was last installed at
+  15:23 while the session's work landed at 17:30+, and `launch-flatpak.sh` only rebuilt on `--rebuild` or when the app
+  was missing. The bundle is reinstalled from this tree and the launcher now compares the sources against
+  `${XDG_CACHE_HOME:-~/.cache}/comfy-gnome/flatpak-build.stamp` (flatpak zeroes installed mtimes, so a stamp file is the
+  only reliable reference) and rebuilds on its own when anything under `src/`, `data/`, `build.rs`, `Cargo.toml` or
+  `Cargo.lock` is newer. Standing rule: after `git push`, also run `./launch-flatpak.sh --rebuild` and click through the
+  feature in the sandboxed build — a green system build says nothing about the bundle the user actually launches.
 - Scratch tips: openbox reparents windows, so count popovers with `xwininfo -root -tree`, not `-children`; a hidden GTK
   widget never runs a tick callback; `xdotool mousemove X Y click 1` in one call can lose the move for a widget that
   re-lays out each frame — separate the move from the click when a click "does nothing".
