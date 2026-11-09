@@ -207,6 +207,19 @@ fn image_drag_payload(paths: &[String], name: &str, query: Option<&str>) -> Stri
     serde_json::json!({IMAGE_DRAG_KEY: {"paths": paths, "name": name, "query": query}}).to_string()
 }
 
+/// The texture a picture widget is showing, once it has one.
+fn shown_texture(w: &gtk::Image) -> Option<gtk::gdk::Texture> {
+    w.paintable().and_then(|p| p.downcast::<gtk::gdk::Texture>().ok())
+}
+
+/// Drag icons are the picture itself, centred on the pointer — the way a browser shows the image
+/// under the cursor while you drag it. GTK's default icon for a string provider is a label with
+/// the payload's text, which is what the canvas payload would otherwise put on screen.
+pub(super) fn drag_icon(source: &gtk::DragSource, texture: &gtk::gdk::Texture) {
+    let (w, h) = (texture.intrinsic_width().max(1), texture.intrinsic_height().max(1));
+    source.set_icon(Some(texture), w / 2, h / 2);
+}
+
 struct ImageDrag {
     paths: Vec<std::path::PathBuf>,
     name: String,
@@ -1481,7 +1494,11 @@ impl Workspace {
             if let Some(img) = first.cloned() {
                 let drag = gtk::DragSource::builder().actions(gtk::gdk::DragAction::COPY).build();
                 let (n, q) = (img.filename.clone(), img.query());
-                drag.connect_prepare(move |_, _, _| {
+                let thumb2 = thumb.clone();
+                drag.connect_prepare(move |d, _, _| {
+                    if let Some(t) = shown_texture(&thumb2) {
+                        drag_icon(d, &t);
+                    }
                     Some(gtk::gdk::ContentProvider::for_value(&image_drag_payload(&[], &n, Some(&q)).to_value()))
                 });
                 row.add_controller(drag);
