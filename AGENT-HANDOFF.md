@@ -1,6 +1,6 @@
 # AGENT HANDOFF
 
-_Last updated: session 27 (prompt editor always opens, scrolling node text, sidebar squeeze, queue menus, floating selection toolbar — see the last section).
+_Last updated: session 28 (queue + MTB pictures drag onto the canvas and open their workflow, backend output is a plain file so `[Errno 32] Broken pipe` cannot recur — see the last section).
 
 Project: **Comfy-GNOME** at `/home/montel/Documents/Comfy-GNOME` (renamed from `GNOME-Comfyu` → `GNOME-ComfyUI` → this).
 Crate/binary `comfy-gnome`, app id `io.github.comfygnome.ComfyGnome` (`APP_ID` in `src/main.rs`).
@@ -1020,3 +1020,50 @@ work without the node author adapting to our UI.
 - Scratch tips: openbox reparents windows, so count popovers with `xwininfo -root -tree`, not `-children`; a hidden GTK
   widget never runs a tick callback; `xdotool mousemove X Y click 1` in one call can lose the move for a widget that
   re-lays out each frame — separate the move from the click when a click "does nothing".
+
+## Session 28 — drag pictures from the queue / MTB onto the canvas; the broken pipe is gone for good
+
+Director's list: "MTB and Queue is missing ability to drag and drop an image from their location onto the grid/workflow
+space, to functionally load that workflow via its metadata (just as native Comfy has)", plus a repeat `[ws] ERROR
+SamplerCustom (node 448): [Errno 32] Broken pipe` in the middle of a run — with the standing demand: *make sure this
+simply never happens ever again; a blanket universal fix*.
+
+- **One drop rule, three sources** (`Workspace::open_image_bytes`, `src/workspace.rs`): bytes → PNG with a `workflow`
+  text chunk opens that graph in a temporary tab (native ComfyUI's own behaviour), anything else logs
+  `[drop] <name>: no workflow metadata → Load Image` and drops a preloaded native `LoadImage` node at the pointer
+  (`place_image_at`: upload → `create_node` → `on_widget`). File-manager drops (`open_dropped_at`), queue rows and MTB
+  tiles all end up there, so a new source only has to produce bytes. JPEG/WebP EXIF `UserComment` workflows are **not**
+  read yet (`pngmeta` is PNG-only), so a dropped JPEG always becomes a Load Image node — a documented gap, not a special
+  case.
+- **In-app drag payload is a JSON *string*, not a `GdkFileList`** — the trap that cost the most time. A `DragSource`
+  offering `gdk::FileList` fires `prepare`, the drag starts, and no drop is ever delivered: on X11 the payload travels as
+  `text/uri-list` and does not match a `GdkFileList` drop target (verified three ways: `prepare` logged, `drag_end`
+  logged, `connect_drop` never ran; a `String` payload from the same widget works instantly). So queue rows and MTB
+  tiles drag `image_drag_payload(paths, name, query)` = `{"comfy_image": {"paths": [...], "name": …,
+  "query": …}}`, and the canvas's `String` target parses it: `paths` → `drop_local_image` (reads the file on a worker
+  thread), `query` → `drop_backend_image` (fetches `/view` for pictures that only exist on the backend and have no
+  host path, which is the Flatpak case). `FileList` stays only for drops coming from other applications.
+- **Broken pipe, structurally impossible now** (`src/backend.rs`): the backend used to be launched with
+  `STDOUT_PIPE | STDERR_MERGE` and read through `gio::DataInputStream::read_line_utf8_future`; the `Err` arm did
+  `break`, dropping the reader — one non-UTF-8 byte in ComfyUI output (tqdm progress, a custom node printing raw bytes)
+  closed the pipe, and the *next* write inside a sampler raised `[Errno 32] Broken pipe`, aborting the node (the
+  websocket stays alive, so the UI looked healthy and printed `118 workflows` after the reconnect). Now the launch
+  command redirects the merged output into `$XDG_CACHE_HOME/comfy-gnome/backend.log` (`>> … 2>&1` before
+  `exec setsid …`), the launcher only keeps `STDIN_INHERIT`, and the app tails that file with `struct Tail` (byte
+  offset, resets when the file shrinks, `String::from_utf8_lossy`, splits on `\n`, flushes a >4 KiB fragment so
+  `\r`-only progress bars still appear) from a 150 ms `timeout_add_local` that stops when `wait_check_future` reports
+  the exit. A file has no reader to close, so **no write can ever fail with EPIPE** — this also covers Flatpak, where
+  the host-side log is the same path inside the shared home. Unit test `backend::tests::tail_reads_new_bytes_only_and_survives_garbage`
+  pins the behaviour (non-UTF-8 line, partial progress line, truncated file). Verified live with a fake backend
+  (`/tmp/fakecomfy`): `fd1` of the child is the log **file** (not `pipe:[…]`), 1.5 MB written *after* the invalid bytes,
+  process still alive, `grep -c "Broken pipe" backend.log` = 0, and the Log dock still streams.
+- **Demo harness** (`tools/demo/mock_backend.py`): `_meta_png()` builds a 512 px grey PNG whose `tEXt`/`workflow` chunk
+  holds `tools/demo/workflow.json`, served for `harbour_00003_.png`; history names are now distinct per prompt
+  (`3n+3 …`), so `harbour_00003_.png` exercises the metadata branch and `harbour_00006_.png` the Load Image branch.
+- Verified in the demo (1280×800, dark): queue row `harbour_00003_.png` → new tab with the graph; `harbour_00006_.png`
+  → LoadImage node at the drop point; MTB tile (JPEG) → LoadImage; a **real** ComfyUI output PNG from the user's
+  `input/` (`AIXG-17-54-08_1.png`, 7.8 MB, `tEXt/workflow`) → new tab at 164 % zoom with its graph. All four leaves
+  reach `open_image_bytes`.
+- Scratch tips: `pgrep -f "pattern"` matches the shell running your own `bash -c` command (anchored patterns or a
+  separate call); the demo's MTB page lists the user's real `input/` folder (read-only — thumbnails only), and the
+  selection highlight left over from a failed drag is only that: a selection, not a dropped node.

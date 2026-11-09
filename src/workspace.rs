@@ -194,6 +194,35 @@ fn danger(label: impl Into<String>, f: impl Fn() + 'static) -> Entry {
     Entry::Item { label: label.into(), danger: true, enabled: true, icon: None, f: Box::new(f) }
 }
 
+/// In-app picture drag payload. Pictures in the queue and in the MTB browser live on the backend
+/// (which may be remote), so the drag carries the `/view` query and the canvas fetches the bytes —
+/// the same path a local file takes once it is read off disk.
+const IMAGE_DRAG_KEY: &str = "comfy_image";
+
+/// A picture dragged onto the canvas: `paths` when it lives on disk (MTB, or any file), `query`
+/// when it only exists on the backend (queue history). One JSON string for both sources — a plain
+/// string survives the platform drag unchanged, whereas a `GdkFileList` reaches the other side as
+/// `text/uri-list` and does not match a `GdkFileList` drop target.
+fn image_drag_payload(paths: &[String], name: &str, query: Option<&str>) -> String {
+    serde_json::json!({IMAGE_DRAG_KEY: {"paths": paths, "name": name, "query": query}}).to_string()
+}
+
+struct ImageDrag {
+    paths: Vec<std::path::PathBuf>,
+    name: String,
+    query: Option<String>,
+}
+
+fn parse_image_drag(text: &str) -> Option<ImageDrag> {
+    let v: serde_json::Value = serde_json::from_str(text).ok()?;
+    let o = v.get(IMAGE_DRAG_KEY)?;
+    Some(ImageDrag {
+        paths: o.get("paths")?.as_array()?.iter().filter_map(|p| p.as_str()).map(std::path::PathBuf::from).collect(),
+        name: o.get("name")?.as_str()?.to_owned(),
+        query: o.get("query").and_then(|q| q.as_str()).map(str::to_owned),
+    })
+}
+
 /// Plain closure action, reachable from menus as `wb.<name>`.
 /// Hover previews for model files in every combo list (`canvas::widgets::edit_combo`).
 /// The model index loads on first hover (worker thread); textures are cached per option.
@@ -1448,6 +1477,15 @@ impl Workspace {
                 me2.show_menu(b, w, h, entries);
             });
             row.add_suffix(&more);
+            // Drag the picture onto a canvas to open its workflow (or load it as a node).
+            if let Some(img) = first.cloned() {
+                let drag = gtk::DragSource::builder().actions(gtk::gdk::DragAction::COPY).build();
+                let (n, q) = (img.filename.clone(), img.query());
+                drag.connect_prepare(move |_, _, _| {
+                    Some(gtk::gdk::ContentProvider::for_value(&image_drag_payload(&[], &n, Some(&q)).to_value()))
+                });
+                row.add_controller(drag);
+            }
             // Right click anywhere on the row: the two picture actions, where the pointer is.
             if let Some(img) = first.cloned() {
                 let (me3, row2) = (self.clone(), row.clone());
@@ -1899,6 +1937,23 @@ impl Workspace {
             true
         });
         canvas.area.add_controller(drop);
+        // Pictures dragged inside the app (queue row, MTB tile): see [`image_drag_payload`].
+        let img_drop = gtk::DropTarget::new(String::static_type(), gtk::gdk::DragAction::COPY);
+        let (me3, c3) = (self.clone(), canvas.clone());
+        img_drop.connect_drop(move |_, v, x, y| {
+            let Ok(text) = v.get::<String>() else { return false };
+            let Some(drag) = parse_image_drag(&text) else { return false };
+            let (zoom, off) = c3.view();
+            let pos = ((x - off.0) / zoom, (y - off.1) / zoom);
+            if let Some(query) = drag.query {
+                me3.drop_backend_image(drag.name.clone(), query, pos);
+            }
+            for path in drag.paths {
+                me3.drop_local_image(path, pos);
+            }
+            true
+        });
+        canvas.area.add_controller(img_drop);
         // The floating selection toolbox sits over the canvas, so the page is an overlay.
         let overlay = gtk::Overlay::new();
         overlay.set_child(Some(&canvas.area));
@@ -2068,15 +2123,57 @@ impl Workspace {
         self.active_doc()
     }
 
-    /// MTB / file-manager drop of an image without ComfyUI metadata: upload it and drop a
-    /// preloaded native `LoadImage` node at `pos` (`reference/MTB.png`).
-    fn insert_image_node_at(&self, path: &std::path::Path, pos: (f64, f64)) {
-        let Ok(bytes) = std::fs::read(path) else {
-            return self.append_log(&format!("[drop] cannot read {}", path.display()));
-        };
-        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "dropped.png".into());
+    /// One rule for every dropped picture — file manager, MTB grid or queue row: a PNG carrying a
+    /// ComfyUI `workflow` chunk opens that graph in a new tab, anything else is uploaded and lands
+    /// as a preloaded native `LoadImage` node at the drop point (what the web UI does).
+    pub(super) fn open_image_bytes(&self, name: &str, bytes: Vec<u8>, pos: (f64, f64)) {
+        let stem = name.rsplit_once('.').map(|(s, _)| s.to_owned()).unwrap_or_else(|| name.to_owned());
+        if crate::pngmeta::is_png(&bytes) {
+            let text = crate::pngmeta::workflow(&bytes);
+            match text {
+                Some(text) => {
+                    let wf = serde_json::from_str(&text)
+                        .map_err(|e| e.to_string())
+                        .and_then(|v| workflow::Workflow::from_json(v).map_err(|e| e.to_string()));
+                    match wf {
+                        Ok(wf) => self.open_temp(&stem, wf),
+                        Err(e) => self.append_log(&format!("[drop] {stem}: {e}")),
+                    }
+                    return;
+                }
+                None => self.append_log(&format!("[drop] {stem}: no workflow metadata → Load Image")),
+            }
+        }
         let Some(doc) = self.doc_or_blank("dropped") else { return };
-        self.place_image_at(&doc, name, bytes, pos);
+        self.place_image_at(&doc, name.to_owned(), bytes, pos);
+    }
+
+    /// A picture dragged out of the queue (its bytes live on the backend, not on disk).
+    fn drop_backend_image(&self, name: String, query: String, pos: (f64, f64)) {
+        let Some(client) = self.client.borrow().clone() else {
+            return self.append_log("[drop] not connected");
+        };
+        let me = self.clone();
+        glib::spawn_future_local(async move {
+            match gio::spawn_blocking(move || client.view_query(&query)).await {
+                Ok(Ok(bytes)) => me.open_image_bytes(&name, bytes, pos),
+                Ok(Err(e)) => me.append_log(&format!("[drop] {name}: {e}")),
+                Err(_) => me.append_log("[drop] image worker panicked"),
+            }
+        });
+    }
+
+    /// Read a picture from disk on a worker, then apply the drop rule in [`Self::open_image_bytes`].
+    fn drop_local_image(&self, path: std::path::PathBuf, pos: (f64, f64)) {
+        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "image".into());
+        let me = self.clone();
+        glib::spawn_future_local(async move {
+            match gio::spawn_blocking(move || std::fs::read(&path)).await {
+                Ok(Ok(bytes)) => me.open_image_bytes(&name, bytes, pos),
+                Ok(Err(e)) => me.append_log(&format!("[drop] {name}: {e}")),
+                Err(_) => me.append_log("[drop] file worker panicked"),
+            }
+        });
     }
 
     /// Upload picture bytes and drop a preloaded native `LoadImage` node at `pos` in `doc`.

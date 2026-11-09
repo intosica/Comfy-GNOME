@@ -645,6 +645,21 @@ impl Media {
             });
         }
         holder.add_controller(click);
+        if !is_dir {
+            // Drag onto a canvas. The payload is the same in-app JSON the queue rows use (a plain
+            // string travels through the platform drag unchanged, unlike a GdkFileList which the
+            // X11 backend advertises as text/uri-list and the canvas would not match); the drop
+            // reads the file and applies the usual rule: PNG metadata → workflow, else Load Image.
+            let drag = gtk::DragSource::builder().actions(gtk::gdk::DragAction::COPY).build();
+            let (me2, p2) = (self.clone(), path.to_path_buf());
+            drag.connect_prepare(move |_, _, _| {
+                let paths = if me2.sel.borrow().contains(&p2) { me2.selected_paths() } else { vec![p2.clone()] };
+                let paths: Vec<String> = paths.iter().map(|p| p.to_string_lossy().into_owned()).collect();
+                let name = paths.first().map(|p| std::path::Path::new(p).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()).unwrap_or_default();
+                Some(gtk::gdk::ContentProvider::for_value(&super::image_drag_payload(&paths, &name, None).to_value()))
+            });
+            holder.add_controller(drag);
+        }
         holder
     }
 

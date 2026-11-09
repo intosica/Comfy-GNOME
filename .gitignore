@@ -3,3 +3,8 @@
 /flatpak-build
 /.pi
 /reference
+
+# Working screenshots and Python bytecode from the demo harness
+.shots/
+__pycache__/
+*.pyc

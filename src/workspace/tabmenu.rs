@@ -90,20 +90,13 @@ impl Workspace {
     /// Same as [`open_dropped`](Self::open_dropped) but lands images at `pos`.
     pub(super) fn open_dropped_at(&self, f: &gio::File, pos: (f64, f64)) {
         let Some(path) = f.path() else { return };
-        let name = path.file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "dropped".into());
+        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "dropped".into());
         let Ok(bytes) = std::fs::read(&path) else { return self.append_log(&format!("[drop] cannot read {}", path.display())) };
-        let text = if crate::pngmeta::is_png(&bytes) {
-            match crate::pngmeta::workflow(&bytes) {
-                Some(t) => t,
-                None => {
-                    // No workflow inside: drop it into a preloaded Load Image node instead.
-                    self.append_log(&format!("[drop] {name}: no workflow metadata → Load Image"));
-                    return self.insert_image_node_at(&path, pos);
-                }
-            }
-        } else {
-            String::from_utf8_lossy(&bytes).into_owned()
-        };
+        if crate::pngmeta::is_png(&bytes) {
+            // Same rule as a queue/MTB picture: metadata → that workflow, else a Load Image node.
+            return self.open_image_bytes(&name, bytes, pos);
+        }
+        let text = String::from_utf8_lossy(&bytes).into_owned();
         match serde_json::from_str(&text).map_err(|e| e.to_string()).and_then(|v| workflow::Workflow::from_json(v).map_err(|e| e.to_string())) {
             Ok(wf) => self.open_temp(&name, wf),
             Err(e) => self.append_log(&format!("[drop] {name}: {e}")),

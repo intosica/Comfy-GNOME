@@ -3,10 +3,11 @@
 //!
 //! Deliberately std + gio only: no tokio/reqwest.
 
-use adw::{gio, glib, prelude::*};
+use adw::{gio, glib};
 use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::time::Duration;
 
 pub const DEFAULT_HOST: &str = "127.0.0.1";
@@ -159,6 +160,63 @@ fn flatpak_host_files() -> std::io::Result<(PathBuf, PathBuf)> {
 
 fn shell_quote(p: &std::path::Path) -> String {
     format!("'{}'", p.display().to_string().replace('\'', "'\\''"))
+}
+
+/// Where the backend's merged stdout/stderr goes.
+///
+/// A plain file, never a pipe: any reader that stops reading — invalid UTF-8 in one line, an app
+/// restart, a dropped read future — closes the read end, and then every `print` in ComfyUI dies
+/// with `[Errno 32] Broken pipe`. Inside a sampler that exception aborts the node and the user
+/// loses the run, so the pipe itself has to go.
+pub fn log_path() -> PathBuf {
+    glib::user_cache_dir().join("comfy-gnome/backend.log")
+}
+
+/// Tail of [`log_path`]: reads only what is new since the last call, so a slow poll costs nothing.
+struct Tail {
+    path: PathBuf,
+    file: Option<std::fs::File>,
+    off: u64,
+    /// Bytes after the last newline (a progress bar writes `\r` chunks, not lines).
+    part: Vec<u8>,
+}
+
+impl Tail {
+    fn new(path: PathBuf) -> Self {
+        Self { path, file: None, off: 0, part: Vec::new() }
+    }
+
+    fn read(&mut self, mut emit: impl FnMut(&str)) {
+        use std::io::{Read, Seek, SeekFrom};
+        if self.file.is_none() {
+            self.file = std::fs::File::open(&self.path).ok();
+        }
+        let Some(f) = self.file.as_mut() else { return };
+        let len = f.metadata().map(|m| m.len()).unwrap_or(0);
+        if len < self.off {
+            // Truncated under us (a fresh launch): start over instead of reading garbage.
+            self.off = 0;
+            self.part.clear();
+        }
+        if len == self.off || f.seek(SeekFrom::Start(self.off)).is_err() {
+            return;
+        }
+        let mut buf = Vec::new();
+        if f.take(len - self.off).read_to_end(&mut buf).is_err() {
+            return;
+        }
+        self.off += buf.len() as u64;
+        self.part.extend_from_slice(&buf);
+        while let Some(i) = self.part.iter().position(|&b| b == b'\n') {
+            let line: Vec<u8> = self.part.drain(..=i).collect();
+            emit(String::from_utf8_lossy(&line).trim_end_matches(['\r', '\n']));
+        }
+        // A progress bar without newlines must still show up; cap the pending tail.
+        if self.part.len() > 4096 {
+            emit(&String::from_utf8_lossy(&self.part));
+            self.part.clear();
+        }
+    }
 }
 
 pub struct Backend {
@@ -314,6 +372,14 @@ pub fn spawn(cfg: &LaunchConfig, on_line: impl Fn(&str) + 'static) -> Result<Bac
         ),
         (None, None) => return Err(glib::Error::new(gio::IOErrorEnum::InvalidArgument, "nothing to launch")),
     };
+    // Merged output goes to a file: stdout and stderr are the same fd, so their order survives and
+    // nothing in this process can close a pipe the backend is writing to (see [`log_path`]).
+    let log = log_path();
+    if let Some(dir) = log.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let _ = std::fs::write(&log, b"");
+    let body = format!("{} >>{} 2>&1", body, shell_quote(&log));
     argv.extend(["sh".into(), "-c".into(), body.into(), arg0, workdir.into()]);
     // The app owns the port: pass it in script mode too. Scripts commonly forward
     // "$@" to main.py; before user args so theirs win (argparse: last wins).
@@ -323,9 +389,7 @@ pub fn spawn(cfg: &LaunchConfig, on_line: impl Fn(&str) + 'static) -> Result<Bac
     }
     let argv_ref: Vec<&std::ffi::OsStr> = argv.iter().map(|s| s.as_os_str()).collect();
 
-    let launcher = gio::SubprocessLauncher::new(
-        gio::SubprocessFlags::STDOUT_PIPE | gio::SubprocessFlags::STDERR_MERGE | gio::SubprocessFlags::STDIN_INHERIT,
-    );
+    let launcher = gio::SubprocessLauncher::new(gio::SubprocessFlags::STDIN_INHERIT);
     // If we die without running stop() (crash, X connection loss), the kernel sends the
     // child SIGTERM. Native: that child is the session leader we kill by group. Flatpak:
     // --watch-bus reaches flatpak-spawn's direct child; stop() additionally kills the
@@ -335,16 +399,64 @@ pub fn spawn(cfg: &LaunchConfig, on_line: impl Fn(&str) + 'static) -> Result<Bac
         libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM);
     });
     let proc = launcher.spawn(&argv_ref)?;
-    let stdout = gio::DataInputStream::new(&proc.stdout_pipe().expect("stdout piped"));
-    glib::spawn_future_local(async move {
-        loop {
-            match stdout.read_line_utf8_future(glib::Priority::DEFAULT).await {
-                Ok(Some(line)) => on_line(&line),
-                Ok(None) => break,
-                Err(e) => { on_line(&format!("[log read error] {e}")); break; }
-            }
+    on_line(&format!("[backend] output → {}", log.display()));
+    // Poll the file instead of reading a pipe: no reader of ours can ever close the backend's
+    // output. The timer stops by itself once the process is gone (and drains what is left).
+    let tail = Rc::new(std::cell::RefCell::new(Tail::new(log.clone())));
+    let exited = Rc::new(std::cell::Cell::new(false));
+    {
+        let (p, e) = (proc.clone(), exited.clone());
+        glib::spawn_future_local(async move {
+            let _ = p.wait_check_future().await;
+            e.set(true);
+        });
+    }
+    let on_line = Rc::new(on_line);
+    glib::timeout_add_local(std::time::Duration::from_millis(150), move || {
+        tail.borrow_mut().read(|l| on_line(l));
+        if exited.get() {
+            tail.borrow_mut().read(|l| on_line(l));
+            on_line("[backend process exited]");
+            return glib::ControlFlow::Break;
         }
-        on_line("[backend process exited]");
+        glib::ControlFlow::Continue
     });
     Ok(Backend { proc, pidfile: host_files.map(|(_, p)| p) })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    /// The log reader must survive what killed the old pipe reader: one non-UTF-8 byte, then more
+    /// output. A pipe that dies here is exactly what turned into `[Errno 32] Broken pipe` inside a
+    /// sampler, so this behaviour is load-bearing.
+    #[test]
+    fn tail_reads_new_bytes_only_and_survives_garbage() {
+        let dir = std::env::temp_dir().join(format!("cg-tail-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("backend.log");
+        std::fs::write(&path, b"first\r\nsecond\n").unwrap();
+        let mut t = Tail::new(path.clone());
+        let mut got = Vec::new();
+        t.read(|l| got.push(l.to_owned()));
+        assert_eq!(got, ["first", "second"]);
+
+        // Append a non-UTF-8 line and a partial progress line (no newline yet).
+        let mut f = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+        f.write_all(b"\xff\xfe bad bytes\nprog 1/3\r").unwrap();
+        drop(f);
+        let mut got = Vec::new();
+        t.read(|l| got.push(l.to_owned()));
+        assert_eq!(got.len(), 1, "only the completed line is emitted: {got:?}");
+        assert!(got[0].contains("bad bytes"), "lossy decode keeps the text: {got:?}");
+
+        // A fresh launch truncates the file: read from the top instead of skipping the new run.
+        std::fs::write(&path, b"fresh\n").unwrap();
+        let mut got = Vec::new();
+        t.read(|l| got.push(l.to_owned()));
+        assert_eq!(got, ["fresh"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

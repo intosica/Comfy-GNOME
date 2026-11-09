@@ -101,6 +101,30 @@ def node_info():
 
 # The simulated result: ComfyUI_00004.png (the workflow's own output), downsized to 512 px.
 RESULT = open(os.path.join(os.path.dirname(__file__), "result.jpg"), "rb").read()
+# An output picture the way ComfyUI saves one: a PNG whose `workflow` tEXt chunk holds the graph.
+# Dropping it on the canvas must open that workflow, not a Load Image node.
+META_PNG = b""
+
+
+def _meta_png() -> bytes:
+    """Grey 512x512 PNG carrying tools/demo/workflow.json in a `workflow` text chunk."""
+    import struct
+    import zlib
+
+    def chunk(kind: bytes, data: bytes) -> bytes:
+        return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data) & 0xFFFFFFFF)
+
+    graph = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "workflow.json"), "rb").read()
+    w = h = 512
+    raw = b"".join(b"\x00" + bytes([90 + (y % 40)]) * w for y in range(h))
+    return (b"\x89PNG\r\n\x1a\n"
+            + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 0, 0, 0, 0))
+            + chunk(b"tEXt", b"workflow\x00" + graph)
+            + chunk(b"IDAT", zlib.compress(raw, 9))
+            + chunk(b"IEND", b""))
+
+
+META_PNG = _meta_png()
 
 STATE = dict(queue=[], history={}, counter=0)
 NOW = time.time()
@@ -196,11 +220,13 @@ class Handler(BaseHTTPRequestHandler):
             return self.send(200, dict(queue_running=[], queue_pending=pending))
         if p == "/history":
             items = {}
-            for pid, dur, prefix in PROMPTS:
+            for n, (pid, dur, prefix) in enumerate(PROMPTS):
                 # Real wire shape: one object per image (`/history` nests them under
                 # outputs[node].images); a list here shows up as an empty filename.
+                # Distinct names per run: harbour_00003_.png is the metadata picture, the rest are
+                # plain JPEGs, so both drop branches (workflow / Load Image) are reachable.
                 stamps = [dict(filename=f"harbour_{i:05d}_.png", subfolder="", type="output")
-                          for i in (3, 2, 1)]
+                          for i in (3 * n + 3, 3 * n + 2, 3 * n + 1)]
                 end = NOW - 60.0 * (len(items) + 1)
                 items[pid] = dict(prompt=[0, pid, {}, {"client_id": "comfy-gnome-demo"}, ["469"]],
                                   outputs={"469": dict(images=stamps)}, status=dict(status_str="success", completed=True,
@@ -221,7 +247,12 @@ class Handler(BaseHTTPRequestHandler):
                              [dict(name="anime_linework_xl.safetensors", pathIndex=0, size=1, modified=0)])
         if p.startswith("/api/lm/") and p.endswith("/preview-url"):
             return self.send(200, dict(success=True, preview_url="/demo/preview.png"))
-        if p == "/demo/preview.png" or p.startswith("/view"):
+        if p.startswith("/view"):
+            filename = (parse_qs(urlparse(self.path).query).get("filename") or [""])[0]
+            if filename == "harbour_00003_.png":
+                return self.send(200, META_PNG, "image/png")
+            return self.send(200, RESULT, "image/jpeg")
+        if p == "/demo/preview.png":
             return self.send(200, RESULT, "image/jpeg")
         if p == "/extensions":
             return self.send(200, ["easy-use", "rgthree-comfy", "comfyui-lora-manager", "KJNodes"])
