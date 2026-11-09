@@ -30,6 +30,7 @@ pub(super) struct Panel {
     sub_btn: gtk::ToggleButton,
     search: gtk::SearchEntry,
     stack: gtk::Stack,
+    tab_info: gtk::ToggleButton,
     params: gtk::Box,
     info: gtk::Box,
     settings: gtk::Box,
@@ -135,13 +136,13 @@ pub(super) fn build() -> Panel {
         .build();
     let pencil = gtk::Button::builder()
         .icon_name("cg-document-edit-symbolic")
-        .tooltip_text("Rename node")
+        .tooltip_text("Rename Node")
         .css_classes(["flat"])
         .sensitive(false)
         .build();
     let sub_btn = gtk::ToggleButton::builder()
         .icon_name("cg-emblem-system-symbolic")
-        .tooltip_text("Edit subgraph inputs")
+        .tooltip_text("Edit Subgraph Inputs")
         .css_classes(["flat"])
         .visible(false)
         .build();
@@ -157,7 +158,7 @@ pub(super) fn build() -> Panel {
     head.append(&sub_btn);
 
     let search = gtk::SearchEntry::builder()
-        .placeholder_text("Search inputs")
+        .placeholder_text("Search Inputs")
         .margin_start(10)
         .margin_end(10)
         .margin_bottom(4)
@@ -197,16 +198,30 @@ pub(super) fn build() -> Panel {
     editor.set_margin_bottom(14);
 
     let stack = gtk::Stack::builder().transition_type(gtk::StackTransitionType::Crossfade).vexpand(true).build();
-    stack.add_titled(&params_page, Some("params"), "Parameters");
-    stack.add_titled(&page(&info), Some("info"), "Info");
-    stack.add_titled(&page(&settings), Some("settings"), "Settings");
-    stack.add_titled(&page(&editor), Some("subgraph"), "Subgraph");
-    let switcher = gtk::StackSwitcher::builder().stack(&stack).halign(gtk::Align::Start).margin_start(8).build();
+    stack.add_named(&params_page, Some("params"));
+    stack.add_named(&page(&info), Some("info"));
+    stack.add_named(&page(&settings), Some("settings"));
+    stack.add_named(&page(&editor), Some("subgraph"));
+    // Compact left-aligned tabs, not a stretched StackSwitcher: with the width the web
+    // reserves for the panel the switcher's buttons fill the whole strip.
+    let tab = |label: &str| gtk::ToggleButton::builder().label(label).css_classes(["flat", "prop-tab"]).build();
+    let tab_params = tab("Parameters");
+    let tab_info = tab("Info");
+    let tab_settings = tab("Settings");
+    tab_params.set_active(true);
+    tab_info.set_group(Some(&tab_params));
+    tab_settings.set_group(Some(&tab_params));
+    let tabs = gtk::Box::new(gtk::Orientation::Horizontal, 2);
+    tabs.set_margin_start(8);
+    tabs.set_halign(gtk::Align::Start);
+    tabs.append(&tab_params);
+    tabs.append(&tab_info);
+    tabs.append(&tab_settings);
 
     let root = gtk::Box::new(gtk::Orientation::Vertical, 2);
     root.add_css_class("prop-panel");
     root.append(&head);
-    root.append(&switcher);
+    root.append(&tabs);
     root.append(&stack);
 
     let state = Rc::new(State::default());
@@ -231,9 +246,25 @@ pub(super) fn build() -> Panel {
         f.connect_leave(move |_| st.focus.set(false));
         root.add_controller(f);
     }
+    // Tab clicks drive the stack; the stack also shows the subgraph editor, where the
+    // tabs (like the web's) are unavailable.
+    for (b, page) in [(&tab_params, "params"), (&tab_info, "info"), (&tab_settings, "settings")] {
+        let stack = stack.clone();
+        b.connect_clicked(move |_| stack.set_visible_child_name(page));
+    }
+    {
+        let (t1, t2, t3) = (tab_params.clone(), tab_info.clone(), tab_settings.clone());
+        stack.connect_visible_child_name_notify(move |s| {
+            let cur = s.visible_child_name().unwrap_or_default();
+            t1.set_active(cur == "params");
+            t2.set_active(cur == "info");
+            t3.set_active(cur == "settings");
+        });
+    }
     // Subgraph editor toggle: the tabs go dim (screen: "Unkown Button Action on Subgraph").
     {
-        let (st, stack, sw) = (state.clone(), stack.clone(), switcher.clone());
+        let (st, stack) = (state.clone(), stack.clone());
+        let (t1, t2, t3) = (tab_params.clone(), tab_info.clone(), tab_settings.clone());
         sub_btn.connect_toggled(move |b| {
             if b.is_active() {
                 let cur = stack.visible_child_name().map(|s| s.to_string()).unwrap_or_else(|| "params".into());
@@ -241,15 +272,19 @@ pub(super) fn build() -> Panel {
                     *st.tab.borrow_mut() = cur;
                 }
                 stack.set_visible_child_name("subgraph");
-                sw.set_sensitive(false);
+                for t in [&t1, &t2, &t3] {
+                    t.set_sensitive(false);
+                }
             } else {
                 stack.set_visible_child_name(&st.tab.borrow());
-                sw.set_sensitive(true);
+                for t in [&t1, &t2, &t3] {
+                    t.set_sensitive(true);
+                }
             }
         });
     }
 
-    Panel { root, title, pencil, sub_btn, search, stack, params, info, settings, editor, state }
+    Panel { root, title, pencil, sub_btn, search, stack, tab_info, params, info, settings, editor, state }
 }
 
 // ---------------------------------------------------------------------------------------
@@ -283,12 +318,16 @@ impl Panel {
         }
         self.pencil.set_sensitive(false);
         self.sub_btn.set_visible(false);
+        self.tab_info.set_visible(true);
         if self.sub_btn.is_active() {
             self.sub_btn.set_active(false);
         }
         let q = self.search.text().to_lowercase();
 
         let Some(doc) = ws.active_doc() else {
+            if self.stack.visible_child_name().as_deref() == Some("subgraph") {
+                self.stack.set_visible_child_name("params");
+            }
             self.title.set_label("Properties");
             self.params.append(&dim("No workflow open"));
             self.info.append(&dim("No workflow open"));
@@ -297,16 +336,23 @@ impl Panel {
         let reg = ws.registry.borrow();
         let d = doc.borrow();
         let graph = graph_ref(&d);
-        let path = d.path.clone();
         let sel = d.canvas.selected();
         let node = sel.last().and_then(|id| graph.nodes.iter().find(|n| &n.id == id)).cloned();
         let Some(node) = node else {
+            if self.stack.visible_child_name().as_deref() == Some("subgraph") {
+                self.stack.set_visible_child_name("params");
+            }
             self.title.set_label("Properties");
             self.params.append(&dim("Select a node to see its parameters"));
             self.info.append(&dim("Select a node"));
             return;
         };
         let sg = d.wf.subgraphs.get(&node.ty).cloned();
+        self.tab_info.set_visible(sg.is_none());
+        if sg.is_some() && self.stack.visible_child_name().as_deref() == Some("info") {
+            // No Info page for subgraph nodes (the web hides that tab).
+            self.stack.set_visible_child_name("params");
+        }
         let name = node
             .title
             .clone()
@@ -329,25 +375,40 @@ impl Panel {
             self.pencil.set_sensitive(true);
         }
 
-        // Parameters: the same rows the canvas draws, split at `advanced`.
+        // Parameters: the same rows the canvas draws, split at `advanced`. A subgraph
+        // instance additionally lists every interior widget that is not promoted
+        // (ADVANCED INPUTS), editable in place.
         let mut images = Vec::new();
-        let widgets = graph_view::build_widgets(&d.wf, graph, &node, &reg, &mut images);
+        let promoted = graph_view::build_widgets(&d.wf, graph, &node, &reg, &mut images);
+        let interior = graph_view::subgraph_advanced_widgets(&d.wf, &node, &reg);
         let mut normal: Vec<gtk::Widget> = Vec::new();
+        let mut normal_reset: Vec<Rc<dyn Fn()>> = Vec::new();
         let mut advanced: Vec<gtk::Widget> = Vec::new();
-        for w in &widgets {
-            let Some(row) = self.row(ws, &doc, &node, w, &path, sg.as_ref(), &q) else { continue };
-            if w.advanced {
+        let mut advanced_reset: Vec<Rc<dyn Fn()>> = Vec::new();
+        for w in &promoted {
+            let Some(row) = self.row(ws, &doc, &node, w, sg.as_ref(), &q) else { continue };
+            let reset = self.reset_action(ws, &doc, &node, w, sg.as_ref());
+            // A subgraph instance's promoted rows are INPUTS however the registry marks
+            // them; a plain node keeps the registry's advanced split.
+            if sg.is_none() && w.advanced {
                 advanced.push(row);
+                advanced_reset.extend(reset);
             } else {
                 normal.push(row);
+                normal_reset.extend(reset);
             }
+        }
+        for w in &interior {
+            let Some(row) = self.row(ws, &doc, &node, w, sg.as_ref(), &q) else { continue };
+            advanced.push(row);
+            advanced_reset.extend(self.reset_action(ws, &doc, &node, w, sg.as_ref()));
         }
         if normal.is_empty() {
             normal.push(dim("No inputs").upcast());
         }
-        self.params.append(&self.section("INPUTS", true, normal));
+        self.params.append(&self.section("INPUTS", true, normal, normal_reset));
         if !advanced.is_empty() {
-            self.params.append(&self.section("ADVANCED INPUTS", false, advanced));
+            self.params.append(&self.section("ADVANCED INPUTS", false, advanced, advanced_reset));
         }
 
         self.fill_info(&node, &reg, sg.as_ref());
@@ -361,84 +422,103 @@ impl Panel {
         }
     }
 
-    fn section(&self, label: &str, expanded: bool, rows: Vec<gtk::Widget>) -> gtk::Widget {
+    fn section(
+        &self,
+        label: &str,
+        expanded: bool,
+        rows: Vec<gtk::Widget>,
+        resets: Vec<Rc<dyn Fn()>>,
+    ) -> gtk::Widget {
         let list = gtk::Box::new(gtk::Orientation::Vertical, 10);
         list.set_margin_top(2);
         for r in rows {
             list.append(&r);
         }
-        let exp = gtk::Expander::builder().label(label).expanded(expanded).css_classes(["prop-section"]).build();
+        let exp = gtk::Expander::builder().expanded(expanded).css_classes(["prop-section"]).build();
+        let head = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+        let l = gtk::Label::builder().label(label).xalign(0.0).hexpand(true).build();
+        head.append(&l);
+        if !resets.is_empty() {
+            let all = resets.clone();
+            let b = gtk::Button::builder()
+                .icon_name("view-refresh-symbolic")
+                .tooltip_text("Reset All to Defaults")
+                .css_classes(["flat", "prop-eye"])
+                .build();
+            b.connect_clicked(move |_| {
+                for f in &all {
+                    f();
+                }
+            });
+            head.append(&b);
+        }
+        exp.set_label_widget(Some(&head));
         exp.set_child(Some(&list));
         exp.upcast()
     }
 
-    /// One parameter row: name + socket type, the editor, and the promote/demote eye.
+    /// One parameter row: name + caption, the editor, and the actions menu.
+    #[allow(clippy::too_many_arguments)]
     fn row(
         &self,
         ws: &Workspace,
         doc: &DocRef,
         node: &workflow::Node,
         w: &Widget,
-        path: &[String],
-        sg: Option<&Subgraph>,
+        _sg: Option<&Subgraph>,
         query: &str,
     ) -> Option<gtk::Widget> {
-        let commit: Rc<dyn Fn(Value)> = {
-            let (ws, doc, id, key, structural) = (ws.clone(), doc.clone(), node.id.clone(), w.key.clone(), w.structural);
-            Rc::new(move |v: Value| {
-                ws.on_widget(&doc, &id, &key, v, structural);
-                if !structural {
-                    // The canvas paints widget values from its own scene: re-render it.
-                    ws.render_doc(&doc);
-                    ws.set_dirty(&doc, true);
-                }
-            })
-        };
-        let ed = editor(w, commit)?;
+        let ed = editor(w, commit(ws, doc, node, w))?;
 
-        // Socket type, as the web's right-aligned caption.
+        // Source node, as the web's right-aligned caption; the socket type when the row
+        // is the node's own widget.
         let ty = w.input.and_then(|i| node.inputs.get(i)).map(|i| i.ty.clone()).unwrap_or_default();
+        let caption = if w.source.is_empty() { ty } else { w.source.clone() };
 
-        let top = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        let top = gtk::Box::new(gtk::Orientation::Horizontal, 6);
         top.append(
-            &gtk::Label::builder().label(&w.label).xalign(0.0).ellipsize(gtk::pango::EllipsizeMode::End).css_classes(["prop-name"]).build(),
+            &gtk::Label::builder()
+                .label(&w.label)
+                .xalign(0.0)
+                .hexpand(true)
+                .ellipsize(gtk::pango::EllipsizeMode::End)
+                .css_classes(["prop-name"])
+                .build(),
         );
-        if !ty.is_empty() {
-            top.append(&gtk::Label::builder().label(&ty).xalign(1.0).hexpand(true).css_classes(["prop-type"]).build());
+        if !caption.is_empty() {
+            top.append(
+                &gtk::Label::builder()
+                    .label(&caption)
+                    .xalign(1.0)
+                    .hexpand(false)
+                    .max_width_chars(18)
+                    .ellipsize(gtk::pango::EllipsizeMode::End)
+                    .css_classes(["prop-type"])
+                    .build(),
+            );
         }
+        let rename = rename_target(ws, node, w);
+        let promote = promote_target(ws, node, w);
 
-        // Eye: expose an inner widget as a subgraph input, or take it back off the instance.
+        // Eye: promoted rows demote by their public input name.
         if w.key.starts_with("w:") {
-            // A promoted row on the instance: demote by the public input name.
             let name = w.input.and_then(|i| node.inputs.get(i)).map(|i| i.name.clone()).unwrap_or_default();
             let (ws, doc, sg_ty) = (ws.clone(), doc.clone(), node.ty.clone());
             let b = gtk::Button::builder()
                 .icon_name("cg-lucide-eye-off-symbolic")
-                .tooltip_text("Hide input (demote)")
+                .tooltip_text("Hide Input")
                 .css_classes(["flat", "prop-eye"])
                 .build();
-            b.connect_clicked(move |_| ws.demote_input(&doc, &sg_ty, &name));
+            b.connect_clicked(move |_| {
+                ws.demote_input(&doc, &sg_ty, &name);
+                later(&ws);
+            });
             top.append(&b);
-        } else if let Some(sg) = sg {
-            // A row of an interior node, while that subgraph is being edited.
-            if let Some(slot) = w.input {
-                let inner = &node.inputs[slot];
-                if let Some(widget) = inner.widget.clone() {
-                    let shown = inner.link.is_some() || sg.inputs.iter().any(|i| i.name == inner.name);
-                    if !shown {
-                        let (ws, doc, node_id, sg_id, seed) =
-                            (ws.clone(), doc.clone(), node.id.clone(), node.ty.clone(), w.value.clone());
-                        let b = gtk::Button::builder()
-                            .icon_name("cg-lucide-eye-symbolic")
-                            .tooltip_text(format!("Show input: expose {} on the subgraph node", inner.name))
-                            .css_classes(["flat", "prop-eye"])
-                            .build();
-                        b.connect_clicked(move |_| ws.promote_widget(&doc, &sg_id, &node_id, &widget, seed.clone()));
-                        top.append(&b);
-                    }
-                }
-            }
-            let _ = path;
+        }
+
+        // Per-row menu: Rename / Show Input / Reset to Default (screen: "Three Dots").
+        if rename.is_some() || promote.is_some() || reset_value(w).is_some() {
+            top.append(&self.actions_menu(ws, doc, node, w));
         }
 
         let row = gtk::Box::new(gtk::Orientation::Vertical, 3);
@@ -447,6 +527,129 @@ impl Panel {
         row.set_visible(query.is_empty() || w.label.to_lowercase().contains(query));
         self.state.rows.borrow_mut().push((row.clone().upcast(), w.label.clone()));
         Some(row.upcast())
+    }
+
+    fn actions_menu(
+        &self,
+        ws: &Workspace,
+        doc: &DocRef,
+        node: &workflow::Node,
+        w: &Widget,
+    ) -> gtk::MenuButton {
+        let pop = gtk::Popover::new();
+        pop.set_has_arrow(false);
+        let list = gtk::Box::new(gtk::Orientation::Vertical, 2);
+        pop.set_child(Some(&list));
+
+        // Items are built when the menu opens, not when the row is built: a value edited
+        // in place (or a rename) must not leave a stale "Reset to Default" behind.
+        let (ws2, doc2, node2, snap) =
+            (ws.clone(), doc.clone(), node.clone(), w.clone());
+        let fill: Rc<dyn Fn()> = {
+            let (list, pop) = (list.clone(), pop.clone());
+            Rc::new(move || {
+                clear(&list);
+                let w = live_widget(&ws2, &doc2, &node2, &snap.key).unwrap_or_else(|| snap.clone());
+                let rename = rename_target(&ws2, &node2, &w);
+                let promote = promote_target(&ws2, &node2, &w);
+                if let Some(t) = rename.clone() {
+                    let (ws, doc, cur) = (ws2.clone(), doc2.clone(), w.label.clone());
+                    let p = pop.clone();
+                    list.append(&menu_item(
+                        "Rename",
+                        true,
+                        Box::new(move || {
+                            p.popdown();
+                            let (ws, doc, t) = (ws.clone(), doc.clone(), t.clone());
+                            let me = ws.clone();
+                            ws.name_dialog("Rename Input", "Rename", &cur, move |text| {
+                                {
+                                    let mut d = doc.borrow_mut();
+                                    let graph = match &t.sg {
+                                        Some(ty) => d.wf.subgraphs.get_mut(ty).map(|s| &mut s.graph),
+                                        None => Some(graph_mut(&mut d)),
+                                    };
+                                    if let Some(g) = graph {
+                                        for n in g.nodes.iter_mut().filter(|n| n.id == t.node) {
+                                            if let Some(i) = n.inputs.get_mut(t.slot) {
+                                                i.label = Some(text.clone()).filter(|x| !x.is_empty());
+                                            }
+                                        }
+                                    }
+                                }
+                                me.edited(&doc);
+                                later(&me);
+                            });
+                        }),
+                    ));
+                }
+                if let Some((inner, name)) = promote.clone() {
+                    let (ws, doc, sg_id, seed) =
+                        (ws2.clone(), doc2.clone(), node2.ty.clone(), w.value.clone());
+                    let p = pop.clone();
+                    list.append(&menu_item(
+                        "Show Input",
+                        true,
+                        Box::new(move || {
+                            p.popdown();
+                            ws.promote_widget(&doc, &sg_id, &inner, &name, seed.clone());
+                            later(&ws);
+                        }),
+                    ));
+                }
+                match reset_value(&w) {
+                    Some(v) => {
+                        let c = commit(&ws2, &doc2, &node2, &w);
+                        let (ws3, p) = (ws2.clone(), pop.clone());
+                        list.append(&menu_item(
+                            "Reset to Default",
+                            true,
+                            Box::new(move || {
+                                p.popdown();
+                                c(v.clone());
+                                later(&ws3);
+                            }),
+                        ));
+                    }
+                    None if rename.is_some() || promote.is_some() => {
+                        list.append(&menu_item("Reset to Default", false, Box::new(|| {})));
+                    }
+                    None => {}
+                }
+            })
+        };
+        {
+            let fill = fill.clone();
+            pop.connect_visible_notify(move |p| {
+                if p.is_visible() {
+                    fill();
+                }
+            });
+        }
+
+        gtk::MenuButton::builder()
+            .icon_name("view-more-symbolic")
+            .tooltip_text("Widget Actions")
+            .popover(&pop)
+            .css_classes(["flat", "prop-eye"])
+            .build()
+    }
+
+    fn reset_action(
+        &self,
+        ws: &Workspace,
+        doc: &DocRef,
+        node: &workflow::Node,
+        w: &Widget,
+        _sg: Option<&Subgraph>,
+    ) -> Option<Rc<dyn Fn()>> {
+        let v = reset_value(w)?;
+        let c = commit(ws, doc, node, w);
+        let ws2 = ws.clone();
+        Some(Rc::new(move || {
+            c(v.clone());
+            later(&ws2);
+        }))
     }
 
     fn fill_info(&self, node: &workflow::Node, reg: &crate::registry::Registry, sg: Option<&Subgraph>) {
@@ -511,7 +714,7 @@ impl Panel {
         let pin = gtk::Switch::builder()
             .active(node.pinned)
             .halign(gtk::Align::Start)
-            .tooltip_text("Pinned nodes cannot be dragged")
+            .tooltip_text("Pinned Nodes Cannot Be Dragged")
             .build();
         {
             let (ws, doc, ids) = (ws.clone(), doc.clone(), ids.clone());
@@ -538,7 +741,10 @@ impl Panel {
         let show_all = gtk::Button::builder().label("Show all").css_classes(["flat", "prop-eye"]).halign(gtk::Align::End).build();
         {
             let (ws, doc, node_id) = (ws.clone(), doc.clone(), node_id.clone());
-            show_all.connect_clicked(move |_| ws.show_all_inputs(&doc, &node_id));
+            show_all.connect_clicked(move |_| {
+                ws.show_all_inputs(&doc, &node_id);
+                later(&ws);
+            });
         }
         self.editor.append(&heading_row("SHOWN ON NODE", &show_all));
         let mut shown = 0;
@@ -554,14 +760,17 @@ impl Panel {
             row.append(&t);
             let b = gtk::Button::builder()
                 .icon_name("cg-lucide-eye-off-symbolic")
-                .tooltip_text("Hide input")
+                .tooltip_text("Hide Input")
                 .css_classes(["flat", "prop-eye"])
                 .halign(gtk::Align::End)
                 .hexpand(true)
                 .build();
             {
                 let (ws, doc, sg_id, name) = (ws.clone(), doc.clone(), sg_id.clone(), inp.name.clone());
-                b.connect_clicked(move |_| ws.demote_input(&doc, &sg_id, &name));
+                b.connect_clicked(move |_| {
+                    ws.demote_input(&doc, &sg_id, &name);
+                    later(&ws);
+                });
             }
             row.append(&b);
             self.editor.append(&row);
@@ -574,7 +783,10 @@ impl Panel {
         let hide_all = gtk::Button::builder().label("Hide all").css_classes(["flat", "prop-eye"]).halign(gtk::Align::End).build();
         {
             let (ws, doc, node_id) = (ws.clone(), doc.clone(), node_id);
-            hide_all.connect_clicked(move |_| ws.hide_all_inputs(&doc, &node_id));
+            hide_all.connect_clicked(move |_| {
+                ws.hide_all_inputs(&doc, &node_id);
+                later(&ws);
+            });
         }
         self.editor.append(&heading_row("HIDDEN / NESTED PARAMETERS", &hide_all));
         let mut hidden = 0;
@@ -592,7 +804,7 @@ impl Panel {
                 row.append(&t);
                 let b = gtk::Button::builder()
                     .icon_name("cg-lucide-eye-symbolic")
-                    .tooltip_text("Show input")
+                    .tooltip_text("Show Input")
                     .css_classes(["flat", "prop-eye"])
                     .halign(gtk::Align::End)
                     .hexpand(true)
@@ -600,7 +812,10 @@ impl Panel {
                 {
                     let (ws, doc, sg_id, inner_id, name, seed) =
                         (ws.clone(), doc.clone(), sg_id.clone(), inner.id.clone(), s.name.clone(), s.value.clone());
-                    b.connect_clicked(move |_| ws.promote_widget(&doc, &sg_id, &inner_id, &name, seed.clone()));
+                    b.connect_clicked(move |_| {
+                        ws.promote_widget(&doc, &sg_id, &inner_id, &name, seed.clone());
+                        later(&ws);
+                    });
                 }
                 row.append(&b);
                 self.editor.append(&row);
@@ -704,6 +919,97 @@ fn editor(w: &Widget, commit: Rc<dyn Fn(Value)>) -> Option<gtk::Widget> {
 // ---------------------------------------------------------------------------------------
 // Small pieces.
 // ---------------------------------------------------------------------------------------
+
+/// Value written by the row's editor and by Reset to Default.
+fn commit(ws: &Workspace, doc: &DocRef, node: &workflow::Node, w: &Widget) -> Rc<dyn Fn(Value)> {
+    let (ws, doc, id, key, structural) = (ws.clone(), doc.clone(), node.id.clone(), w.key.clone(), w.structural);
+    Rc::new(move |v: Value| {
+        ws.on_widget(&doc, &id, &key, v, structural);
+        if !structural {
+            // The canvas paints widget values from its own scene: re-render it.
+            ws.render_doc(&doc);
+            ws.set_dirty(&doc, true);
+        }
+    })
+}
+
+/// The value Reset to Default writes, when it differs from the current one.
+/// Where a row keeps its user-facing label.
+#[derive(Clone)]
+struct SlotRef {
+    /// Set when the slot lives on an interior node of this subgraph type.
+    sg: Option<String>,
+    node: String,
+    slot: usize,
+}
+
+fn rename_target(ws: &Workspace, node: &workflow::Node, w: &Widget) -> Option<SlotRef> {
+    if let Some(i) = w.input {
+        return Some(SlotRef { sg: None, node: node.id.clone(), slot: i });
+    }
+    let (inner_id, _) = w.key.strip_prefix("p:")?.split_once(':')?;
+    let sg = ws.active_doc()?.borrow().wf.subgraphs.get(&node.ty)?.clone();
+    let inner = sg.graph.node(inner_id)?;
+    let slot = inner.inputs.iter().position(|i| slot_for(i, w))?;
+    Some(SlotRef { sg: Some(node.ty.clone()), node: inner_id.to_owned(), slot })
+}
+
+/// A freshly derived row for `key`, so menus decide on the current value/label.
+fn live_widget(ws: &Workspace, doc: &DocRef, node: &workflow::Node, key: &str) -> Option<Widget> {
+    let d = doc.borrow();
+    let graph = graph_ref(&d);
+    let n = graph.nodes.iter().find(|n| n.id == node.id).unwrap_or(node);
+    let reg = ws.registry.borrow();
+    let mut rows = crate::graph_view::build_widgets(&d.wf, graph, n, &reg, &mut Vec::new());
+    if d.wf.subgraphs.contains_key(&n.ty) {
+        rows.extend(crate::graph_view::subgraph_advanced_widgets(&d.wf, n, &reg));
+    }
+    rows.into_iter().find(|r| r.key == key)
+}
+
+fn menu_item(label: &str, sensitive: bool, f: Box<dyn Fn()>) -> gtk::Button {
+    let b = gtk::Button::builder().label(label).halign(gtk::Align::Fill).css_classes(["flat"]).sensitive(sensitive).build();
+    if sensitive {
+        b.connect_clicked(move |_| f());
+    }
+    b
+}
+
+fn reset_value(w: &Widget) -> Option<Value> {
+    if w.default.is_null() || w.default == w.value {
+        None
+    } else {
+        Some(w.default.clone())
+    }
+}
+
+/// Subgraph row → the input slot a rename can write (`label`).
+fn slot_for(i: &workflow::Input, w: &Widget) -> bool {
+    i.widget.as_deref() == Some(w.label.as_str()) || i.label.as_deref() == Some(w.label.as_str())
+}
+
+/// A promo table target for an ADVANCED INPUTS row: promote that interior widget.
+fn promote_target(ws: &Workspace, node: &workflow::Node, w: &Widget) -> Option<(String, String)> {
+    let sg = ws.active_doc()?.borrow().wf.subgraphs.get(&node.ty)?.clone();
+    let (inner_id, _) = w.key.strip_prefix("p:")?.split_once(':')?;
+    let inner = sg.graph.node(inner_id)?;
+    if let Some(i) = inner.inputs.iter().find(|i| slot_for(i, w)) {
+        // Already linked to the subgraph boundary: nothing left to show.
+        if i.link.is_some() {
+            return None;
+        }
+        return Some((inner_id.to_owned(), i.widget.clone().unwrap_or_else(|| w.label.clone())));
+    }
+    // Saved graphs omit widget sockets; promotion creates one, so the row is still showable.
+    Some((inner_id.to_owned(), w.label.clone()))
+}
+
+/// The panel's own actions run while its focus guard is up: rebuild it once the click
+/// that caused them has been handled.
+fn later(ws: &Workspace) {
+    let ws = ws.clone();
+    glib::timeout_add_local_once(std::time::Duration::from_millis(80), move || ws.panel.refresh(&ws));
+}
 
 fn set_mode(ws: &Workspace, doc: &DocRef, ids: &[String], mode: i64) {
     {

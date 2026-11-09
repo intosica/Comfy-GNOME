@@ -1,6 +1,6 @@
 # AGENT HANDOFF
 
-_Last updated: session 28c (closing the UI now always stops the backend it launched — a lock the backend itself watches, not a signal from a parent that may already be gone; see the last section).
+_Last updated: session 31 (the properties panel now matches the 1.60 screens: ADVANCED INPUTS for subgraph instances, per-row `⋮` menu, compact tabs; the backend lock from session 28c is unchanged).
 
 Project: **Comfy-GNOME** at `/home/montel/Documents/Comfy-GNOME` (renamed from `GNOME-Comfyu` → `GNOME-ComfyUI` → this).
 Crate/binary `comfy-gnome`, app id `io.github.comfygnome.ComfyGnome` (`APP_ID` in `src/main.rs`).
@@ -1288,3 +1288,65 @@ node's Parameters page; demote from the row eye → back to 9 inputs. `cargo tes
 web panel (Favorite, Reset to default, the `⋮` row menu) were not replicated; rename is the header pencil.
 Note for live testing: this openbox/CSD setup puts the pointer ~17 px right of the pixel you aim at, which made
 screenshots mislead the first clicks.
+
+## Session 31 — Properties panel, second pass: it now matches the 1.60 screens (2026-11-09)
+
+Session 30 shipped the panel shell but the *functionality* was wrong wherever it mattered; this pass fixes it against
+`reference/Toggle Properties Panel/` and the 1.60 sources. What was wrong:
+
+- A subgraph instance's Parameters page listed **only the promoted inputs**. The reference (and
+  `TabSubgraphInputs.vue`) also lists every *unpromoted* interior widget under **ADVANCED INPUTS**, editable in place.
+  `graph_view::build_widgets` returns early on the modern branch, so the interior widgets were never even built.
+- **Subgraph was a permanent 4th tab** stretched across the panel. In the web it is not a tab: the panel header's
+  gear (`openPanel('subgraph')`) swaps the body, and Parameters/Settings grey out. Tabs there are compact, left-aligned.
+- No per-row `⋮` menu (Rename / Show input / Reset to default), no section reset-all, no right-hand source-node
+  caption, and the header toggle still said "Toggle properties panel".
+
+What changed:
+
+- `src/canvas/widgets.rs` — `Widget` gained `source` (the interior node's display name, the right-hand caption) and
+  `default` (the reset target). `src/prompt.rs` gained `WSlot.default` + `default_of` (DynCombo→first key,
+  Boolean/Int/Float/String→`opts.default`, Combo→first option), so a reset can be computed without re-deriving slots.
+- `src/graph_view.rs` — `node_label` (title → subgraph name → `display_name` → type) is the caption for both promoted
+  and interior rows. The modern `w:<vi>` rows and the old rgthree `properties.proxyWidgets` rows are now built in
+  **one** subgraph branch and de-duped by (inner id, widget): a file that was promoted in 1.60 while an old proxy list
+  is still stored used to render the same widget twice, and promoting on such a file used to hide the proxy rows.
+  New `subgraph_advanced_widgets()` returns every interior `Role::Value` widget that is neither promoted nor wired —
+  the ADVANCED INPUTS list, keyed `p:<inner>:<idx>` like the proxy rows, so `apply_widget` already writes them.
+- `src/workflow.rs` — `Input.label` (parsed and written back) is where a rename lives, which is also what
+  `renameWidget` in 1.60 does (`input.label`). `Workflow::promote` now **takes the socket type and creates the widget
+  socket when the saved graph has none**: most files save widget-only nodes with `"inputs":[]`, so `Show input` on
+  anything but an already-promoted widget failed with "input is already shown"/"node is not in the subgraph" style
+  nothing-happens. `promote_creates_the_missing_widget_socket` covers it.
+- `src/workspace/panel.rs` — three compact linked tab buttons (`button.prop-tab`) drive a `gtk::Stack` by page name;
+  Info is hidden for a subgraph instance exactly like the web; the header gear swaps to the subgraph editor and
+  restores the previous page. Parameters = INPUTS (promoted, expanded) + ADVANCED INPUTS (collapsed) for instances,
+  or the node's own widgets otherwise. Every row: name, caption (`source`, else the socket type), eye (promoted rows
+  only: Hide Input) and `⋮` → **Rename / Show Input / Reset to Default**, with the popover's items rebuilt on open
+  (`live_widget`) so a value edited in place does not leave a stale "Reset". Section headers carry a reset-all `↺`
+  that runs every row's reset. Rename prompts via `name_dialog` and writes `Input.label`.
+- `src/workspace.rs` — panel split widened to `min 300 / max 620 / fraction 0.40` (the `⋮` used to fall outside the
+  visible panel when a caption was long); `promote_widget` passes the socket type from the registry, falling back to
+  the JS type of the current value (`BOOLEAN`/`STRING`/`INT`/`FLOAT`); tooltips Title Cased ("Toggle Properties
+  Panel", "Hide Input", "Widget Actions", "Reset All to Defaults", "Show Input", "Rename Node", "Edit Subgraph
+  Inputs", "Search Inputs").
+
+Two real bugs found while clicking through it: `Show Input` passed the **instance** id to `Workflow::promote` (the
+inner id from the row key is the one that names a node inside the subgraph — the app logged `[subgraph] node is not
+in the subgraph`), and a rename on an interior row wrote into the **root** graph instead of
+`wf.subgraphs[host.ty].graph`. Both are fixed; `rename_target` now returns a `SlotRef { sg, node, slot }`.
+
+**Verified live** (user's backend, `comfyuiWorkflows_mossSingleImageEdit.json`, Xvfb :95): subgraph instance "MOSS
+Edit" shows 5 promoted INPUTS with captions/eye/`⋮` and an ADVANCED INPUTS fold with the SkipLayerGuidance widgets;
+`Show Input` on `double_layers` logs `[subgraph] shown input "double_layers"`, moves the row into INPUTS and leaves
+the file's input list consistent; the eye demotes it back (`at=Some(10)`); `Reset to Default` on an advanced row
+(`single_layers` 22 → default `7, 8, 9`) and reset-all `↺` both write through `apply_widget`; Rename on a promoted
+row renames it in the panel and on the canvas; on a normal node (`Image BBox Layout`) the `⋮` offers Reset only.
+Close-with-edits still prompts, so panel edits set the dirty flag. `cargo test`: 59 passed.
+
+Known gaps, deliberate: per-row **Favorite** and the "Nodes" tab for multi-selection (the web's favourites page for
+"nothing selected") are not implemented; **Rename on an interior row** needs an existing input slot on the inner node
+(most saved nodes have none — the web keeps `widget.label` in widget state and can rename anything; a compatible
+storage key was not established, so the item is hidden instead of inventing one). `Info` is hidden for subgraph
+instances on purpose. Unrelated but worth knowing: session restore writes the **unsaved** document to the session, so
+a test edit survives a restart and a tab can come back with a `•`.

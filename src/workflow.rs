@@ -31,6 +31,8 @@ pub struct Input {
     pub link: Option<i64>,
     /// Set when this input is (or shadows) a widget: `{"widget": {"name": …}}`.
     pub widget: Option<String>,
+    /// Display label set by the panel's Rename (`"label"` in the saved workflow).
+    pub label: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -106,6 +108,7 @@ impl Node {
                     ty: i.type_name().to_string(),
                     link: None,
                     widget: i.is_widget().then(|| i.name.clone()),
+                    label: None,
                 })
                 .collect(),
             outputs: def
@@ -246,15 +249,32 @@ impl Workflow {
     /// frontend's "Show input"). The host input shadows the widget, so its value is kept
     /// in the instance's `widgets_values`; `seed` is the value the inner widget shows now.
     /// Mirrored onto every instance, because the tab path does not name one.
-    pub fn promote(&mut self, sg: &str, node: &str, widget: &str, seed: Value) -> Result<String, String> {
+    pub fn promote(&mut self, sg: &str, node: &str, widget: &str, ty: &str, seed: Value) -> Result<String, String> {
         let Some(def) = self.subgraphs.get_mut(sg) else { return Err("unknown subgraph".into()) };
         let inner = def.graph.nodes.iter_mut().find(|n| n.id == node).ok_or("node is not in the subgraph")?;
-        let slot = inner.inputs.iter().position(|i| i.widget.as_deref() == Some(widget)).ok_or("not a widget")?;
-        if inner.inputs[slot].link.is_some() {
-            return Err("input is already shown".into());
-        }
+        let found = inner.inputs.iter().position(|i| i.widget.as_deref() == Some(widget));
+        let slot = match found {
+            Some(slot) => {
+                if inner.inputs[slot].link.is_some() {
+                    return Err("input is already shown".into());
+                }
+                slot
+            }
+            None => {
+                // Saved graphs usually omit the widget socket; the web frontend adds it on
+                // demand, so promotion has to create it before the boundary link can target it.
+                inner.inputs.push(Input {
+                    name: widget.to_owned(),
+                    ty: ty.to_owned(),
+                    link: None,
+                    widget: Some(widget.to_owned()),
+                    label: None,
+                });
+                inner.inputs.len() - 1
+            }
+        };
         let name = unique_name(&def.inputs, widget);
-        let ty = inner.inputs[slot].ty.clone();
+        let ty = if found.is_some() { inner.inputs[slot].ty.clone() } else { ty.to_owned() };
         let id = def.graph.links.keys().max().copied().unwrap_or(0) + 1;
         let at = def.inputs.len();
         def.graph.links.insert(
@@ -267,7 +287,13 @@ impl Workflow {
         let sg = sg.to_owned();
         for g in self.graphs_mut() {
             for n in g.nodes.iter_mut().filter(|n| n.ty == sg) {
-                n.inputs.push(Input { name: name.clone(), ty: ty.clone(), link: None, widget: Some(widget.to_owned()) });
+                n.inputs.push(Input {
+                    name: name.clone(),
+                    ty: ty.clone(),
+                    link: None,
+                    widget: Some(widget.to_owned()),
+                    label: None,
+                });
                 if let Some(vals) = n.widgets_values.as_array_mut() {
                     vals.push(seed.clone());
                 }
@@ -401,6 +427,14 @@ fn write_graph(s: &mut Value, g: &Graph, object_links: bool) {
                     None => {
                         if let Some(o) = iv.as_object_mut() {
                             o.remove("widget");
+                        }
+                    }
+                }
+                match &src.label {
+                    Some(l) => iv["label"] = Value::from(l.as_str()),
+                    None => {
+                        if let Some(o) = iv.as_object_mut() {
+                            o.remove("label");
                         }
                     }
                 }
@@ -582,6 +616,7 @@ fn parse_node(n: &Value) -> Option<Node> {
             ty: str_of(&i["type"]),
             link: i["link"].as_i64(),
             widget: i["widget"]["name"].as_str().map(str::to_owned),
+            label: i["label"].as_str().map(str::to_owned).filter(|l| !l.is_empty()),
         })
         .collect();
     let outputs = n["outputs"]
@@ -711,7 +746,7 @@ mod tests {
                 "outputs":[],"widgets_values":[7,3]}],"links":[]}]}}"##;
         let mut wf = Workflow::from_str(src).expect("parse");
 
-        let name = wf.promote("sg-1", "5", "b", serde_json::json!(3)).expect("promote");
+        let name = wf.promote("sg-1", "5", "b", "INT", serde_json::json!(3)).expect("promote");
         assert_eq!(name, "b");
         assert_eq!(wf.subgraphs["sg-1"].inputs.len(), 1);
         assert_eq!(wf.subgraphs["sg-1"].graph.nodes[0].inputs[1].link, Some(1));
@@ -757,5 +792,28 @@ mod tests {
         for want in ["104.62510134174657", "-44.260121259699716", "776.6053367103586", "950.2978891664006"] {
             assert!(out.contains(want), "{want} lost in round trip:\n{out}");
         }
+    }
+
+    /// The web saves widget-only nodes without their input sockets, so promotion has to
+    /// create the socket it links to (otherwise "Show input" only worked on re-promoted rows).
+    #[test]
+    fn promote_creates_the_missing_widget_socket() {
+        let src = r##"{"version":0.4,"nodes":[{"id":1,"type":"sg-1","pos":[0,0],"size":[200,100],
+            "inputs":[],"outputs":[],"widgets_values":[]}],
+            "links":[],
+            "definitions":{"subgraphs":[{"id":"sg-1","name":"Sub","inputNode":{"bounding":[0,0,10,10]},
+            "outputNode":{"bounding":[0,20,10,10]},"inputs":[],"outputs":[],
+            "nodes":[{"id":5,"type":"Inner","pos":[0,0],"size":[100,50],
+                "inputs":[],"outputs":[],"widgets_values":[7,3]}],"links":[]}]}}"##;
+        let mut wf = Workflow::from_str(src).expect("parse");
+        assert_eq!(wf.promote("sg-1", "5", "b", "INT", serde_json::json!(3)).as_deref(), Ok("b"));
+        let inner = &wf.subgraphs["sg-1"].graph.nodes[0];
+        assert_eq!(inner.inputs[0].name, "b");
+        assert_eq!(inner.inputs[0].ty, "INT");
+        assert_eq!(inner.inputs[0].widget.as_deref(), Some("b"));
+        assert_eq!(inner.inputs[0].link, Some(1));
+        let host = &wf.root.nodes[0];
+        assert_eq!(host.inputs[0].widget.as_deref(), Some("b"));
+        assert_eq!(host.widgets_values, serde_json::json!([3]));
     }
 }

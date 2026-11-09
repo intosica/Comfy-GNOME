@@ -208,6 +208,8 @@ pub struct WSlot {
     pub idx: usize,
     pub value: Value,
     pub role: Role,
+    /// Registry default for this widget (the panel's "Reset to default").
+    pub default: Value,
 }
 
 /// Mirrors `widget_map`'s array branch but keeps positions and the UI-only slots,
@@ -235,7 +237,14 @@ fn collect_slots(inputs: &[Input], vals: &[Value], pos: &mut usize, prefix: &str
         let Some(v) = vals.get(idx).or(i.opts.get("default")) else { continue };
         *pos += 1;
         let name = format!("{prefix}{}", i.name);
-        let mk = |idx, value: &Value, role, name: &str| WSlot { input: i.clone(), name: name.to_owned(), idx, value: value.clone(), role };
+        let mk = |idx, value: &Value, role, name: &str| WSlot {
+            input: i.clone(),
+            name: name.to_owned(),
+            idx,
+            value: value.clone(),
+            role,
+            default: default_of(i),
+        };
         out.push(mk(idx, v, Role::Value, &name));
         if prefix.is_empty() {
             let (c, u) = extra_kinds(i);
@@ -258,6 +267,19 @@ pub fn default_widgets(def: &NodeDef) -> Vec<Value> {
     let mut out = Vec::new();
     push_defaults(&def.inputs, &mut out);
     out
+}
+
+/// A single widget input's default value, as ComfyUI fills it in.
+fn default_of(i: &Input) -> Value {
+    match &i.kind {
+        Kind::DynCombo(opts) => opts.first().map_or(Value::Null, |(name, _)| Value::from(name.clone())),
+        Kind::Int => Value::from(i.opts["default"].as_i64().unwrap_or(0)),
+        Kind::Float => Value::from(i.opts["default"].as_f64().unwrap_or(0.0)),
+        Kind::String => Value::from(i.opts["default"].as_str().unwrap_or("")),
+        Kind::Boolean => Value::from(i.opts["default"].as_bool().unwrap_or(false)),
+        Kind::Combo(opts) => opts.first().map_or(Value::Null, |s| Value::from(s.clone())),
+        _ => i.opts.get("default").cloned().unwrap_or(Value::Null),
+    }
 }
 
 fn push_defaults(inputs: &[Input], out: &mut Vec<Value>) {

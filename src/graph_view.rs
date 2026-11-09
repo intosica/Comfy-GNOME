@@ -49,7 +49,19 @@ fn slot_widget(s: &WSlot, key: String) -> Widget {
     let key = if s.role == Role::Upload { format!("upload:{}", s.idx) } else { key };
     let mut w = Widget::new(label, key, kind_of(&s.input, s.role), value);
     w.advanced = truthy_opt(&s.input, "advanced");
+    w.default = s.default.clone();
     w
+}
+
+/// Display name of a node as the web frontend titles it (custom title, subgraph name,
+/// registry display name, else the type).
+fn node_label(wf: &Workflow, reg: &Registry, n: &workflow::Node) -> String {
+    n.title
+        .clone()
+        .filter(|t| !t.is_empty())
+        .or_else(|| wf.subgraphs.get(&n.ty).map(|s| s.name.clone()))
+        .or_else(|| reg.get(&n.ty).map(|d| d.display_name.clone()).filter(|d| !d.is_empty()))
+        .unwrap_or_else(|| n.ty.clone())
 }
 
 /// Option list of the first `LoraLoader.lora_name` combo (feeds rgthree Power Lora rows).
@@ -370,17 +382,21 @@ pub fn build_widgets(wf: &Workflow, graph: &Graph, n: &workflow::Node, reg: &Reg
         // shadows an inner node widget (`{"widget": {"name": …}}`) and its value sits in
         // `widgets_values` at the input's widget position.
         let mut rows = Vec::new();
+        let mut promoted: Vec<(String, String)> = Vec::new();
+        let mut modern: Vec<(String, String)> = Vec::new();
         let mut at = 0;
         for (i, inp) in n.inputs.iter().enumerate() {
             let Some(widget) = inp.widget.as_deref() else { continue };
             let vi = at;
             at += 1;
-            if inp.link.is_some() {
-                continue; // wired on the instance: the value is ignored, the socket shows it
-            }
             let Some(io) = sg.inputs.iter().find(|s| s.name == inp.name) else { continue };
             let Some(l) = sg.graph.links.values().find(|l| io.link_ids.contains(&l.id)) else { continue };
             let Some(inner) = sg.graph.node(&l.target_id) else { continue };
+            promoted.push((inner.id.clone(), widget.to_owned()));
+            modern.push((inner.id.clone(), widget.to_owned()));
+            if inp.link.is_some() {
+                continue; // wired on the instance: the value is ignored, the socket shows it
+            }
             let Some(def) = reg.get(&inner.ty) else { continue };
             let slots = prompt::widget_slots(inner, def);
             let found = if widget == "control_after_generate" {
@@ -390,23 +406,25 @@ pub fn build_widgets(wf: &Workflow, graph: &Graph, n: &workflow::Node, reg: &Reg
             };
             let Some(s) = found else { continue };
             let mut w = slot_widget(s, format!("w:{vi}"));
-            w.label = inp.name.clone();
+            w.label = inp.label.clone().filter(|l| !l.is_empty()).unwrap_or_else(|| inp.name.clone());
             w.input = Some(i);
+            w.source = node_label(wf, reg, inner);
             if let Some(v) = vals.and_then(|a| a.get(vi)).filter(|v| !v.is_null()) {
                 w.value = v.clone();
             }
             rows.push(w);
         }
-        if !rows.is_empty() {
-            return rows;
-        }
-    }
-
-    // Older subgraphs: promoted widgets listed in properties.proxyWidgets (rgthree style).
-    if let Some(sg) = wf.subgraphs.get(&n.ty) {
-        let mut out = Vec::new();
+        // Older subgraphs: promoted widgets listed in properties.proxyWidgets (rgthree
+        // style). Keep them alongside modern inputs: promotion on such a file appends
+        // sockets while the stored proxy list still names the same widgets.
         for p in n.properties["proxyWidgets"].as_array().into_iter().flatten() {
             let (Some(inner_id), Some(name)) = (p[0].as_str(), p[1].as_str()) else { continue };
+            // The same widget may be listed both as a modern input and a proxy (the file
+            // was promoted in 1.60 and later opened in an older frontend, or vice versa).
+            if modern.iter().any(|(id, w)| id == inner_id && w == name) {
+                continue;
+            }
+            promoted.push((inner_id.to_owned(), name.to_owned()));
             let Some(inner) = sg.graph.node(inner_id) else { continue };
             let Some(def) = reg.get(&inner.ty) else { continue };
             let slots = prompt::widget_slots(inner, def);
@@ -417,13 +435,15 @@ pub fn build_widgets(wf: &Workflow, graph: &Graph, n: &workflow::Node, reg: &Reg
             };
             if let Some(s) = found {
                 let mut w = slot_widget(s, format!("p:{inner_id}:{}", s.idx));
-                w.label = name.to_owned();
                 shadow(&mut w, name);
-                out.push(w);
+                let shown = w.input.and_then(|i| n.inputs.get(i)).and_then(|i| i.label.clone());
+                w.label = shown.filter(|l| !l.is_empty()).unwrap_or_else(|| name.to_owned());
+                w.source = node_label(wf, reg, inner);
+                rows.push(w);
             }
         }
-        if !out.is_empty() {
-            return out;
+        if !rows.is_empty() {
+            return rows;
         }
     }
 
@@ -460,6 +480,51 @@ pub fn build_widgets(wf: &Workflow, graph: &Graph, n: &workflow::Node, reg: &Reg
             }
         }
         out.push(w);
+    }
+    out
+}
+
+/// Interior widgets of a subgraph instance that are not promoted to its sockets: the
+/// property panel's ADVANCED INPUTS rows. Writes go through the same `p:<inner>:<idx>`
+/// keys `apply_widget` already handles.
+pub fn subgraph_advanced_widgets(wf: &Workflow, host: &workflow::Node, reg: &Registry) -> Vec<Widget> {
+    let Some(sg) = wf.subgraphs.get(&host.ty) else { return Vec::new() };
+    let mut promoted: Vec<(String, String)> = host
+        .inputs
+        .iter()
+        .filter_map(|inp| {
+            let widget = inp.widget.clone()?;
+            let io = sg.inputs.iter().find(|s| s.name == inp.name)?;
+            let l = sg.graph.links.values().find(|l| io.link_ids.contains(&l.id))?;
+            Some((l.target_id.clone(), widget))
+        })
+        .collect();
+    for p in host.properties["proxyWidgets"].as_array().into_iter().flatten() {
+        if let (Some(id), Some(name)) = (p[0].as_str(), p[1].as_str()) {
+            promoted.push((id.to_owned(), name.to_owned()));
+        }
+    }
+    let mut out = Vec::new();
+    for inner in &sg.graph.nodes {
+        let Some(def) = reg.get(&inner.ty) else { continue };
+        let label = node_label(wf, reg, inner);
+        for s in prompt::widget_slots(inner, def).into_iter().filter(|s| s.role == Role::Value) {
+            if promoted.iter().any(|(id, name)| id == &inner.id && name == &s.name) {
+                continue;
+            }
+            // Driven by a wire into the inner node: nothing to edit here.
+            if inner.inputs.iter().any(|i| i.widget.as_deref() == Some(s.name.as_str()) && i.link.is_some()) {
+                continue;
+            }
+            let mut w = slot_widget(&s, format!("p:{}:{}", inner.id, s.idx));
+            w.advanced = true;
+            w.source = label.clone();
+            let renamed = inner.inputs.iter().find(|i| i.widget.as_deref() == Some(s.name.as_str())).and_then(|i| i.label.clone());
+            if let Some(l) = renamed.filter(|l| !l.is_empty()) {
+                w.label = l;
+            }
+            out.push(w);
+        }
     }
     out
 }
@@ -955,6 +1020,7 @@ pub fn sync(graph: &mut Graph, nodes: &[Node], links: &[Link], groups: &[Group])
                         ty: s.ty.clone(),
                         link: None,
                         widget: None,
+                        label: None,
                     })
                     .collect();
                 w.inputs.extend(extra);
@@ -1074,7 +1140,7 @@ pub fn grow_inputs(wf: &mut Workflow, id: &str) {
     for g in graphs {
         for n in g.nodes.iter_mut().filter(|n| n.ty == id) {
             for (name, ty) in &fresh {
-                n.inputs.push(crate::workflow::Input { name: name.clone(), ty: ty.clone(), link: None, widget: None });
+                n.inputs.push(crate::workflow::Input { name: name.clone(), ty: ty.clone(), link: None, widget: None, label: None });
             }
         }
     }
@@ -1370,5 +1436,55 @@ mod tests {
         // A second pass is a no-op.
         grow_inputs(&mut w, "sg-uuid");
         assert_eq!(w.subgraphs["sg-uuid"].inputs.len(), 2);
+    }
+
+    #[test]
+    fn subgraph_rows_merge_proxies_and_list_unpromoted_interior_widgets() {
+        let reg = Registry::from_object_info(&json!({
+            "Loader": {"input": {"required": {"clip_name": [["a.safetensors", "b.safetensors"], {}]}},
+                       "output": ["CLIP"], "name": "Loader", "display_name": "Load CLIP"},
+            "Sampler": {"input": {"required": {"steps": ["INT", {"default": 20}],
+                                               "cfg": ["FLOAT", {"default": 7.0}]}},
+                        "output": ["LATENT"], "name": "Sampler", "display_name": "KSampler"}
+        }));
+        let w = Workflow::from_json(json!({
+            "nodes": [{
+                "id": 446, "type": "sg", "pos": [0, 0], "size": [200, 200],
+                "inputs": [{"name": "clip_name", "type": "COMBO", "link": null, "widget": {"name": "clip_name"}}],
+                "outputs": [], "widgets_values": ["b.safetensors"],
+                "properties": {"proxyWidgets": [["437", "clip_name"], ["438", "steps"]]}
+            }],
+            "links": [],
+            "definitions": {"subgraphs": [{
+                "id": "sg", "name": "Sub",
+                "nodes": [
+                    {"id": 437, "type": "Loader", "pos": [0, 0],
+                     "inputs": [{"name": "clip_name", "type": "COMBO", "link": null, "widget": {"name": "clip_name"}}],
+                     "widgets_values": ["a.safetensors"]},
+                    {"id": 438, "type": "Sampler", "pos": [0, 0],
+                     "inputs": [{"name": "steps", "type": "INT", "link": null, "widget": {"name": "steps"}},
+                                {"name": "cfg", "type": "FLOAT", "link": null, "widget": {"name": "cfg"}}],
+                     "widgets_values": [20, 7.0]}
+                ],
+                "links": [[1, -10, 0, 437, 0, "COMBO"]],
+                "inputs": [{"name": "clip_name", "type": "COMBO", "linkIds": [1]}],
+                "outputs": []
+            }]}
+        }))
+        .unwrap();
+        let host = w.root.node("446").unwrap().clone();
+        let mut images = Vec::new();
+        let rows = build_widgets(&w, &w.root, &host, &reg, &mut images);
+        assert_eq!(rows.iter().map(|r| r.label.as_str()).collect::<Vec<_>>(), ["clip_name", "steps"]);
+        assert_eq!(rows[0].key, "w:0");
+        assert_eq!(rows[0].value, json!("b.safetensors"), "the instance value wins");
+        assert_eq!(rows[0].source, "Load CLIP");
+        assert_eq!(rows[1].key, "p:438:0");
+        assert_eq!(rows[1].source, "KSampler");
+        let adv = subgraph_advanced_widgets(&w, &host, &reg);
+        assert_eq!(adv.iter().map(|r| r.label.as_str()).collect::<Vec<_>>(), ["cfg"]);
+        assert_eq!(adv[0].key, "p:438:1");
+        assert!(adv[0].advanced);
+        assert_eq!(adv[0].default, json!(7.0));
     }
 }

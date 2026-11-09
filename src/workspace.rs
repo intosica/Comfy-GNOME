@@ -334,6 +334,9 @@ fn load_css() {
          button.prop-eye { padding: 1px 4px; min-width: 0; min-height: 0; opacity: 0.6; }
          button.prop-eye:hover { opacity: 1; }
          expander.prop-section > title { font-weight: 700; font-size: 0.86em; }
+         button.prop-tab { padding: 1px 9px; min-height: 20px; border-radius: 6px; font-size: 0.86em; opacity: 0.7; }
+         button.prop-tab:checked { background: alpha(currentColor, 0.1); opacity: 1; }
+         button.prop-tab:disabled { opacity: 0.4; }
          scrolledwindow.prop-text { border-radius: 6px; border: 1px solid alpha(currentColor, 0.14); }
          scrolledwindow.prop-text textview, scrolledwindow.prop-text textview text { background: none; }
          togglebutton.dock-tab { padding: 2px 12px; min-height: 22px; border-radius: 999px; }
@@ -660,7 +663,7 @@ impl Workspace {
         // sliding under it.
         let panel_toggle = gtk::ToggleButton::builder()
             .icon_name("cg-lucide-panel-right-symbolic")
-            .tooltip_text("Toggle properties panel")
+            .tooltip_text("Toggle Properties Panel")
             .build();
         header.pack_end(&panel_toggle);
         header.pack_end(&run);
@@ -716,9 +719,9 @@ impl Workspace {
             .content(&split)
             .sidebar(&panel.root)
             .sidebar_position(gtk::PackType::End)
-            .min_sidebar_width(280.0)
-            .max_sidebar_width(560.0)
-            .sidebar_width_fraction(0.28)
+            .min_sidebar_width(300.0)
+            .max_sidebar_width(620.0)
+            .sidebar_width_fraction(0.40)
             .pin_sidebar(true)
             .show_sidebar(false)
             .enable_hide_gesture(false)
@@ -2714,9 +2717,10 @@ impl Workspace {
     /// Expose an inner widget as a subgraph input (frontend "Show input"). Every instance
     /// of the subgraph grows the socket, because the tab path names no single instance.
     fn promote_widget(&self, doc: &DocRef, sg: &str, node: &str, widget: &str, seed: Value) {
+        let ty = self.promote_ty(doc, sg, node, widget, &seed);
         let res = {
             let mut d = doc.borrow_mut();
-            d.wf.promote(sg, node, widget, seed)
+            d.wf.promote(sg, node, widget, &ty, seed)
         };
         match res {
             Ok(name) => {
@@ -2768,15 +2772,39 @@ impl Workspace {
             graph_ref(&d).nodes.iter().find(|n| n.id == host).map(|n| n.ty.clone())
         };
         let Some(ty) = ty else { return };
+        let types: Vec<String> = seeds.iter().map(|(node, widget, seed)| self.promote_ty(doc, &ty, node, widget, seed)).collect();
         {
             let mut d = doc.borrow_mut();
-            for (node, widget, seed) in seeds {
-                if let Err(e) = d.wf.promote(&ty, &node, &widget, seed) {
+            for ((node, widget, seed), socket) in seeds.into_iter().zip(types) {
+                if let Err(e) = d.wf.promote(&ty, &node, &widget, &socket, seed) {
                     self.append_log(&format!("[subgraph] {e}"));
                 }
             }
         }
         self.edited(doc);
+    }
+
+    /// Socket type for a widget being promoted: the registry's declaration when it has one,
+    /// else the shape of the current value (saved graphs omit widget sockets).
+    fn promote_ty(&self, doc: &DocRef, sg: &str, node: &str, widget: &str, seed: &Value) -> String {
+        let (inner_ty, declared) = {
+            let d = doc.borrow();
+            let Some(inner) = d.wf.subgraphs.get(sg).and_then(|s| s.graph.node(node)) else { return String::new() };
+            let reg = self.registry.borrow();
+            let declared = reg
+                .get(&inner.ty)
+                .and_then(|def| def.inputs.iter().find(|i| i.name == widget))
+                .map(|i| i.type_name().to_owned());
+            (inner.ty.clone(), declared)
+        };
+        let _ = inner_ty;
+        declared.unwrap_or_else(|| match seed {
+            Value::Bool(_) => "BOOLEAN".into(),
+            Value::String(_) => "STRING".into(),
+            Value::Number(n) if n.is_i64() || n.is_u64() => "INT".into(),
+            Value::Number(_) => "FLOAT".into(),
+            _ => "STRING".into(),
+        })
     }
 
     /// Take every promoted input off the subgraph instance `host`.

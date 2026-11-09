@@ -59,11 +59,25 @@ pub struct Widget {
     pub structural: bool,
     /// `opts.advanced`: hidden behind the property panel's ADVANCED INPUTS fold.
     pub advanced: bool,
+    /// Source node's display name, shown on the right of a subgraph-projected row.
+    pub source: String,
+    /// Value the widget resets to (registry/default); `Null` when unknown.
+    pub default: Value,
 }
 
 impl Widget {
     pub fn new(label: &str, key: impl Into<String>, kind: WKind, value: Value) -> Self {
-        Self { label: label.to_owned(), key: key.into(), kind, value, input: None, structural: false, advanced: false }
+        Self {
+            label: label.to_owned(),
+            key: key.into(),
+            kind,
+            value,
+            input: None,
+            structural: false,
+            advanced: false,
+            source: String::new(),
+            default: Value::Null,
+        }
     }
     pub fn multiline(&self) -> bool {
         matches!(self.kind, WKind::Text { multiline: true })
