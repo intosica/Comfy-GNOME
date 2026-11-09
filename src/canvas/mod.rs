@@ -48,6 +48,8 @@ pub struct Node {
     pub widgets: Vec<Widget>,
     /// Image preview keys (`/view` query strings) drawn in the leftover body space.
     pub images: Vec<String>,
+    /// Drawn over the first image: a tinted mask (image key, alpha = mask) and numbered boxes.
+    pub overlay: Option<Overlay>,
     // Layout cache (`relayout`): socket y offsets and widget rects, relative to `pos`.
     pub ins_y: Vec<f64>,
     pub outs_y: Vec<f64>,
@@ -58,9 +60,23 @@ pub struct Node {
     /// litegraph mode: 2 = muted, 4 = bypassed.
     pub mode: i64,
     pub collapsed: bool,
+    /// `flags.pinned`: drawn with a pin marker and never dragged.
+    pub pinned: bool,
     /// Subgraph instance: drawn with a marker, double-click opens it.
     pub subgraph: bool,
 }
+
+/// Region boxes (normalised to the picture) and a painted mask over a node's preview.
+#[derive(Default, Clone)]
+pub struct Overlay {
+    pub mask: Option<String>,
+    /// Tint where the node's own picture is transparent (Load Image after "Open in Mask Editor").
+    pub alpha_mask: bool,
+    pub boxes: Vec<[f64; 4]>,
+}
+
+/// Box colours shared with the mask editor.
+pub const BOX_COLORS: [u32; 8] = [0xff5252, 0x40c4ff, 0xffd740, 0x69f0ae, 0xe040fb, 0xff9100, 0x18ffff, 0xb2ff59];
 
 #[derive(Clone)]
 pub struct Group {
@@ -526,7 +542,7 @@ impl Canvas {
     /// Image keys wanted by nodes that are neither loaded nor loading; marks them loading.
     pub fn missing_images(&self) -> Vec<String> {
         let mut s = self.state.borrow_mut();
-        let want: Vec<String> = s.nodes.iter().flat_map(|n| n.images.first().cloned().into_iter().chain(n.widgets.iter().flat_map(widgets::cloud_images))).collect();
+        let want: Vec<String> = s.nodes.iter().flat_map(|n| n.images.first().cloned().into_iter().chain(n.overlay.iter().filter_map(|o| o.mask.clone())).chain(n.widgets.iter().flat_map(widgets::cloud_images))).collect();
         let mut out = Vec::new();
         for k in want {
             if !s.images.contains_key(&k) {
@@ -561,6 +577,11 @@ impl Canvas {
         }
         self.state.borrow_mut().images.insert(key.to_owned(), Some(small));
         self.area.queue_draw();
+    }
+
+    /// Drop a cached preview so the next `missing_images` fetches it again (file overwritten).
+    pub fn forget_image(&self, key: &str) {
+        self.state.borrow_mut().images.remove(key);
     }
 
     /// Show `keys` on node `id`.
@@ -643,6 +664,22 @@ impl Canvas {
             (WKind::Bool, _) => send(Value::Bool(!w.value.as_bool().unwrap_or(false))),
             (WKind::Text { multiline }, _) => {
                 let completion = self.api_base.borrow().clone().map(|base| widgets::TextCompletion { base });
+                if *multiline && widgets::inline_text() {
+                    // Follow the row as the view pans/zooms; None once the node is gone or collapsed.
+                    let (st, nid) = (Rc::downgrade(&self.state), btn_id.clone());
+                    let place: widgets::PlaceFn = Rc::new(move || {
+                        let st = st.upgrade()?;
+                        let s = st.borrow();
+                        let n = s.nodes.iter().find(|n| n.id == nid).filter(|n| !n.collapsed)?;
+                        let r = n.row(wi);
+                        let (a, b) = (s.view.to_screen((r[0], r[1])), s.view.to_screen((r[0] + r[2], r[1] + r[3])));
+                        Some(([a.0, a.1, b.0 - a.0, b.1 - a.1], s.view.zoom))
+                    });
+                    let send2 = send.clone();
+                    if widgets::edit_text_inline(&self.area, place, w.value.as_str().unwrap_or(""), completion.clone(), move |t| send2(Value::from(t))) {
+                        return;
+                    }
+                }
                 edit_text(&self.area, rect, w.value.as_str().unwrap_or(""), *multiline, completion, move |t| send(Value::from(t)));
             }
             (WKind::Button, _) => self.emit(&btn_id, &w.key, Value::Null, false),
@@ -1085,7 +1122,7 @@ impl Canvas {
                         .order
                         .iter()
                         .copied()
-                        .filter(|&i| s.sel.contains(&s.nodes[i].id))
+                        .filter(|&i| s.sel.contains(&s.nodes[i].id) && !s.nodes[i].pinned)
                         .map(|i| (i, s.nodes[i].pos))
                         .collect();
                     if start.is_empty() {
@@ -1104,6 +1141,7 @@ impl Canvas {
                             let (cx, cy) = (n.pos.0 + n.size.0 / 2.0, n.pos.1 + n.body_h() / 2.0);
                             cx >= r[0] && cx <= r[0] + r[2] && cy >= r[1] && cy <= r[1] + r[3]
                         })
+                        .filter(|&i| !s.nodes[i].pinned)
                         .map(|i| (i, s.nodes[i].pos))
                         .collect();
                     s.sel.clear();
@@ -1307,6 +1345,30 @@ impl Canvas {
             }
         });
         self.area.add_controller(click);
+    }
+}
+
+/// Mask tint and numbered boxes over a preview drawn at `k` (image px → canvas units).
+fn draw_overlay(cr: &gtk::cairo::Context, o: &Overlay, images: &HashMap<String, Option<gtk::cairo::ImageSurface>>, (iw, ih): (f64, f64), k: f64) {
+    if let Some(Some(m)) = o.mask.as_ref().and_then(|key| images.get(key)) {
+        cr.save().ok();
+        cr.scale(iw / m.width() as f64, ih / m.height() as f64);
+        cr.set_source_rgba(214.0 / 255.0, 64.0 / 255.0, 230.0 / 255.0, 0.55);
+        cr.mask_surface(m, 0.0, 0.0).ok();
+        cr.restore().ok();
+    }
+    cr.set_line_width(1.5 / k);
+    cr.set_font_size(11.0 / k);
+    for (i, b) in o.boxes.iter().enumerate() {
+        let c = BOX_COLORS[i % BOX_COLORS.len()];
+        rgb(cr, c);
+        cr.rectangle(b[0] * iw, b[1] * ih, b[2] * iw, b[3] * ih);
+        cr.stroke().ok();
+        cr.rectangle(b[0] * iw, b[1] * ih, 14.0 / k, 14.0 / k);
+        cr.fill().ok();
+        rgb(cr, 0x000000);
+        cr.move_to(b[0] * iw + 3.0 / k, b[1] * ih + 11.0 / k);
+        cr.show_text(&(i + 1).to_string()).ok();
     }
 }
 
@@ -1629,6 +1691,21 @@ fn draw(cr: &gtk::cairo::Context, s: &State, w: f64, h: f64) {
                     if cr.set_source_surface(surf, 0.0, 0.0).is_ok() {
                         cr.source().set_filter(gtk::cairo::Filter::Good);
                         cr.paint().ok();
+                    }
+                    if let Some(o) = &n.overlay {
+                        if o.alpha_mask {
+                            // Tint everywhere, then cut it away where the picture is opaque.
+                            cr.push_group();
+                            cr.set_source_rgba(214.0 / 255.0, 64.0 / 255.0, 230.0 / 255.0, 0.55);
+                            cr.paint().ok();
+                            cr.set_operator(gtk::cairo::Operator::DestOut);
+                            cr.set_source_rgba(0.0, 0.0, 0.0, 1.0); // erase fully, not by the tint's alpha
+                            cr.mask_surface(surf, 0.0, 0.0).ok();
+                            cr.pop_group_to_source().ok();
+                            cr.rectangle(0.0, 0.0, iw, ih);
+                            cr.fill().ok();
+                        }
+                        draw_overlay(cr, o, &s.images, (iw, ih), k);
                     }
                     cr.restore().ok();
                 }

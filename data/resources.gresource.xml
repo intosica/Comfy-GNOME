@@ -51,7 +51,10 @@
     <file preprocess="xml-stripblanks">icons/scalable/actions/cg-lucide-chevron-down-symbolic.svg</file>
     <file preprocess="xml-stripblanks">icons/scalable/actions/cg-lucide-chevron-right-symbolic.svg</file>
     <file preprocess="xml-stripblanks">icons/scalable/actions/cg-lucide-check-symbolic.svg</file>
+    <file preprocess="xml-stripblanks">icons/scalable/actions/cg-lucide-eye-off-symbolic.svg</file>
+    <file preprocess="xml-stripblanks">icons/scalable/actions/cg-lucide-eye-symbolic.svg</file>
     <file preprocess="xml-stripblanks">icons/scalable/actions/cg-lucide-panel-left-symbolic.svg</file>
+    <file preprocess="xml-stripblanks">icons/scalable/actions/cg-lucide-panel-right-symbolic.svg</file>
     <file preprocess="xml-stripblanks">icons/scalable/actions/cg-lucide-search-symbolic.svg</file>
     <file preprocess="xml-stripblanks">icons/scalable/actions/cg-lucide-coins-symbolic.svg</file>
   </gresource>

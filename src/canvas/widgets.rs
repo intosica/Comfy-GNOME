@@ -57,11 +57,13 @@ pub struct Widget {
     pub input: Option<usize>,
     /// Edit changes the node's structure: the workspace must re-render.
     pub structural: bool,
+    /// `opts.advanced`: hidden behind the property panel's ADVANCED INPUTS fold.
+    pub advanced: bool,
 }
 
 impl Widget {
     pub fn new(label: &str, key: impl Into<String>, kind: WKind, value: Value) -> Self {
-        Self { label: label.to_owned(), key: key.into(), kind, value, input: None, structural: false }
+        Self { label: label.to_owned(), key: key.into(), kind, value, input: None, structural: false, advanced: false }
     }
     pub fn multiline(&self) -> bool {
         matches!(self.kind, WKind::Text { multiline: true })
@@ -751,6 +753,300 @@ fn completion_token(before: &str) -> Option<(usize, usize, bool)> {
     Some((start, start + base.chars().count(), false))
 }
 
+thread_local! {
+    /// `ComfyGNOME.TextEditor` = "inline": multiline text widgets edit in place.
+    static INLINE_TEXT: Cell<bool> = const { Cell::new(false) };
+    /// Finishes the in-place editor that is open, if any (only one at a time).
+    static INLINE_OPEN: RefCell<Option<Rc<dyn Fn()>>> = const { RefCell::new(None) };
+}
+
+pub fn set_inline_text(on: bool) {
+    INLINE_TEXT.with(|c| c.set(on));
+}
+
+pub fn inline_text() -> bool {
+    INLINE_TEXT.with(Cell::get)
+}
+
+/// The prompt text view both editors share.
+fn prompt_view(text: &str) -> gtk::TextView {
+    let tv = gtk::TextView::builder()
+        .wrap_mode(gtk::WrapMode::WordChar)
+        .left_margin(8)
+        .right_margin(8)
+        .top_margin(6)
+        .bottom_margin(6)
+        .pixels_below_lines(2)
+        .accepts_tab(false)
+        .css_classes(["prompt-editor"])
+        .build();
+    let buf = tv.buffer();
+    buf.set_text(text);
+    buf.place_cursor(&buf.end_iter());
+    tv
+}
+
+/// Prompt keys: Ctrl+↑/↓ weight the word or selection (web `Comfy.EditAttention`),
+/// Ctrl+Enter runs `done`.
+fn prompt_keys(tv: &gtk::TextView, done: impl Fn() + 'static) {
+    let keys = gtk::EventControllerKey::new();
+    keys.set_propagation_phase(gtk::PropagationPhase::Capture);
+    let b2 = tv.buffer();
+    keys.connect_key_pressed(move |_, key, _, mods| {
+        use gdk::Key;
+        if !mods.contains(gdk::ModifierType::CONTROL_MASK) {
+            return gtk::glib::Propagation::Proceed;
+        }
+        match key {
+            Key::Return | Key::KP_Enter => done(),
+            Key::Up | Key::Down => {
+                let (s, e) = b2.selection_bounds().unwrap_or_else(|| {
+                    let i = b2.iter_at_mark(&b2.get_insert());
+                    (i, i)
+                });
+                let all = b2.text(&b2.start_iter(), &b2.end_iter(), false);
+                let delta = if key == Key::Up { 0.05 } else { -0.05 };
+                if let Some((t, (a, z))) = super::attention::edit(&all, (s.offset() as usize, e.offset() as usize), delta) {
+                    // Replace just the group in one user action (`set_text` is not undoable).
+                    let old_len = all.chars().count() + (z - a) - t.chars().count();
+                    let group: String = t.chars().skip(a).take(z - a).collect();
+                    b2.begin_user_action();
+                    b2.delete(&mut b2.iter_at_offset(a as i32), &mut b2.iter_at_offset((a + old_len) as i32));
+                    b2.insert(&mut b2.iter_at_offset(a as i32), &group);
+                    b2.end_user_action();
+                    b2.select_range(&b2.iter_at_offset(a as i32), &b2.iter_at_offset(z as i32));
+                }
+            }
+            _ => return gtk::glib::Propagation::Proceed,
+        }
+        gtk::glib::Propagation::Stop
+    });
+    tv.add_controller(keys);
+}
+
+/// Square LoRA preview shown beside the suggestions (empty unless a model provider exists).
+fn suggestion_preview(size: i32) -> gtk::Picture {
+    let pic = gtk::Picture::builder()
+        .content_fit(gtk::ContentFit::Contain)
+        .width_request(size)
+        .height_request(size)
+        .valign(gtk::Align::Start)
+        .visible(PREVIEW.with(|p| p.borrow().is_some()))
+        .build();
+    pic.add_css_class("card");
+    pic
+}
+
+/// Lora Manager autocomplete for `tv`: suggestions fill `list`, the selected LoRA's preview
+/// goes to `pic` (the web's preview tooltip), and `shown` hears when the list fills / empties.
+fn attach_completion(tv: &gtk::TextView, comp: TextCompletion, list: &gtk::ListBox, pic: &gtk::Picture, shown: Rc<dyn Fn(bool)>) {
+    let buf = tv.buffer();
+    let prefs = Rc::new(RefCell::new(crate::api::LmPrefs::default()));
+    let base_for_prefs = comp.base.clone();
+    let prefs_for_load = prefs.clone();
+    gtk::glib::spawn_future_local(async move {
+        if let Ok(p) = gtk::gio::spawn_blocking(move || crate::api::lm_prefs(&base_for_prefs)).await {
+            *prefs_for_load.borrow_mut() = p;
+        }
+    });
+    let items: Rc<RefCell<Vec<(String, String)>>> = Rc::default();
+    let tok: Rc<RefCell<Option<(usize, usize, bool)>>> = Rc::default();
+    let sel = Rc::new(Cell::new(0usize));
+    let gen = Rc::new(Cell::new(0u64));
+    let visible = Rc::new(Cell::new(false));
+
+    // Preview of the selected row, LoRA names only (tags have no pictures).
+    {
+        let (items, tok, pic) = (items.clone(), tok.clone(), pic.clone());
+        let want = Rc::new(RefCell::new(String::new()));
+        list.connect_row_selected(move |_, row| {
+            let name = row
+                .filter(|_| tok.borrow().is_some_and(|t| t.2))
+                .and_then(|r| items.borrow().get(r.index().max(0) as usize).map(|i| i.0.clone()));
+            let Some(name) = name else {
+                want.borrow_mut().clear();
+                pic.set_paintable(gdk::Paintable::NONE);
+                pic.set_visible(false);
+                return;
+            };
+            pic.set_visible(PREVIEW.with(|p| p.borrow().is_some()));
+            if *want.borrow() == name {
+                return;
+            }
+            *want.borrow_mut() = name.clone();
+            let Some(f) = PREVIEW.with(|p| p.borrow().clone()) else { return };
+            let (pic, want) = (pic.clone(), want.clone());
+            f(&name.clone(), Box::new(move |t| {
+                if *want.borrow() == name {
+                    pic.set_paintable(t.as_ref());
+                }
+            }));
+        });
+    }
+
+    let render: Rc<dyn Fn()> = {
+        let (list, items, sel, visible, shown) = (list.clone(), items.clone(), sel.clone(), visible.clone(), shown.clone());
+        Rc::new(move || {
+            list.remove_all();
+            let items = items.borrow();
+            if items.is_empty() {
+                visible.set(false);
+                shown(false);
+                return;
+            }
+            for (name, detail) in items.iter() {
+                let row = gtk::ListBoxRow::builder().focusable(false).build();
+                let b = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+                b.set_margin_top(5);
+                b.set_margin_bottom(5);
+                b.set_margin_start(8);
+                b.set_margin_end(8);
+                b.append(&gtk::Label::builder().label(name).xalign(0.0).hexpand(true).ellipsize(gtk::pango::EllipsizeMode::Middle).build());
+                if !detail.is_empty() {
+                    b.append(&gtk::Label::builder().label(detail).css_classes(["dim-label", "caption"]).build());
+                }
+                row.set_child(Some(&b));
+                list.append(&row);
+            }
+            drop(items);
+            sel.set(0);
+            visible.set(true);
+            shown(true);
+            list.select_row(list.row_at_index(0).as_ref());
+            if let Some(sc) = list.ancestor(gtk::ScrolledWindow::static_type()).and_downcast::<gtk::ScrolledWindow>() {
+                sc.vadjustment().set_value(0.0);
+            }
+        })
+    };
+
+    let hide: Rc<dyn Fn()> = {
+        let (list, items, visible, shown) = (list.clone(), items.clone(), visible.clone(), shown.clone());
+        Rc::new(move || {
+            items.borrow_mut().clear();
+            list.remove_all();
+            visible.set(false);
+            shown(false);
+        })
+    };
+
+    let accept: Rc<dyn Fn()> = {
+        let (buf, items, tok, sel, visible, prefs, hide) = (buf.clone(), items.clone(), tok.clone(), sel.clone(), visible.clone(), prefs.clone(), hide.clone());
+        Rc::new(move || {
+            if !visible.get() {
+                return;
+            }
+            let (Some((start, end, lora)), Some((name, _))) = (*tok.borrow(), items.borrow().get(sel.get()).cloned()) else {
+                return;
+            };
+            let p = prefs.borrow().clone();
+            let mut name = name;
+            if !lora && p.space_underscore {
+                name = name.replace(' ', "_");
+            }
+            let cursor = buf.iter_at_mark(&buf.get_insert()).offset();
+            let (from, to, repl) = if lora {
+                let mut it = buf.iter_at_offset(cursor);
+                let mut to = cursor;
+                while !it.is_end() {
+                    let ch = it.char();
+                    if ch == '>' {
+                        to = it.offset() + 1;
+                        break;
+                    }
+                    if ch == '\n' {
+                        break;
+                    }
+                    to = it.offset() + 1;
+                    it.forward_char();
+                }
+                (start as i32, to, format!("{name}:1.00>"))
+            } else {
+                let mut repl = name;
+                if p.append_comma {
+                    let it = buf.iter_at_offset(end as i32);
+                    let next = if it.is_end() { None } else { Some(it.char()) };
+                    if !matches!(next, Some(',') | Some('.') | Some(')')) {
+                        repl.push_str(", ");
+                    }
+                }
+                (start as i32, end as i32, repl)
+            };
+            buf.begin_user_action();
+            buf.delete(&mut buf.iter_at_offset(from), &mut buf.iter_at_offset(to));
+            buf.insert(&mut buf.iter_at_offset(from), &repl);
+            buf.end_user_action();
+            buf.place_cursor(&buf.iter_at_offset(from + repl.chars().count() as i32));
+            hide();
+        })
+    };
+
+    let query: Rc<dyn Fn()> = {
+        let (buf, items, tok, gen, prefs, render) = (buf.clone(), items.clone(), tok.clone(), gen.clone(), prefs.clone(), render.clone());
+        let base = comp.base.clone();
+        Rc::new(move || {
+            let before = buf.text(&buf.start_iter(), &buf.iter_at_mark(&buf.get_insert()), false).to_string();
+            let token = completion_token(&before).filter(|t| t.2 || prefs.borrow().tags);
+            let Some((start, end, lora)) = token else {
+                tok.replace(None);
+                gen.set(gen.get() + 1); // drop any reply still in flight
+                items.borrow_mut().clear();
+                render();
+                return;
+            };
+            tok.replace(Some((start, end, lora)));
+            let q: String = before.chars().skip(start).take(end - start).collect();
+            let g = gen.get() + 1;
+            gen.set(g);
+            let (items2, render2, gen2, base2) = (items.clone(), render.clone(), gen.clone(), base.clone());
+            gtk::glib::timeout_add_local_once(Duration::from_millis(150), move || {
+                if gen2.get() != g {
+                    return;
+                }
+                gtk::glib::spawn_future_local(async move {
+                    if let Ok(list) = gtk::gio::spawn_blocking(move || crate::api::lm_suggest(&base2, &q, lora)).await {
+                        if gen2.get() == g {
+                            *items2.borrow_mut() = list;
+                            render2();
+                        }
+                    }
+                });
+            });
+        })
+    };
+    let q = query.clone();
+    buf.connect_changed(move |_| q());
+    let (acc, sel_row) = (accept.clone(), sel.clone());
+    list.connect_row_activated(move |_, row| {
+        sel_row.set(row.index().max(0) as usize);
+        acc();
+    });
+    let nav = gtk::EventControllerKey::new();
+    nav.set_propagation_phase(gtk::PropagationPhase::Capture);
+    let (vis2, sel2, items2, prefs2, list2) = (visible.clone(), sel.clone(), items.clone(), prefs.clone(), list.clone());
+    nav.connect_key_pressed(move |_, key, _, mods| {
+        use gdk::Key;
+        if !vis2.get() || mods.contains(gdk::ModifierType::CONTROL_MASK) {
+            return gtk::glib::Propagation::Proceed;
+        }
+        match key {
+            Key::Up | Key::Down => {
+                let n = items2.borrow().len();
+                if n > 0 {
+                    let i = if key == Key::Up { (sel2.get() + n - 1) % n } else { (sel2.get() + 1) % n };
+                    sel2.set(i);
+                    list2.select_row(list2.row_at_index(i as i32).as_ref());
+                }
+            }
+            Key::Tab if prefs2.borrow().accept_tab => accept(),
+            Key::Return | Key::KP_Enter if prefs2.borrow().accept_enter => accept(),
+            Key::Escape => hide(),
+            _ => return gtk::glib::Propagation::Proceed,
+        }
+        gtk::glib::Propagation::Stop
+    });
+    tv.add_controller(nav);
+}
+
 /// Text editor; commits on close when changed.
 pub fn edit_text(
     area: &gtk::DrawingArea,
@@ -763,59 +1059,16 @@ pub fn edit_text(
     let p = popover(area, r);
     let old = text.to_owned();
     if multiline {
-        let tv = gtk::TextView::builder()
-            .wrap_mode(gtk::WrapMode::WordChar)
-            .left_margin(8)
-            .right_margin(8)
-            .top_margin(6)
-            .bottom_margin(6)
-            .pixels_below_lines(2)
-            .accepts_tab(false)
-            .css_classes(["prompt-editor"])
-            .build();
+        let tv = prompt_view(text);
         p.add_css_class("prompt-popover");
         let buf = tv.buffer();
-        buf.set_text(text);
-        buf.place_cursor(&buf.end_iter());
-        // Prompt keys: Ctrl+↑/↓ weight the word or selection (web `Comfy.EditAttention`),
         // Ctrl+Enter closes (= saves; clicking outside or Esc saves too).
-        let keys = gtk::EventControllerKey::new();
-        keys.set_propagation_phase(gtk::PropagationPhase::Capture);
-        let (b2, pw) = (buf.clone(), p.downgrade());
-        keys.connect_key_pressed(move |_, key, _, mods| {
-            use gdk::Key;
-            if !mods.contains(gdk::ModifierType::CONTROL_MASK) {
-                return gtk::glib::Propagation::Proceed;
+        let pw = p.downgrade();
+        prompt_keys(&tv, move || {
+            if let Some(p) = pw.upgrade() {
+                p.popdown();
             }
-            match key {
-                Key::Return | Key::KP_Enter => {
-                    if let Some(p) = pw.upgrade() {
-                        p.popdown();
-                    }
-                }
-                Key::Up | Key::Down => {
-                    let (s, e) = b2.selection_bounds().unwrap_or_else(|| {
-                        let i = b2.iter_at_mark(&b2.get_insert());
-                        (i, i)
-                    });
-                    let all = b2.text(&b2.start_iter(), &b2.end_iter(), false);
-                    let delta = if key == Key::Up { 0.05 } else { -0.05 };
-                    if let Some((t, (a, z))) = super::attention::edit(&all, (s.offset() as usize, e.offset() as usize), delta) {
-                        // Replace just the group in one user action (`set_text` is not undoable).
-                        let old_len = all.chars().count() + (z - a) - t.chars().count();
-                        let group: String = t.chars().skip(a).take(z - a).collect();
-                        b2.begin_user_action();
-                        b2.delete(&mut b2.iter_at_offset(a as i32), &mut b2.iter_at_offset((a + old_len) as i32));
-                        b2.insert(&mut b2.iter_at_offset(a as i32), &group);
-                        b2.end_user_action();
-                        b2.select_range(&b2.iter_at_offset(a as i32), &b2.iter_at_offset(z as i32));
-                    }
-                }
-                _ => return gtk::glib::Propagation::Proceed,
-            }
-            gtk::glib::Propagation::Stop
         });
-        tv.add_controller(keys);
         // As wide as the widget on screen (min 420), tall enough to read a real prompt,
         // and never taller than the side of the window it opens into.
         let fit = budget(area, r);
@@ -842,204 +1095,14 @@ pub fn edit_text(
             .child(&sug_list)
             .min_content_height(sug_h.max(70.0) as i32)
             .hscrollbar_policy(gtk::PolicyType::Never)
-            .visible(show_sug)
+            .hexpand(true)
             .build();
+        let pic = suggestion_preview(sug_h.max(70.0) as i32);
+        let sug_row = gtk::Box::builder().spacing(8).visible(show_sug).build();
+        sug_row.append(&sug_sc);
+        sug_row.append(&pic);
         if let Some(comp) = completion {
-            let prefs = Rc::new(RefCell::new(crate::api::LmPrefs::default()));
-            let base_for_prefs = comp.base.clone();
-            let prefs_for_load = prefs.clone();
-            gtk::glib::spawn_future_local(async move {
-                if let Ok(p) = gtk::gio::spawn_blocking(move || crate::api::lm_prefs(&base_for_prefs)).await {
-                    *prefs_for_load.borrow_mut() = p;
-                }
-            });
-            let items: Rc<RefCell<Vec<(String, String)>>> = Rc::default();
-            let tok: Rc<RefCell<Option<(usize, usize, bool)>>> = Rc::default();
-            let sel = Rc::new(Cell::new(0usize));
-            let gen = Rc::new(Cell::new(0u64));
-            let visible = Rc::new(Cell::new(false));
-
-            let render: Rc<dyn Fn()> = {
-                let (list, sc, items, sel, visible) =
-                    (sug_list.clone(), sug_sc.clone(), items.clone(), sel.clone(), visible.clone());
-                Rc::new(move || {
-                    while let Some(c) = list.first_child() {
-                        list.remove(&c);
-                    }
-                    let items = items.borrow();
-                    if items.is_empty() {
-                        visible.set(false);
-                        return;
-                    }
-                    for (name, detail) in items.iter() {
-                        let row = gtk::ListBoxRow::new();
-                        let b = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-                        b.set_margin_top(5);
-                        b.set_margin_bottom(5);
-                        b.set_margin_start(8);
-                        b.set_margin_end(8);
-                        let l = gtk::Label::builder()
-                            .label(name)
-                            .xalign(0.0)
-                            .hexpand(true)
-                            .ellipsize(gtk::pango::EllipsizeMode::Middle)
-                            .build();
-                        b.append(&l);
-                        if !detail.is_empty() {
-                            b.append(&gtk::Label::builder().label(detail).css_classes(["dim-label", "caption"]).build());
-                        }
-                        row.set_child(Some(&b));
-                        list.append(&row);
-                    }
-                    sel.set(0);
-                    list.select_row(list.row_at_index(0).as_ref());
-                    sc.vadjustment().set_value(0.0);
-                    visible.set(true);
-                })
-            };
-
-            let accept: Rc<dyn Fn()> = {
-                let (buf, items, tok, sel, visible, prefs) =
-                    (buf.clone(), items.clone(), tok.clone(), sel.clone(), visible.clone(), prefs.clone());
-                let sug_list = sug_list.clone();
-                Rc::new(move || {
-                    if !visible.get() {
-                        return;
-                    }
-                    let (Some((start, end, lora)), Some((name, _))) =
-                        (*tok.borrow(), items.borrow().get(sel.get()).cloned())
-                    else {
-                        return;
-                    };
-                    let p = prefs.borrow().clone();
-                    let mut name = name;
-                    if !lora && p.space_underscore {
-                        name = name.replace(' ', "_");
-                    }
-                    let cursor = buf.iter_at_mark(&buf.get_insert()).offset();
-                    let (from, to, repl) = if lora {
-                        let mut it = buf.iter_at_offset(cursor);
-                        let mut to = cursor;
-                        while !it.is_end() {
-                            let ch = it.char();
-                            if ch == '>' {
-                                to = it.offset() + 1;
-                                break;
-                            }
-                            if ch == '\n' {
-                                break;
-                            }
-                            to = it.offset() + 1;
-                            it.forward_char();
-                        }
-                        (start as i32, to, format!("{name}:1.00>"))
-                    } else {
-                        let mut repl = name;
-                        if p.append_comma {
-                            let it = buf.iter_at_offset(end as i32);
-                            let next = if it.is_end() { None } else { Some(it.char()) };
-                            if !matches!(next, Some(',') | Some('.') | Some(')')) {
-                                repl.push_str(", ");
-                            }
-                        }
-                        (start as i32, end as i32, repl)
-                    };
-                    buf.begin_user_action();
-                    buf.delete(&mut buf.iter_at_offset(from), &mut buf.iter_at_offset(to));
-                    buf.insert(&mut buf.iter_at_offset(from), &repl);
-                    buf.end_user_action();
-                    buf.place_cursor(&buf.iter_at_offset(from + repl.chars().count() as i32));
-                    sug_list.remove_all();
-                    visible.set(false);
-                })
-            };
-
-            let query: Rc<dyn Fn()> = {
-                let (buf, items, tok, gen, prefs, render) = (buf.clone(), items.clone(), tok.clone(), gen.clone(), prefs.clone(), render.clone());
-                let base = comp.base.clone();
-                Rc::new(move || {
-                    let before = buf.text(&buf.start_iter(), &buf.iter_at_mark(&buf.get_insert()), false).to_string();
-                    let Some((start, end, lora)) = completion_token(&before) else {
-                        tok.replace(None);
-                        gen.set(gen.get() + 1); // drop any reply still in flight
-                        items.borrow_mut().clear();
-                        render();
-                        return;
-                    };
-                    if !lora && !prefs.borrow().tags {
-                        gen.set(gen.get() + 1);
-                        items.borrow_mut().clear();
-                        render();
-                        return;
-                    }
-                    tok.replace(Some((start, end, lora)));
-                    let q: String = before.chars().skip(start).take(end - start).collect();
-                    let g = gen.get() + 1;
-                    gen.set(g);
-                    let (items2, render2, gen2, base2) =
-                        (items.clone(), render.clone(), gen.clone(), base.clone());
-                    gtk::glib::timeout_add_local(Duration::from_millis(150), move || {
-                        if gen2.get() == g {
-                            let (q, base3, items3, render3, gen3) =
-                                (q.clone(), base2.clone(), items2.clone(), render2.clone(), gen2.clone());
-                            gtk::glib::spawn_future_local(async move {
-                                if let Ok(list) = gtk::gio::spawn_blocking(move || crate::api::lm_suggest(&base3, &q, lora)).await {
-                                    if gen3.get() == g {
-                                        *items3.borrow_mut() = list;
-                                        render3();
-                                    }
-                                }
-                            });
-                        }
-                        gtk::glib::ControlFlow::Break
-                    });
-                })
-            };
-            let q = query.clone();
-            buf.connect_changed(move |_| q());
-            let acc = accept.clone();
-            let sel_row = sel.clone();
-            sug_list.connect_row_activated(move |_, row| {
-                sel_row.set(row.index().max(0) as usize);
-                acc();
-            });
-            let nav = gtk::EventControllerKey::new();
-            nav.set_propagation_phase(gtk::PropagationPhase::Capture);
-            let (vis2, sel2, items2, prefs2, accept2, list2) =
-                (visible.clone(), sel.clone(), items.clone(), prefs.clone(), accept.clone(), sug_list.clone());
-            nav.connect_key_pressed(move |_, key, _, mods| {
-                use gdk::Key;
-                if !vis2.get() || mods.contains(gdk::ModifierType::CONTROL_MASK) {
-                    return gtk::glib::Propagation::Proceed;
-                }
-                match key {
-                    Key::Up | Key::Down => {
-                        let n = items2.borrow().len();
-                        if n > 0 {
-                            let i = if key == Key::Up { (sel2.get() + n - 1) % n } else { (sel2.get() + 1) % n };
-                            sel2.set(i);
-                            list2.select_row(list2.row_at_index(i as i32).as_ref());
-                        }
-                        gtk::glib::Propagation::Stop
-                    }
-                    Key::Tab if prefs2.borrow().accept_tab => {
-                        accept2();
-                        gtk::glib::Propagation::Stop
-                    }
-                    Key::Return | Key::KP_Enter if prefs2.borrow().accept_enter => {
-                        accept2();
-                        gtk::glib::Propagation::Stop
-                    }
-                    Key::Escape => {
-                        items2.borrow_mut().clear();
-                        list2.remove_all();
-                        vis2.set(false);
-                        gtk::glib::Propagation::Stop
-                    }
-                    _ => gtk::glib::Propagation::Proceed,
-                }
-            });
-            tv.add_controller(nav);
+            attach_completion(&tv, comp, &sug_list, &pic, Rc::new(|_| {}));
         }
         let hint = gtk::Label::builder()
             .label("Ctrl+↑/↓ weight · Tab/Enter complete · Ctrl+Enter done")
@@ -1058,7 +1121,7 @@ pub fn edit_text(
         foot.append(&count);
         let bx = gtk::Box::new(gtk::Orientation::Vertical, 6);
         bx.append(&sc);
-        bx.append(&sug_sc);
+        bx.append(&sug_row);
         bx.append(&foot);
         p.set_child(Some(&bx));
         let tv2 = tv.clone();
@@ -1090,6 +1153,172 @@ pub fn edit_text(
         p.popup();
         e.grab_focus();
     }
+}
+
+/// Where an in-place editor sits: the row's area rect (x, y, w, h) and the zoom, or `None`
+/// once the row is gone (node deleted, tab switched).
+pub type PlaceFn = Rc<dyn Fn() -> Option<([f64; 4], f64)>>;
+
+/// Close the in-place text editor, if one is open (commits like losing focus).
+pub fn finish_inline_text() {
+    if let Some(f) = INLINE_OPEN.with(|o| o.borrow_mut().take()) {
+        f();
+    }
+}
+
+/// Multiline text edited in place, like the web's `<textarea>` over the canvas: a text view in
+/// the canvas page's overlay that follows the row through pans and zooms. Commits when it loses
+/// focus, on Esc / Ctrl+Enter, or on a click elsewhere on the canvas. Autocomplete shows in a
+/// popover under the cursor that never takes focus. `false` = no overlay (use `edit_text`).
+pub fn edit_text_inline(area: &gtk::DrawingArea, place: PlaceFn, text: &str, completion: Option<TextCompletion>, commit: impl Fn(String) + 'static) -> bool {
+    let Some(ov) = area.parent().and_downcast::<gtk::Overlay>() else { return false };
+    if place().is_none() {
+        return false;
+    }
+    finish_inline_text();
+    let tv = prompt_view(text);
+    tv.add_css_class("inline-editor");
+    let sc = gtk::ScrolledWindow::builder()
+        .child(&tv)
+        .hscrollbar_policy(gtk::PolicyType::Never)
+        .halign(gtk::Align::Start)
+        .valign(gtk::Align::Start)
+        .css_classes(["inline-editor"])
+        .build();
+    ov.add_overlay(&sc);
+    // Font size follows the zoom, like the text drawn on the canvas.
+    let css = gtk::CssProvider::new();
+    gtk::style_context_add_provider_for_display(&tv.display(), &css, gtk::STYLE_PROVIDER_PRIORITY_APPLICATION + 1);
+
+    // Suggestions: a popover that never grabs focus, so typing stays in the text view.
+    let sug = gtk::Popover::builder().autohide(false).has_arrow(false).can_focus(false).position(gtk::PositionType::Bottom).build();
+    sug.set_parent(&tv);
+    let list = gtk::ListBox::builder().selection_mode(gtk::SelectionMode::Single).focusable(false).build();
+    let lsc = gtk::ScrolledWindow::builder().child(&list).hscrollbar_policy(gtk::PolicyType::Never).build();
+    // A hard size: the popover's surface is measured while the list is still empty.
+    lsc.set_size_request(320, 160);
+    let pic = suggestion_preview(160);
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    row.append(&lsc);
+    row.append(&pic);
+    sug.set_child(Some(&row));
+    if let Some(comp) = completion {
+        let (sug2, tv2) = (sug.clone(), tv.clone());
+        attach_completion(&tv, comp, &list, &pic, Rc::new(move |on| {
+            if !on {
+                sug2.popdown();
+                return;
+            }
+            // Point at the cursor, in the text view's own coordinates.
+            let buf = tv2.buffer();
+            let (strong, _) = tv2.cursor_locations(Some(&buf.iter_at_mark(&buf.get_insert())));
+            let (x, y) = tv2.buffer_to_window_coords(gtk::TextWindowType::Widget, strong.x(), strong.y());
+            sug2.set_pointing_to(Some(&gdk::Rectangle::new(x, y, 1, strong.height())));
+            sug2.popup();
+        }));
+    }
+
+    let old = text.to_owned();
+    let done = Rc::new(Cell::new(false));
+    let press = gtk::GestureClick::new();
+    press.set_propagation_phase(gtk::PropagationPhase::Capture);
+    let finish: Rc<dyn Fn()> = {
+        let (tv, sc, ov, area, sug, press, done, css) = (tv.clone(), sc.clone(), ov.clone(), area.clone(), sug.clone(), press.clone(), done.clone(), css.clone());
+        Rc::new(move || {
+            if done.replace(true) {
+                return;
+            }
+            INLINE_OPEN.with(|o| o.borrow_mut().take());
+            let b = tv.buffer();
+            let new = b.text(&b.start_iter(), &b.end_iter(), false).to_string();
+            sug.popdown();
+            sug.unparent();
+            gtk::style_context_remove_provider_for_display(&tv.display(), &css);
+            area.remove_controller(&press);
+            ov.remove_overlay(&sc);
+            area.grab_focus();
+            if new != old {
+                commit(new);
+            }
+        })
+    };
+    INLINE_OPEN.with(|o| *o.borrow_mut() = Some(finish.clone()));
+
+    // Esc / Ctrl+Enter finish; other Ctrl shortcuts the text does not use must not reach the
+    // window's canvas shortcuts (Ctrl+B would bypass the node being typed in).
+    let f = finish.clone();
+    prompt_keys(&tv, move || f());
+    let keys = gtk::EventControllerKey::new();
+    keys.set_propagation_phase(gtk::PropagationPhase::Capture);
+    let f = finish.clone();
+    keys.connect_key_pressed(move |_, key, _, _| {
+        if key == gdk::Key::Escape {
+            f();
+            return gtk::glib::Propagation::Stop;
+        }
+        gtk::glib::Propagation::Proceed
+    });
+    tv.add_controller(keys);
+    let block = gtk::EventControllerKey::new();
+    block.connect_key_pressed(|_, key, _, mods| {
+        let ctrl = mods.contains(gdk::ModifierType::CONTROL_MASK);
+        if ctrl && !matches!(key, gdk::Key::s | gdk::Key::w | gdk::Key::comma) {
+            return gtk::glib::Propagation::Stop;
+        }
+        gtk::glib::Propagation::Proceed
+    });
+    tv.add_controller(block);
+    // Focus leaving for another widget of this window commits; the window merely losing
+    // focus (alt-tab, the suggestion popover) does not.
+    let focus = gtk::EventControllerFocus::new();
+    let (f, tvw) = (finish.clone(), tv.downgrade());
+    focus.connect_leave(move |_| {
+        let (f, tvw) = (f.clone(), tvw.clone());
+        gtk::glib::idle_add_local_once(move || {
+            let Some(tv) = tvw.upgrade() else { return };
+            let still = tv.root().and_then(|r| r.focus()).is_some_and(|w| w == tv || w.is_ancestor(&tv));
+            if !still {
+                f();
+            }
+        });
+    });
+    tv.add_controller(focus);
+    // A click on the canvas itself (the editor covers its own row).
+    let f = finish.clone();
+    press.connect_pressed(move |_, _, _, _| f());
+    area.add_controller(press);
+
+    // Follow the row every frame; the overlay cannot place children at negative margins,
+    // so the rect is clipped to the canvas.
+    let last = Cell::new([i32::MIN; 5]);
+    let (area2, tv2, f) = (area.clone(), tv.clone(), finish.clone());
+    sc.add_tick_callback(move |sc, _| {
+        let Some(([x, y, w, h], zoom)) = place() else {
+            f();
+            return gtk::glib::ControlFlow::Break;
+        };
+        let (aw, ah) = (area2.width() as f64, area2.height() as f64);
+        let (x0, y0, x1, y1) = (x.max(0.0), y.max(0.0), (x + w).min(aw), (y + h).min(ah));
+        let font = (11.0 * zoom).clamp(6.0, 64.0);
+        let now = [x0 as i32, y0 as i32, (x1 - x0) as i32, (y1 - y0) as i32, (font * 4.0) as i32];
+        if now != last.get() {
+            sc.set_visible(now[2] >= 24 && now[3] >= 16);
+            sc.set_margin_start(now[0]);
+            sc.set_margin_top(now[1]);
+            sc.set_size_request(now[2].max(1), now[3].max(1));
+            if now[4] != last.get()[4] {
+                let pad = (TEXT_INSET * zoom).round() as i32;
+                tv2.set_left_margin(pad);
+                tv2.set_right_margin(pad);
+                tv2.set_top_margin((4.0 * zoom).round() as i32);
+                css.load_from_string(&format!("textview.inline-editor, textview.inline-editor text {{ font-size: {font:.1}px; }}"));
+            }
+            last.set(now);
+        }
+        gtk::glib::ControlFlow::Continue
+    });
+    tv.grab_focus();
+    true
 }
 
 /// Copy of the lora object `v` with `field` replaced.

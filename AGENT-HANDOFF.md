@@ -1210,3 +1210,81 @@ port's owner before blaming the launcher.
 **What the director must do once:** close the two Flatpak windows that were started before this build (they are pre-fix
 binaries; their windows cannot stop anything) and kill the orphan from 18:03 (`kill 454826`) — it predates the pid
 file, so nothing knows about it. Every launch after that is covered.
+
+## Session 29 — Phase 5 wrap-up: mask editor, Image BBox Layout, in-place text boxes, LoRA previews
+
+**Inpainting = mask painting only.** The fill itself is done by the workflow's own nodes (MOSS Edit, VAE Encode for
+Inpainting, …), exactly like the web frontend. So there is no FMM/PatchMatch engine and no worker thread: a mask stroke
+touches a few thousand pixels, done by cairo on the UI thread. Add a raster engine only if we ever want local
+(backend-free) fills.
+
+- `src/maskedit.rs` — one editor window for both users. Cairo A8 mask surface, round-capped strokes (Clear = eraser),
+  tinted overlay, wheel zoom at pointer, Space/middle/right-drag pan, `[ ]` size, Ctrl+Z/Ctrl+Shift+Z (20 steps),
+  invert/clear/fit menu. Box tool (only for BBox): draw/move/resize with handles, snapped to the node's 16 px output
+  grid (`output_size` = backend `resize_pair(always_snap)`), side panel with chips, caption, per-box strength (blank =
+  auto). Keys only on canvas focus, so typing a caption never switches tools.
+- **Load Image** (any `image_upload` widget): node menu → *Open in Mask Editor*. Full-resolution mask →
+  `api::upload_mask` (`/upload/mask`, clipspace, alpha = 255 − mask) → widget becomes `clipspace/clipspace-mask-<ms>.png [input]`,
+  same as the web clipspace flow.
+- **Image BBox Layout (MOSS)** (`graph_view::bbox_widgets`): Upload image, image name, max_megapixels, *prompt box*
+  toggle (shows the prompt in place of the region editor, like the web extension), *Edit boxes & mask*, summary, preview
+  with numbered boxes + mask tint (`canvas::Overlay`). Mask is stored as `midfr_mask_<hex8>.png` (alpha = mask,
+  longest side 1280) and its name in `mask_file`; boxes JSON in `bbox_data`. Handlers: `src/workspace/masking.rs`.
+- **Text boxes setting** (Settings → Appearance → Comfy-GNOME → *Text boxes*, server key `ComfyGNOME.TextEditor`):
+  *Pop-up editor* (default, the old popover) or *Edit in place* (`widgets::edit_text_inline`): a TextView overlaid on
+  the node row, following pan/zoom via a tick callback, font scaled by zoom; commits on click-away/focus loss,
+  Esc/Ctrl+Enter. Suggestions open in a non-focus-stealing popover at the cursor. Single-line text keeps the popup.
+- **LoRA Manager autocomplete previews**: in both modes, the selected `<lora:` suggestion shows its preview (same
+  provider as the combo hover previews); hidden for tag suggestions. Completion logic now lives in
+  `attach_completion`, shared by both editors.
+
+**Verified live** (Xvfb, user's backend, temporary workflow `zz-mask-test.json` since deleted): BBox boxes/caption/
+strength → correct `bbox_data`; mask PNG 847×1280 uploaded and restored on reopen; Load Image mask → server file alpha
+0 where painted; inline edit + `<lora:moss` → preview → Enter inserts `<lora:MOSS/braces_v1.safetensors:1.00>`,
+commit on click-away; popup mode regression-checked. `cargo test`: 56 passed.
+
+**Gaps closed (same session):** Load Image previews of `clipspace/…` pictures now tint the masked (transparent) area
+like the web clipspace preview (`Overlay.alpha_mask`, drawn as a tint with the picture's alpha cut out via `DestOut`).
+The black frame around the inline suggestion popover was only compositor-less Xvfb — under a real `gnome-shell --x11`
+in Xvfb it draws with rounded corners and a soft shadow. Flatpak rebuilt after these changes.
+Phase 4 is still open (to be resumed later).
+
+## Session 30 — Properties panel ("Toggle properties panel" parity, 2026-11-09)
+
+Pulled the right-hand properties panel out of the 1.60 frontend (`/home/montel/Documents/ComfyUI_frontend-1.60.0`,
+screens in `reference/Toggle Properties Panel/`). Comfy-GNOME is Rust, so the logic was re-implemented, not ported.
+
+- `src/workspace/panel.rs` — the panel itself: header (title + rename pencil + subgraph-inputs toggle), tab switcher,
+  search filter, Parameters / Info / Settings pages and the subgraph input editor. Values are edited through the same
+  widget keys the node body uses (`graph_view::build_widgets`), so a value has exactly one home.
+- `src/workspace.rs` — a second `adw::OverlaySplitView` around the existing one, `sidebar_position(End)`, `pin_sidebar`
+  (the canvas gives way instead of sliding under it), `show_sidebar(false)`, header toggle
+  (`cg-lucide-panel-right-symbolic`) bound both ways. A 6-frame tick calls `panel.sync` because the canvas has no
+  selection-changed signal; `Panel::key` makes the re-render a no-op unless something actually changed, and a focus
+  guard prevents rebuilding under an active entry.
+- **Promotion (`Show input`) — the part that matters for subgraph work.** 1.60 stores a promoted widget as an
+  instance input `{"name":…,"type":…,"widget":{"name":…},"link":null}` whose value lives in the *instance's*
+  `widgets_values` at that input's widget position, plus a `definitions.subgraphs[].inputs[]` entry
+  `{"id":<uuid>,"name":…,"type":…,"linkIds":[…],"pos":[0,0]}` and an interior link from `-10`. `Workflow::promote` /
+  `remove_input` create and undo all three, mirrored onto every instance; `promote_and_demote_round_trip` in
+  `src/workflow.rs` asserts save→reload keeps them. `write_graph` now rebuilds node `inputs` and subgraph definition
+  `inputs` by name instead of only patching `linkIds` by index — without that the new input vanished on save.
+- Widget rows on a subgraph instance come from those modern inputs first (`w:<value-index>` keys, wired sockets
+  skipped, `control_after_generate` mapped to the inner control slot); the rgthree `proxyWidgets` list stays as the
+  fallback for older files. Row eye buttons: inside a subgraph → *Show input*; on an instance → *Hide input*.
+  The Subgraph tab is the bulk editor (SHOWN ON NODE / HIDDEN / NESTED PARAMETERS with Show all / Hide all), and the
+  panel-header button jumps to it, greying the tabs like the web does.
+- Node settings: Normal/Bypass/Mute, colour swatches (plus "no colour"), Pinned — `Node.pinned` is new, parsed from
+  `flags.pinned`, written back, and pinned nodes are excluded from canvas drags.
+- **Bug found while verifying:** a combo whose saved value is not in the registry (a model the server no longer has)
+  showed the first option and would have written it on the next edit. The combo editor now appends the stored value
+  and selects it.
+
+**Verified live** (user's backend 0.42.0, 118 workflows): panel toggle; Parameters for a normal node
+(`Load Diffusion Model`: unet combo, advanced section), a MarkdownNote (multiline), and the "Models + Ksampler"
+subgraph instance (all 9 promoted inputs with live editors, stored model names now correct); Info; Settings;
+Subgraph editor; promote `cfg` from HIDDEN → `[subgraph] shown input "cfg"`, row appears with value 1.00 on the
+node's Parameters page; demote from the row eye → back to 9 inputs. `cargo test`: 57 passed. Menu-only parts of the
+web panel (Favorite, Reset to default, the `⋮` row menu) were not replicated; rename is the header pencil.
+Note for live testing: this openbox/CSD setup puts the pointer ~17 px right of the pixel you aim at, which made
+screenshots mislead the first clicks.

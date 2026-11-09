@@ -7,6 +7,7 @@ mod backend;
 mod dasiwa;
 mod erenodes;
 mod graph_view;
+mod maskedit;
 mod model_preview;
 mod nodesearch;
 mod pngmeta;

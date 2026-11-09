@@ -159,13 +159,32 @@ impl Client {
     /// `POST /upload/image` (multipart): copy `bytes` into ComfyUI's input folder.
     /// Returns the value for a LoadImage widget (`subfolder/name`).
     pub fn upload_image(&self, name: &str, bytes: &[u8]) -> Result<String, String> {
+        self.upload("/upload/image", name, bytes, &[("overwrite", "true")])
+    }
+
+    /// `POST /upload/mask`: the backend copies `png`'s alpha into the picture `original`
+    /// (a LoadImage value) and saves the result as `clipspace/<name>` in the input folder.
+    pub fn upload_mask(&self, name: &str, png: &[u8], original: &str) -> Result<String, String> {
+        let (path, kind) = match original.rsplit_once(" [") {
+            Some((p, k)) if k.ends_with(']') => (p, &k[..k.len() - 1]),
+            _ => (original, "input"),
+        };
+        let (sub, file) = path.rsplit_once('/').unwrap_or(("", path));
+        let r = serde_json::json!({"filename": file, "subfolder": sub, "type": kind}).to_string();
+        self.upload("/upload/mask", name, png, &[("original_ref", &r), ("type", "input"), ("subfolder", "clipspace"), ("overwrite", "true")])
+    }
+
+    fn upload(&self, path: &str, name: &str, bytes: &[u8], fields: &[(&str, &str)]) -> Result<String, String> {
         let b = "----comfygnome";
         let mut body = format!("--{b}\r\nContent-Disposition: form-data; name=\"image\"; filename=\"{}\"\r\nContent-Type: application/octet-stream\r\n\r\n", name.replace('"', "_")).into_bytes();
         body.extend_from_slice(bytes);
-        body.extend_from_slice(format!("\r\n--{b}\r\nContent-Disposition: form-data; name=\"overwrite\"\r\n\r\ntrue\r\n--{b}--\r\n").as_bytes());
+        for (k, v) in fields {
+            body.extend_from_slice(format!("\r\n--{b}\r\nContent-Disposition: form-data; name=\"{k}\"\r\n\r\n{v}").as_bytes());
+        }
+        body.extend_from_slice(format!("\r\n--{b}--\r\n").as_bytes());
         let r = self
             .agent
-            .post(&format!("{}/upload/image", self.base))
+            .post(&format!("{}{path}", self.base))
             .set("Content-Type", &format!("multipart/form-data; boundary={b}"))
             .send_bytes(&body)
             .map_err(err)?;

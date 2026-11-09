@@ -47,7 +47,9 @@ fn slot_widget(s: &WSlot, key: String) -> Widget {
         Role::Value => (s.name.as_str(), s.value.clone()),
     };
     let key = if s.role == Role::Upload { format!("upload:{}", s.idx) } else { key };
-    Widget::new(label, key, kind_of(&s.input, s.role), value)
+    let mut w = Widget::new(label, key, kind_of(&s.input, s.role), value);
+    w.advanced = truthy_opt(&s.input, "advanced");
+    w
 }
 
 /// Option list of the first `LoraLoader.lora_name` combo (feeds rgthree Power Lora rows).
@@ -95,7 +97,7 @@ pub fn group_members(graph: &Graph, gi: usize) -> Vec<usize> {
 }
 
 /// `a/b/c.png [output]` → `/view` query for a LoadImage-style value.
-fn image_query(v: &str) -> String {
+pub(crate) fn image_query(v: &str) -> String {
     let (path, kind) = match v.rsplit_once(" [") {
         Some((p, k)) if k.ends_with(']') => (p, &k[..k.len() - 1]),
         _ => (v, "input"),
@@ -233,7 +235,7 @@ fn lm_store(n: &mut workflow::Node, entries: &[Value], text: Option<String>) {
 }
 
 /// Editable widgets for one node (empty when nothing is known about it).
-fn build_widgets(wf: &Workflow, graph: &Graph, n: &workflow::Node, reg: &Registry, images: &mut Vec<String>) -> Vec<Widget> {
+pub fn build_widgets(wf: &Workflow, graph: &Graph, n: &workflow::Node, reg: &Registry, images: &mut Vec<String>) -> Vec<Widget> {
     let shadow = |w: &mut Widget, name: &str| w.input = n.inputs.iter().position(|i| i.widget.as_deref() == Some(name));
     let vals = n.widgets_values.as_array();
     match n.ty.as_str() {
@@ -293,6 +295,7 @@ fn build_widgets(wf: &Workflow, graph: &Graph, n: &workflow::Node, reg: &Registr
             out.push(add);
             return out;
         }
+        "ImageBBoxLayout" if bbox_slots(n, reg).is_some() => return bbox_widgets(n, reg, images),
         "Power Lora Loader (rgthree)" => {
             let opts = loras(reg);
             let mut out = vec![Widget::new("Loras", "header", WKind::Label, Value::Null)];
@@ -362,7 +365,44 @@ fn build_widgets(wf: &Workflow, graph: &Graph, n: &workflow::Node, reg: &Registr
         _ => {}
     }
 
-    // Subgraph instance: promoted widgets live on inner nodes (properties.proxyWidgets).
+    if let Some(sg) = wf.subgraphs.get(&n.ty) {
+        // Promoted widgets as the 1.60 frontend stores them: the instance input socket
+        // shadows an inner node widget (`{"widget": {"name": …}}`) and its value sits in
+        // `widgets_values` at the input's widget position.
+        let mut rows = Vec::new();
+        let mut at = 0;
+        for (i, inp) in n.inputs.iter().enumerate() {
+            let Some(widget) = inp.widget.as_deref() else { continue };
+            let vi = at;
+            at += 1;
+            if inp.link.is_some() {
+                continue; // wired on the instance: the value is ignored, the socket shows it
+            }
+            let Some(io) = sg.inputs.iter().find(|s| s.name == inp.name) else { continue };
+            let Some(l) = sg.graph.links.values().find(|l| io.link_ids.contains(&l.id)) else { continue };
+            let Some(inner) = sg.graph.node(&l.target_id) else { continue };
+            let Some(def) = reg.get(&inner.ty) else { continue };
+            let slots = prompt::widget_slots(inner, def);
+            let found = if widget == "control_after_generate" {
+                slots.iter().find(|s| s.role == Role::Control)
+            } else {
+                slots.iter().find(|s| s.role == Role::Value && s.name == widget)
+            };
+            let Some(s) = found else { continue };
+            let mut w = slot_widget(s, format!("w:{vi}"));
+            w.label = inp.name.clone();
+            w.input = Some(i);
+            if let Some(v) = vals.and_then(|a| a.get(vi)).filter(|v| !v.is_null()) {
+                w.value = v.clone();
+            }
+            rows.push(w);
+        }
+        if !rows.is_empty() {
+            return rows;
+        }
+    }
+
+    // Older subgraphs: promoted widgets listed in properties.proxyWidgets (rgthree style).
     if let Some(sg) = wf.subgraphs.get(&n.ty) {
         let mut out = Vec::new();
         for p in n.properties["proxyWidgets"].as_array().into_iter().flatten() {
@@ -424,7 +464,64 @@ fn build_widgets(wf: &Workflow, graph: &Graph, n: &workflow::Node, reg: &Registr
     out
 }
 
-fn truthy_opt(i: &Input, k: &str) -> bool {
+/// Image BBox Layout keeps its picture, boxes and mask in hidden widgets; the web
+/// extension draws an upload button, a preview with the boxes and an editor instead.
+/// Slots by name, so a reordered node definition still lines up.
+pub(crate) fn bbox_slots(n: &workflow::Node, reg: &Registry) -> Option<HashMap<String, WSlot>> {
+    let m: HashMap<String, WSlot> = prompt::widget_slots(n, reg.get(&n.ty)?).into_iter().map(|s| (s.name.clone(), s)).collect();
+    (m.contains_key("image") && m.contains_key("bbox_data")).then_some(m)
+}
+
+fn bbox_str<'a>(m: &'a HashMap<String, WSlot>, k: &str) -> &'a str {
+    m.get(k).and_then(|s| s.value.as_str()).unwrap_or_default()
+}
+
+fn bbox_widgets(n: &workflow::Node, reg: &Registry, images: &mut Vec<String>) -> Vec<Widget> {
+    let m = bbox_slots(n, reg).unwrap_or_default();
+    const HIDDEN: [&str; 6] = ["image", "bbox_data", "mask_file", "mask_mode", "mask_grow", "mask_feather"];
+    let image = bbox_str(&m, "image");
+    let boxes = crate::maskedit::parse_boxes(bbox_str(&m, "bbox_data"));
+    let painted = !bbox_str(&m, "mask_file").is_empty();
+    let show_prompt = n.properties["show_prompt"].as_bool().unwrap_or(false);
+    // The web extension shows either the prompt box or the region editor, never both.
+    let mut up = Widget::new("📁 Upload image…", "bbox:upload", WKind::Button, Value::Null);
+    up.structural = true;
+    let mut out = vec![up, Widget::new("image", "bbox:image", WKind::ReadOnly, Value::from(if image.is_empty() { "(none)" } else { image }))];
+    if !image.is_empty() && !show_prompt {
+        images.push(image_query(image));
+    }
+    let mut slots: Vec<&WSlot> = m.values().filter(|s| !HIDDEN.contains(&s.name.as_str()) && s.name != "prompt").collect();
+    slots.sort_by_key(|s| s.idx);
+    out.extend(slots.into_iter().map(|s| slot_widget(s, s.idx.to_string())));
+    let mut toggle = Widget::new("prompt box", "bbox:show_prompt", WKind::Bool, Value::Bool(show_prompt));
+    toggle.structural = true;
+    out.push(toggle);
+    if show_prompt {
+        if let Some(s) = m.get("prompt") {
+            out.push(slot_widget(s, s.idx.to_string()));
+        }
+        return out;
+    }
+    let mut edit = Widget::new("✏ Edit boxes & mask", "bbox:edit", WKind::Button, Value::Null);
+    edit.structural = true;
+    out.push(edit);
+    let summary = format!("{} box{}{}", boxes.len(), if boxes.len() == 1 { "" } else { "es" }, if painted { " · mask painted" } else { "" });
+    out.push(Widget::new("regions", "bbox:summary", WKind::ReadOnly, Value::from(summary)));
+    out
+}
+
+/// Boxes and painted mask drawn over the Image BBox Layout preview.
+fn bbox_overlay(n: &workflow::Node, reg: &Registry) -> Option<canvas::Overlay> {
+    if n.ty != "ImageBBoxLayout" {
+        return None;
+    }
+    let m = bbox_slots(n, reg)?;
+    let mask = Some(bbox_str(&m, "mask_file")).filter(|v| !v.is_empty()).map(image_query);
+    let boxes = crate::maskedit::parse_boxes(bbox_str(&m, "bbox_data")).iter().map(|b| [b.x, b.y, b.w, b.h]).collect();
+    Some(canvas::Overlay { mask, boxes, alpha_mask: false })
+}
+
+pub(crate) fn truthy_opt(i: &Input, k: &str) -> bool {
     i.opts[k].as_bool().unwrap_or(false)
 }
 
@@ -492,6 +589,12 @@ pub fn apply_widget(wf: &mut Workflow, path: &[String], node_id: &str, key: &str
                 }
             }
         }
+        return true;
+    }
+    if let Some(vi) = key.strip_prefix("w:").and_then(|i| i.parse::<usize>().ok()) {
+        // Promoted widget on a subgraph instance: the value lives on the instance, at the
+        // widget position of its input socket.
+        set_at(&mut graph.nodes[ni].widgets_values, vi, v);
         return true;
     }
     if let Some(inner) = key.strip_prefix("p:") {
@@ -632,7 +735,7 @@ fn picker_append(n: &mut workflow::Node, idx: usize, t: usize, placeholder: &str
     set_at(&mut n.widgets_values, idx, Value::String(placeholder.to_owned()));
 }
 
-fn rand_u64() -> u64 {
+pub(crate) fn rand_u64() -> u64 {
     use std::hash::{BuildHasher, Hasher};
     std::collections::hash_map::RandomState::new().build_hasher().finish()
 }
@@ -739,6 +842,11 @@ pub fn scene(
                 }
             }
         }
+        // Load Image masks (`clipspace/…`) live in the picture's alpha: tint them like the web preview.
+        let overlay = bbox_overlay(n, reg).or_else(|| {
+            let clip = n.ty != "ImageBBoxLayout" && images.first().is_some_and(|q| q.contains("subfolder=clipspace"));
+            clip.then(|| canvas::Overlay { alpha_mask: true, ..Default::default() })
+        });
         let mut node = Node {
             id: n.id.clone(),
             title,
@@ -748,10 +856,12 @@ pub fn scene(
             outputs: n.outputs.iter().map(|o| Slot { label: o.name.clone(), ty: o.ty.clone() }).collect(),
             widgets,
             images,
+            overlay,
             color: n.color.as_deref().and_then(parse_color),
             bgcolor: n.bgcolor.as_deref().and_then(parse_color),
             mode: n.mode,
             collapsed: n.collapsed,
+            pinned: n.pinned,
             subgraph: wf.subgraphs.contains_key(&n.ty),
             ..Node::default()
         };
@@ -1217,6 +1327,7 @@ mod tests {
             color: None,
             bgcolor: None,
             collapsed: false,
+            pinned: false,
         };
         let lora = "Select the LoRA to add to the text";
         n.widgets_values[1] = json!("MOSS/x.safetensors");

@@ -57,6 +57,8 @@ pub struct Node {
     pub color: Option<String>,
     pub bgcolor: Option<String>,
     pub collapsed: bool,
+    /// `flags.pinned`: the node cannot be dragged or resized.
+    pub pinned: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -116,6 +118,7 @@ impl Node {
             color: None,
             bgcolor: None,
             collapsed: false,
+            pinned: false,
         }
     }
 }
@@ -204,16 +207,133 @@ impl Workflow {
         for d in defs.into_iter().flatten() {
             let Some(sg) = d.get("id").and_then(Value::as_str).and_then(|id| self.subgraphs.get(id)) else { continue };
             write_graph(d, &sg.graph, true);
-            for (key, ios) in [("inputs", &sg.inputs), ("outputs", &sg.outputs)] {
-                let arr = d.get_mut(key).and_then(Value::as_array_mut);
-                for (i, io) in arr.into_iter().flatten().enumerate() {
-                    if let Some(src) = ios.get(i) {
-                        io["linkIds"] = Value::from(src.link_ids.clone());
-                    }
+            // Inputs are rebuilt: promotion adds/removes them and they carry an `id`.
+            let mut stored = d["inputs"].as_array().cloned().unwrap_or_default();
+            let mut inputs = Vec::with_capacity(sg.inputs.len());
+            for src in &sg.inputs {
+                let at = stored.iter().position(|iv| iv["name"].as_str() == Some(src.name.as_str()));
+                let mut iv = at.map(|p| stored.remove(p)).unwrap_or_else(|| serde_json::json!({}));
+                if iv.get("id").is_none() {
+                    iv["id"] = Value::from(fresh_uuid());
+                }
+                iv["name"] = Value::from(src.name.as_str());
+                iv["type"] = Value::from(src.ty.as_str());
+                iv["linkIds"] = Value::from(src.link_ids.clone());
+                if iv.get("pos").is_none() {
+                    iv["pos"] = serde_json::json!([0, 0]);
+                }
+                inputs.push(iv);
+            }
+            if d.get("inputs").is_some() || !inputs.is_empty() {
+                d["inputs"] = Value::Array(inputs);
+            }
+            let arr = d.get_mut("outputs").and_then(Value::as_array_mut);
+            for (i, io) in arr.into_iter().flatten().enumerate() {
+                if let Some(src) = sg.outputs.get(i) {
+                    io["linkIds"] = Value::from(src.link_ids.clone());
                 }
             }
         }
         v
+    }
+
+    /// Every graph of the workflow (root first) — promotion mirrors onto all instances.
+    fn graphs_mut(&mut self) -> impl Iterator<Item = &mut Graph> {
+        std::iter::once(&mut self.root).chain(self.subgraphs.values_mut().map(|s| &mut s.graph))
+    }
+
+    /// Expose inner widget `widget` of `node` in subgraph `sg` as a subgraph input (the
+    /// frontend's "Show input"). The host input shadows the widget, so its value is kept
+    /// in the instance's `widgets_values`; `seed` is the value the inner widget shows now.
+    /// Mirrored onto every instance, because the tab path does not name one.
+    pub fn promote(&mut self, sg: &str, node: &str, widget: &str, seed: Value) -> Result<String, String> {
+        let Some(def) = self.subgraphs.get_mut(sg) else { return Err("unknown subgraph".into()) };
+        let inner = def.graph.nodes.iter_mut().find(|n| n.id == node).ok_or("node is not in the subgraph")?;
+        let slot = inner.inputs.iter().position(|i| i.widget.as_deref() == Some(widget)).ok_or("not a widget")?;
+        if inner.inputs[slot].link.is_some() {
+            return Err("input is already shown".into());
+        }
+        let name = unique_name(&def.inputs, widget);
+        let ty = inner.inputs[slot].ty.clone();
+        let id = def.graph.links.keys().max().copied().unwrap_or(0) + 1;
+        let at = def.inputs.len();
+        def.graph.links.insert(
+            id,
+            Link { id, origin_id: SUBGRAPH_INPUT_ID.into(), origin_slot: at, target_id: node.into(), target_slot: slot, ty: ty.clone() },
+        );
+        inner.inputs[slot].link = Some(id);
+        def.inputs.push(SubgraphIo { name: name.clone(), ty: ty.clone(), link_ids: vec![id] });
+        // The instance side: appending keeps `widgets_values` aligned with the widget inputs.
+        let sg = sg.to_owned();
+        for g in self.graphs_mut() {
+            for n in g.nodes.iter_mut().filter(|n| n.ty == sg) {
+                n.inputs.push(Input { name: name.clone(), ty: ty.clone(), link: None, widget: Some(widget.to_owned()) });
+                if let Some(vals) = n.widgets_values.as_array_mut() {
+                    vals.push(seed.clone());
+                }
+            }
+        }
+        Ok(name)
+    }
+
+    /// Remove subgraph input `at` (definition, interior link, and every instance socket).
+    /// External wires into those instance sockets go with it, as in the frontend.
+    pub fn remove_input(&mut self, sg: &str, at: usize) -> bool {
+        let Some(def) = self.subgraphs.get_mut(sg) else { return false };
+        if at >= def.inputs.len() {
+            return false;
+        }
+        let io = def.inputs.remove(at);
+        for id in &io.link_ids {
+            if let Some(l) = def.graph.links.remove(id) {
+                if let Some(n) = def.graph.nodes.iter_mut().find(|n| n.id == l.target_id) {
+                    if let Some(slot) = n.inputs.get_mut(l.target_slot) {
+                        slot.link = None;
+                    }
+                }
+            }
+        }
+        // Remaining boundary links slide up with their slots.
+        for l in def.graph.links.values_mut().filter(|l| l.origin_id == SUBGRAPH_INPUT_ID && l.origin_slot > at) {
+            l.origin_slot -= 1;
+        }
+        def.auto.retain(|n| n != &io.name);
+        let sg = sg.to_owned();
+        for g in self.graphs_mut() {
+            // Sockets of every instance, and the values their widget shadowed.
+            let mut drift: Vec<(String, usize, Option<i64>)> = Vec::new();
+            for n in g.nodes.iter_mut().filter(|n| n.ty == sg) {
+                let Some(h) = n.inputs.iter().position(|i| i.name == io.name) else { continue };
+                let shadowed = n.inputs[h].widget.is_some();
+                let value_at = n.inputs[..h].iter().filter(|i| i.widget.is_some()).count();
+                let link = n.inputs[h].link;
+                n.inputs.remove(h);
+                if shadowed {
+                    if let Some(vals) = n.widgets_values.as_array_mut() {
+                        if value_at < vals.len() {
+                            vals.remove(value_at);
+                        }
+                    }
+                }
+                drift.push((n.id.clone(), h, link));
+            }
+            for (id, h, link) in drift {
+                if let Some(l) = link {
+                    g.links.remove(&l);
+                }
+                for l in g.links.values_mut().filter(|l| l.target_id == id) {
+                    if l.target_slot == h {
+                        // Only wires are left with that slot when `link` was null but the
+                        // frontend had stale ids; they are dropped with the socket.
+                        continue;
+                    }
+                    if l.target_slot > h {
+                        l.target_slot -= 1;
+                    }
+                }
+            }
+        }
+        true
     }
 }
 
@@ -260,10 +380,33 @@ fn write_graph(s: &mut Value, g: &Graph, object_links: bool) {
         } else if nv["flags"]["collapsed"].as_bool() == Some(true) {
             nv["flags"]["collapsed"] = Value::Bool(false);
         }
-        for (i, iv) in nv["inputs"].as_array_mut().into_iter().flatten().enumerate() {
-            if let Some(src) = n.inputs.get(i) {
+        if n.pinned {
+            nv["flags"]["pinned"] = Value::Bool(true);
+        } else if nv["flags"]["pinned"].as_bool() == Some(true) {
+            nv["flags"]["pinned"] = Value::Bool(false);
+        }
+        // Inputs are rebuilt (promotion adds/removes them, and a widget input must carry
+        // `widget`), keeping whatever extras the stored entry had (label, shape, pos…).
+        if nv.get("inputs").is_some() || !n.inputs.is_empty() {
+            let mut stored = nv["inputs"].as_array().cloned().unwrap_or_default();
+            let mut out = Vec::with_capacity(n.inputs.len());
+            for src in &n.inputs {
+                let at = stored.iter().position(|iv| iv["name"].as_str() == Some(src.name.as_str()));
+                let mut iv = at.map(|p| stored.remove(p)).unwrap_or_else(|| serde_json::json!({}));
+                iv["name"] = Value::from(src.name.as_str());
+                iv["type"] = Value::from(src.ty.as_str());
                 iv["link"] = src.link.map(Value::from).unwrap_or(Value::Null);
+                match &src.widget {
+                    Some(w) => iv["widget"] = serde_json::json!({ "name": w }),
+                    None => {
+                        if let Some(o) = iv.as_object_mut() {
+                            o.remove("widget");
+                        }
+                    }
+                }
+                out.push(iv);
             }
+            nv["inputs"] = Value::Array(out);
         }
         for (i, ov) in nv["outputs"].as_array_mut().into_iter().flatten().enumerate() {
             if let Some(src) = n.outputs.get(i) {
@@ -376,6 +519,24 @@ fn id_of(v: &Value) -> Option<String> {
     }
 }
 
+/// `name`, `name 2`, `name 3`… — the frontend's `nextUniqueName` for promoted inputs.
+fn unique_name(existing: &[SubgraphIo], name: &str) -> String {
+    let taken = |n: &str| existing.iter().any(|i| i.name == n);
+    if !taken(name) {
+        return name.to_owned();
+    }
+    (2..).map(|i| format!("{name} {i}")).find(|n| !taken(n)).unwrap_or_default()
+}
+
+/// v4-shaped id for a subgraph input created here (the frontend keys inputs by uuid).
+fn fresh_uuid() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static N: AtomicU64 = AtomicU64::new(0);
+    let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos() as u64).unwrap_or(0);
+    let n = t.rotate_left(19) ^ N.fetch_add(1, Ordering::Relaxed).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+    format!("{:08x}-{:04x}-4{:03x}-8{:03x}-{:012x}", (n >> 32) as u32, (n >> 16) as u16, n as u16 & 0xfff, (n >> 44) as u16 & 0xfff, n & 0xffff_ffff_ffff)
+}
+
 fn rect(v: &Value) -> Option<[f64; 4]> {
     let b = v.as_array()?;
     let f = |i: usize| b.get(i).and_then(Value::as_f64).unwrap_or(0.0);
@@ -447,6 +608,7 @@ fn parse_node(n: &Value) -> Option<Node> {
         color: n["color"].as_str().map(str::to_owned),
         bgcolor: n["bgcolor"].as_str().map(str::to_owned),
         collapsed: n["flags"]["collapsed"].as_bool().unwrap_or(false),
+        pinned: n["flags"]["pinned"].as_bool().unwrap_or(false),
     })
 }
 
@@ -531,6 +693,48 @@ mod tests {
         assert_eq!(groups[0]["id"], 5, "existing group id preserved");
         assert_eq!(groups[1]["title"], "Fresh");
         assert_eq!(groups[1]["bounding"], serde_json::json!([1.0, 2.0, 3.0, 4.0]));
+    }
+
+    /// `promote` writes both halves (definition input + interior link + host socket/value)
+    /// and the file has to survive a save/reload; `remove_input` has to undo all of it.
+    #[test]
+    fn promote_and_demote_round_trip() {
+        let src = r##"{"version":0.4,"nodes":[{"id":1,"type":"sg-1","pos":[0,0],"size":[200,100],
+            "inputs":[{"name":"a","type":"INT","widget":{"name":"a"},"link":null}],
+            "outputs":[],"widgets_values":[7]}],
+            "links":[],
+            "definitions":{"subgraphs":[{"id":"sg-1","name":"Sub","inputNode":{"bounding":[0,0,10,10]},
+            "outputNode":{"bounding":[0,20,10,10]},"inputs":[],"outputs":[],
+            "nodes":[{"id":5,"type":"Inner","pos":[0,0],"size":[100,50],
+                "inputs":[{"name":"a","type":"INT","widget":{"name":"a"},"link":null},
+                          {"name":"b","type":"INT","widget":{"name":"b"},"link":null}],
+                "outputs":[],"widgets_values":[7,3]}],"links":[]}]}}"##;
+        let mut wf = Workflow::from_str(src).expect("parse");
+
+        let name = wf.promote("sg-1", "5", "b", serde_json::json!(3)).expect("promote");
+        assert_eq!(name, "b");
+        assert_eq!(wf.subgraphs["sg-1"].inputs.len(), 1);
+        assert_eq!(wf.subgraphs["sg-1"].graph.nodes[0].inputs[1].link, Some(1));
+        assert_eq!(wf.root.nodes[0].inputs[1].widget.as_deref(), Some("b"));
+        assert_eq!(wf.root.nodes[0].widgets_values, serde_json::json!([7, 3]));
+
+        // Saving and reloading keeps the promoted socket, its widget shadow and the link.
+        let out = wf.to_json();
+        let mut again = Workflow::from_json(out.clone()).expect("reload");
+        assert_eq!(again.subgraphs["sg-1"].inputs[0].name, "b");
+        assert_eq!(again.subgraphs["sg-1"].inputs[0].link_ids, vec![1]);
+        assert_eq!(again.root.nodes[0].inputs[1].widget.as_deref(), Some("b"));
+        let def = &out["definitions"]["subgraphs"][0];
+        assert_eq!(def["inputs"][0]["linkIds"], serde_json::json!([1]));
+        assert!(def["nodes"][0]["inputs"][1]["widget"]["name"] == "b");
+
+        // Demoting the promoted input drops its socket, value and interior link.
+        assert!(again.remove_input("sg-1", 0));
+        assert!(again.subgraphs["sg-1"].inputs.is_empty());
+        assert_eq!(again.subgraphs["sg-1"].graph.nodes[0].inputs[1].link, None);
+        assert_eq!(again.root.nodes[0].inputs.len(), 1);
+        assert_eq!(again.root.nodes[0].inputs[0].name, "a");
+        assert_eq!(again.root.nodes[0].widgets_values, serde_json::json!([7]));
     }
 
     fn fresh_group(title: &str, rect: [f64; 4]) -> Group {

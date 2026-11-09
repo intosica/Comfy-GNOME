@@ -343,7 +343,9 @@ fn show(d: &Rc<Dlg>, page: &Page) {
         Page::Cat(c) => {
             title(d, category_label(c));
             if c == "Appearance" {
-                theme_row(&group(d, "Comfy-GNOME"));
+                let g = group(d, "Comfy-GNOME");
+                theme_row(&g);
+                text_editor_row(d, &g);
             }
             let Some(cat) = cat else { return loading(d, "") };
             let defs: Vec<&SettingDef> = cat.defs.iter().filter(|s| s.category() == c).collect();
@@ -487,6 +489,9 @@ fn commit(d: &Rc<Dlg>, key: &str, v: Value) {
         let mode = v.as_i64().unwrap_or(2) as i32;
         d.ws.set_link_mode(mode);
     }
+    if key == TEXT_EDITOR {
+        crate::canvas::widgets::set_inline_text(v.as_str() == Some("inline"));
+    }
     if key == "Comfy.Execution.PreviewMethod" {
         d.ws.set_preview_method(v.as_str().unwrap_or("default"));
     }
@@ -603,6 +608,22 @@ fn theme_row(g: &adw::PreferencesGroup) {
             _ => adw::ColorScheme::Default,
         })
     });
+    g.add(&r);
+}
+
+/// Server setting (so every client shares it): `"inline"` or `"popup"` (the default).
+pub const TEXT_EDITOR: &str = "ComfyGNOME.TextEditor";
+
+fn text_editor_row(d: &Rc<Dlg>, g: &adw::PreferencesGroup) {
+    let model = gtk::StringList::new(&["Pop-up editor", "Edit in place"]);
+    let r = adw::ComboRow::builder()
+        .title("Text boxes")
+        .subtitle("Where multiline prompts are edited")
+        .model(&model)
+        .selected(crate::canvas::widgets::inline_text() as u32)
+        .build();
+    let d = d.clone();
+    r.connect_selected_notify(move |c| commit(&d, TEXT_EDITOR, Value::from(if c.selected() == 1 { "inline" } else { "popup" })));
     g.add(&r);
 }
 

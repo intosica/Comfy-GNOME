@@ -80,12 +80,17 @@ pub struct Workspace {
     restoring: Rc<std::cell::Cell<bool>>,
     /// A save is already scheduled (coalesces canvas-change bursts).
     session_queued: Rc<std::cell::Cell<bool>>,
+    /// Right-hand properties panel and the split that holds it.
+    panel: panel::Panel,
+    panel_split: adw::OverlaySplitView,
 }
 
 mod addnode;
 mod ere;
 mod library;
+mod masking;
 mod media;
+mod panel;
 mod reaper;
 mod session;
 mod settings;
@@ -282,6 +287,8 @@ fn load_css() {
         ".queue-thumb { border-radius: 6px; }
          textview.prompt-editor, textview.prompt-editor text { font-size: 11.5pt; }
          popover.prompt-popover > contents { padding: 8px; }
+         scrolledwindow.inline-editor { border-radius: 4px; box-shadow: 0 0 0 2px @accent_bg_color; background: #151515; }
+         textview.inline-editor, textview.inline-editor text { background: #151515; color: #dddddd; caret-color: #ffffff; }
          box.mtb-band { background: alpha(@accent_bg_color, 0.25); border: 1px solid @accent_bg_color; border-radius: 4px; }
          box.mtb-thumb, window.mtb-thumb { border-radius: 4px; }
          box.mtb-tile { padding: 4px; border-radius: 8px; }
@@ -320,6 +327,15 @@ fn load_css() {
          box.selection-toolbar button, box.selection-toolbar menubutton > button { padding: 3px 5px; min-width: 0; min-height: 0; border-radius: 7px; }
          box.selection-toolbar image, box.selection-toolbar drawingarea { -gtk-icon-size: 15px; }
          box.dock-bar { padding: 3px 6px; border-top: 1px solid alpha(currentColor, 0.12); background: alpha(currentColor, 0.04); }
+         box.prop-panel { background: @headerbar_bg_color; border-left: 1px solid alpha(currentColor, 0.14); }
+         label.prop-heading { font-size: 0.76em; font-weight: 700; opacity: 0.55; letter-spacing: 0.06em; margin-top: 8px; }
+         label.prop-name { font-size: 0.92em; }
+         label.prop-type { font-size: 0.78em; opacity: 0.5; }
+         button.prop-eye { padding: 1px 4px; min-width: 0; min-height: 0; opacity: 0.6; }
+         button.prop-eye:hover { opacity: 1; }
+         expander.prop-section > title { font-weight: 700; font-size: 0.86em; }
+         scrolledwindow.prop-text { border-radius: 6px; border: 1px solid alpha(currentColor, 0.14); }
+         scrolledwindow.prop-text textview, scrolledwindow.prop-text textview text { background: none; }
          togglebutton.dock-tab { padding: 2px 12px; min-height: 22px; border-radius: 999px; }
          togglebutton.dock-tab:checked { background: alpha(@accent_bg_color, 0.2); color: @accent_color; }
          textview.log-view { font-size: 9.5pt; }
@@ -639,6 +655,14 @@ impl Workspace {
         mon_pop.set_child(Some(&mon_detail));
         mon_btn.set_popover(Some(&mon_pop));
         mon_btn.set_visible(false);
+        // Right-hand properties panel (`reference/Toggle Properties Panel/`): hidden by
+        // default, its own header toggle, pinned so the canvas gives it room instead of
+        // sliding under it.
+        let panel_toggle = gtk::ToggleButton::builder()
+            .icon_name("cg-lucide-panel-right-symbolic")
+            .tooltip_text("Toggle properties panel")
+            .build();
+        header.pack_end(&panel_toggle);
         header.pack_end(&run);
         header.pack_end(&stop);
         header.pack_end(&count);
@@ -676,6 +700,7 @@ impl Workspace {
             }
             gtk::glib::ControlFlow::Continue
         });
+        let panel = panel::build();
         let split = adw::OverlaySplitView::builder()
             .sidebar(&side_box)
             .content(&content_tb)
@@ -687,6 +712,23 @@ impl Workspace {
             .sidebar_width_fraction(0.34)
             .build();
         toggle.bind_property("active", &split, "show-sidebar").bidirectional().sync_create().build();
+        let panel_split = adw::OverlaySplitView::builder()
+            .content(&split)
+            .sidebar(&panel.root)
+            .sidebar_position(gtk::PackType::End)
+            .min_sidebar_width(280.0)
+            .max_sidebar_width(560.0)
+            .sidebar_width_fraction(0.28)
+            .pin_sidebar(true)
+            .show_sidebar(false)
+            .enable_hide_gesture(false)
+            .enable_show_gesture(false)
+            .build();
+        panel_toggle
+            .bind_property("active", &panel_split, "show-sidebar")
+            .bidirectional()
+            .sync_create()
+            .build();
         {
             let drag = gtk::GestureDrag::new();
             let (sp2, tg, hd) = (split.clone(), toggle.clone(), handle.clone());
@@ -739,7 +781,7 @@ impl Workspace {
         }
 
         let ws = Self {
-            root: split.upcast(),
+            root: panel_split.clone().upcast(),
             title,
             log,
             proc: Rc::default(),
@@ -783,7 +825,20 @@ impl Workspace {
             persist: Rc::new(std::cell::Cell::new(true)),
             restoring: Rc::default(),
             session_queued: Rc::default(),
+            panel,
+            panel_split,
         };
+        {
+            let me = ws.clone();
+            let n = Cell::new(0u32);
+            canvas_overlay.add_tick_callback(move |_, _| {
+                n.set(n.get() + 1);
+                if n.get() % 6 == 0 && me.panel_split.shows_sidebar() {
+                    me.panel.sync(&me);
+                }
+                glib::ControlFlow::Continue
+            });
+        }
         {
             let me = ws.clone();
             run.connect_clicked(move |_| me.queue_prompt(tabmenu::shift_down()));
@@ -2070,6 +2125,9 @@ impl Workspace {
         if key == "ere" {
             return self.on_ere(doc, id, v);
         }
+        if self.on_bbox(doc, id, key, v.clone()) {
+            return;
+        }
         if structural {
             self.sync_doc(doc); // re-render rebuilds from the model: keep moves and wires
         }
@@ -2093,16 +2151,25 @@ impl Workspace {
     }
 
     /// Pick a local image, upload it to ComfyUI's input folder and point `widgets_values[idx]` at it.
-    fn upload_image(&self, doc: &DocRef, id: &str, idx: usize) {        let Some(client) = self.client.borrow().clone() else {
+    fn upload_image(&self, doc: &DocRef, id: &str, idx: usize) {
+        let (me, doc, id) = (self.clone(), doc.clone(), id.to_owned());
+        self.pick_and_upload(move |value| me.on_widget(&doc, &id, &idx.to_string(), serde_json::Value::from(value), true));
+    }
+
+    /// File dialog → `/upload/image` → `done(widget value)`.
+    fn pick_and_upload(&self, done: impl Fn(String) + 'static) {
+        let Some(client) = self.client.borrow().clone() else {
             self.append_log("[upload] not connected");
             return;
         };
-        let (me, doc, id) = (self.clone(), doc.clone(), id.to_owned());
+        let me = self.clone();
+        let done = Rc::new(done);
         let dialog = gtk::FileDialog::builder().title("Choose an image to upload").build();
         let parent = self.tabs.root().and_downcast::<gtk::Window>();
         dialog.open(parent.as_ref(), gio::Cancellable::NONE, move |res| {
             let Some(path) = res.ok().and_then(|f| f.path()) else { return };
             let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            let (me, done) = (me.clone(), done.clone());
             glib::spawn_future_local(async move {
                 let up = gio::spawn_blocking(move || -> Result<String, String> {
                     let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
@@ -2112,7 +2179,7 @@ impl Workspace {
                 match up {
                     Ok(Ok(value)) => {
                         me.append_log(&format!("[upload] {value}"));
-                        me.on_widget(&doc, &id, &idx.to_string(), serde_json::Value::from(value), true);
+                        done(value);
                     }
                     Ok(Err(e)) => me.append_log(&format!("[upload] {e}")),
                     Err(_) => me.append_log("[upload] worker panicked"),
@@ -2644,6 +2711,93 @@ impl Workspace {
         self.edited(doc);
     }
 
+    /// Expose an inner widget as a subgraph input (frontend "Show input"). Every instance
+    /// of the subgraph grows the socket, because the tab path names no single instance.
+    fn promote_widget(&self, doc: &DocRef, sg: &str, node: &str, widget: &str, seed: Value) {
+        let res = {
+            let mut d = doc.borrow_mut();
+            d.wf.promote(sg, node, widget, seed)
+        };
+        match res {
+            Ok(name) => {
+                self.append_log(&format!("[subgraph] shown input \"{name}\""));
+                self.edited(doc);
+            }
+            Err(e) => self.append_log(&format!("[subgraph] {e}")),
+        }
+    }
+
+    /// Take a promoted input back off the node (frontend "Hide input").
+    fn demote_input(&self, doc: &DocRef, sg: &str, name: &str) {
+        let done = {
+            let mut d = doc.borrow_mut();
+            let at = d.wf.subgraphs.get(sg).and_then(|s| s.inputs.iter().position(|i| i.name == name));
+            at.is_some_and(|at| d.wf.remove_input(sg, at))
+        };
+        if done {
+            self.append_log(&format!("[subgraph] hid input \"{name}\""));
+            self.edited(doc);
+        }
+    }
+
+    /// Show every promotable inner widget of the subgraph instance `host`.
+    fn show_all_inputs(&self, doc: &DocRef, host: &str) {
+        let seeds: Vec<(String, String, Value)> = {
+            let d = doc.borrow();
+            let Some(node) = graph_ref(&d).nodes.iter().find(|n| n.id == host) else { return };
+            let Some(sg) = d.wf.subgraphs.get(&node.ty) else { return };
+            let shown: Vec<&str> = node.inputs.iter().filter(|i| i.widget.is_some()).map(|i| i.name.as_str()).collect();
+            let reg = self.registry.borrow();
+            let mut out = Vec::new();
+            for inner in &sg.graph.nodes {
+                let Some(def) = reg.get(&inner.ty) else { continue };
+                for s in prompt::widget_slots(inner, def).into_iter().filter(|s| s.role == prompt::Role::Value) {
+                    if inner.inputs.iter().any(|i| i.widget.as_deref() == Some(s.name.as_str()) && i.link.is_some()) {
+                        continue;
+                    }
+                    if shown.contains(&s.name.as_str()) {
+                        continue;
+                    }
+                    out.push((inner.id.clone(), s.name.clone(), s.value.clone()));
+                }
+            }
+            out
+        };
+        let ty = {
+            let d = doc.borrow();
+            graph_ref(&d).nodes.iter().find(|n| n.id == host).map(|n| n.ty.clone())
+        };
+        let Some(ty) = ty else { return };
+        {
+            let mut d = doc.borrow_mut();
+            for (node, widget, seed) in seeds {
+                if let Err(e) = d.wf.promote(&ty, &node, &widget, seed) {
+                    self.append_log(&format!("[subgraph] {e}"));
+                }
+            }
+        }
+        self.edited(doc);
+    }
+
+    /// Take every promoted input off the subgraph instance `host`.
+    fn hide_all_inputs(&self, doc: &DocRef, host: &str) {
+        let (ty, names): (String, Vec<String>) = {
+            let d = doc.borrow();
+            let Some(node) = graph_ref(&d).nodes.iter().find(|n| n.id == host) else { return };
+            (node.ty.clone(), node.inputs.iter().filter(|i| i.widget.is_some()).map(|i| i.name.clone()).collect())
+        };
+        {
+            let mut d = doc.borrow_mut();
+            for name in names {
+                let at = d.wf.subgraphs.get(&ty).and_then(|s| s.inputs.iter().position(|i| i.name == name));
+                if let Some(at) = at {
+                    d.wf.remove_input(&ty, at);
+                }
+            }
+        }
+        self.edited(doc);
+    }
+
     fn delete_group(&self, doc: &DocRef, gi: usize) {
         {
             let mut d = doc.borrow_mut();
@@ -2892,6 +3046,16 @@ impl Workspace {
             let (me, d) = (self.clone(), doc.clone());
             let node = id.to_owned();
             entries.push(item("Open Subgraph", move || me.open_node(&d, &node)));
+        }
+        if self.image_slot(doc, id).is_some() {
+            let (me, d, node) = (self.clone(), doc.clone(), id.to_owned());
+            entries.push(item("Open in Mask Editor", move || me.open_mask_editor(&d, &node)));
+        }
+        if self.bbox_slots_pub(doc, id) {
+            let (me, d, node) = (self.clone(), doc.clone(), id.to_owned());
+            entries.push(item("Edit Boxes & Mask…", move || {
+                me.on_bbox(&d, &node, "bbox:edit", serde_json::Value::Null);
+            }));
         }
         {
             let (me, d, i) = (self.clone(), doc.clone(), ids.to_vec());
@@ -3444,6 +3608,7 @@ impl Workspace {
                 .and_then(Value::as_str)
                 .unwrap_or("default")
                 .to_owned();
+            crate::canvas::widgets::set_inline_text(v.get(settings::TEXT_EDITOR).and_then(Value::as_str) == Some("inline"));
             me.persist.set(v.get("Comfy.Workflow.Persist").and_then(Value::as_bool).unwrap_or(true));
             me.restore_session();
             if me.docs.borrow().is_empty() {
