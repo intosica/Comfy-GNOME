@@ -6,6 +6,9 @@
 
 <p align="center">A native GTK4 / libadwaita frontend for <a href="https://github.com/comfyanonymous/ComfyUI">ComfyUI</a>, written in Rust.</p>
 
+<p align="center"><b>0.2.0-beta.1</b> — beta: fixes and features land fast, saved workflows stay compatible.
+See <a href="CHANGELOG.md">CHANGELOG.md</a>.</p>
+
 <p align="center"><img src="docs/screenshots/graph.png" alt="Comfy-GNOME editing a workflow"></p>
 
 The graph lives in one immediate-mode cairo canvas instead of a web view: pan, zoom and node dragging cost no
@@ -49,6 +52,10 @@ the backend's `userdata` folder.
 - **Templates** — the backend's template list (categories, search, All / Node graph / Apps) to start from.
 - **Settings** — the same categories and keys as the ComfyUI frontend, read from the backend's own setting
   definitions, searchable, with icons.
+- **Properties panel** — the toolbar's panel toggle opens the right sidebar for the selected node: Parameters
+  (INPUTS / ADVANCED INPUTS, per-row Rename, Show input, Reset to default), Info (description and Inputs / Outputs
+  tables) and Settings (Normal / Bypass / Mute, the ten node colours, Pinned). Subgraph instances get the editor
+  instead: visible inputs with an eye each, and the hidden parameters of every inner node behind "Show all".
 - **Faithful saving** — writes back to `userdata` preserving everything the editor does not model: an untouched
   open → save leaves the file byte-identical.
 
@@ -119,6 +126,12 @@ fake ComfyUI on port 8198 plus an Xvfb display, and launches the app with `ADW_D
 nothing here needs model weights. The graph shown is `tools/demo/workflow.json`, the workflow embedded in a real
 `ComfyUI_00004.png` (Anima: UNETLoader, CLIPLoader, VAELoader, KSampler, SaveImageAdvanced). The simulated result — on
 the KSampler node, in the Preview pane and in the queue thumbnails — is that same image, downsized to `tools/demo/result.jpg`.
+
+## Versioning
+
+Semantic versions, tagged `vX.Y.Z`; `CHANGELOG.md` lists what changed in each one. Until `1.0.0` the app is in
+beta, so a `0.x` release may change undocumented internals. The version in Settings → About comes from
+`Cargo.toml`, so bump it there and tag the same commit.
 
 ## License
 
