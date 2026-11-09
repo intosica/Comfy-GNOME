@@ -1,6 +1,6 @@
 # AGENT HANDOFF
 
-_Last updated: session 31 (the properties panel now matches the 1.60 screens: ADVANCED INPUTS for subgraph instances, per-row `⋮` menu, compact tabs; the backend lock from session 28c is unchanged).
+_Last updated: session 32 (the properties panel behaves, not just looks: selection follows the canvas, the subgraph editor keeps its state, colour/properties save, legacy proxy order matches 1.60; version 0.2.0-beta.1 tagged and pushed. The backend lock from session 28c is unchanged).
 
 Project: **Comfy-GNOME** at `/home/montel/Documents/Comfy-GNOME` (renamed from `GNOME-Comfyu` → `GNOME-ComfyUI` → this).
 Crate/binary `comfy-gnome`, app id `io.github.comfygnome.ComfyGnome` (`APP_ID` in `src/main.rs`).
@@ -1350,3 +1350,42 @@ Known gaps, deliberate: per-row **Favorite** and the "Nodes" tab for multi-selec
 storage key was not established, so the item is hidden instead of inventing one). `Info` is hidden for subgraph
 instances on purpose. Unrelated but worth knowing: session restore writes the **unsaved** document to the session, so
 a test edit survives a restart and a tab can come back with a `•`.
+
+## Session 32 — Properties panel, third pass: behaviour, plus 0.2.0-beta.1 (2026-11-09)
+
+Session 31 got the layout right; clicking through it against a live backend still showed the panel going dead,
+losing its own state, and not saving what it edited.
+
+- **The panel froze on the last node.** Any field in the panel keeps keyboard focus after it is edited, and
+  `canvas/mod.rs`'s primary `drag_begin` now calls `area.grab_focus()` — the panel's commit-on-focus-out fires and
+  the selection finally follows the canvas. Verified: edit a value in the panel, click another node, panel switches.
+- **The subgraph editor closed on every refresh** (any value edit). `Panel::refresh` is now a thin wrapper over
+  `fill`: `ident(doc, d, selection)` decides "same node" (then the expander state in `state.open` and every scroll
+  position is restored in an idle) and `close_editor()` runs only when the selection is not a subgraph.
+  `key()` covers title, mode, colour, Pinned, properties and subgraph-interior values, so all of those repaint.
+- **Show all / Hide all were swapped**, and the HIDDEN list only knew widgets with sockets: it now comes from
+  `graph_view::subgraph_advanced_widgets` + the `w:`/`p:` row keys, with the new `graph_view::interior_slot()`
+  resolving a key to (inner node, widget). Proxy rows are demoted by the new `Workspace::demote_proxy`;
+  `hide_all_inputs` clears `proxyWidgets` too but keeps the `$$` preview exposures.
+- **The colour ring never matched** (it compared a shade): swatches now use litegraph's `LG_COLORS` strings and
+  `lighten` only draws the dot, so the current ring is an exact `color`/`bgcolor` comparison.
+- **Nothing was saved.** `workflow.rs::to_json` now writes `color`/`bgcolor` (removing them when None) and
+  `properties` when they changed; `commit()` no longer marks the document dirty when the value that comes back on
+  focus-out equals the stored one. `to_json_writes_panel_color_and_properties` covers it.
+- **Row menu** rebuilt: Rename (always), Show input (interior rows without a promotion), Reset to default
+  (sensitive iff the value differs), no eye on parameter rows — the 1.60 menu. `SlotRef{sg,node,slot:Option,widget}`
+  + `rename` create the widget input (with `label`) when the inner node has none, which is what `renameWidget` does.
+- **Header/Info**: close button (`Panel::close` → `panel_split.set_show_sidebar(false)`), window controls on the
+  panel header (`WindowHandle` + `WindowControls`, because the main header bar hides them while a split view is
+  shown), Settings labels "Node state" / "Node color" / "Pinned" with the switch on the right, and Info rebuilt as
+  tables (name, description, Inputs Parameter/Description/Data Type/Required/Range, Outputs) with JSON-exact integer
+  ranges. `info_tab(false)` hides Info for subgraph instances, no selection and no workflow, and leaves the page.
+- **Legacy proxy order**: showing an input on an instance whose promotions still live in `properties.proxyWidgets`
+  appends to that list (`Workspace::append_proxy`, used by `promote_widget` and `show_all_inputs`) instead of adding a
+  real subgraph input. 1.60's `flushProxyWidgetMigration` converts the list to inputs in list order after the
+  existing ones, so an appended entry lands last, like the web; a real input would have jumped ahead of the proxies.
+
+Versioning started here: `Cargo.toml` = `0.2.0-beta.1`, tagged `v0.2.0-beta.1`, `CHANGELOG.md` added, README carries
+the version and a Versioning section. Still missing from the panel: **Favorite** in the row menu, the Nodes tab, a
+multi-selection title and the "Workflow Overview" title. Both builds (system release + Flatpak) were rebuilt from this
+tree after the version bump.
