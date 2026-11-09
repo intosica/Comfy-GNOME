@@ -30,6 +30,13 @@ fn main() -> adw::glib::ExitCode {
     // Bundled Adwaita symbolic icons. GTK picks up <resource-base-path>/icons
     // (derived from APP_ID) automatically, so they work under any icon theme.
     adw::gio::resources_register_include!("comfy-gnome.gresource").expect("register resources");
+    // One UI per session: a second instance would share (and then tear down) the first one's
+    // backend, and a backend must never outlive the UI that owns it. The lock is also what the
+    // backend guard watches, so it has to be claimed before anything can be launched.
+    if !backend::claim_ui() {
+        eprintln!("comfy-gnome: another instance is already running");
+        return adw::glib::ExitCode::SUCCESS;
+    }
     let app = adw::Application::builder().application_id(APP_ID).build();
     app.connect_startup(|_| match_system_look());
     app.connect_activate(build_window);

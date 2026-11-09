@@ -1,11 +1,25 @@
 # AGENT HANDOFF
 
-_Last updated: session 28b (dragging a picture now shows that picture under the pointer instead of the payload text — see the last section).
+_Last updated: session 28c (closing the UI now always stops the backend it launched — a lock the backend itself watches, not a signal from a parent that may already be gone; see the last section).
 
 Project: **Comfy-GNOME** at `/home/montel/Documents/Comfy-GNOME` (renamed from `GNOME-Comfyu` → `GNOME-ComfyUI` → this).
 Crate/binary `comfy-gnome`, app id `io.github.comfygnome.ComfyGnome` (`APP_ID` in `src/main.rs`).
 
-## Standing rule — kill the backend when you are done
+## Standing rule — the backend dies with the UI. No exceptions, no excuses.
+
+**Read this twice. It is the one rule in this repo that is not a preference.**
+
+Leaving the backend open when the UI is closed is *completely unacceptable*. It is not a rough edge, not a known
+limitation, and not something to "handle later": it is **one step short of a critical issue**, and being one step
+short is the only thing keeping it off that list. No director and no user tolerates it, in either build — the system
+build and the Flatpak are equally responsible. If you touch the launch path, the exit path, process spawning, the
+Flatpak sandbox or the backend connection and you are not certain a UI exit stops the process the UI started, your
+change is **not finished**. Do not report a task done on the assumption that someone else closed the leak.
+
+Why it is this serious: a surviving backend keeps its in-memory `/history` and its queue, so the next UI start
+shows *old jobs as if they were current*; it holds port 8188, so the next launch either attaches to a
+half-configured server or fails to bind; it burns GPU and RAM with nobody watching; and a queued generation can
+keep writing into a folder the user thinks is idle. The user has lost work to this. Treat it as data loss.
 
 **Every agent must stop the ComfyUI backend it started (and any demo stack it left behind) as the last step of
 the task, before reporting back.** A backend left listening on `127.0.0.1:8188` (or a mock on 8198) makes the
@@ -18,9 +32,31 @@ ss -ltnp | grep -E ':8188|:8198'          # who is listening?
 pgrep -af "main.py|mock_backend"          # backend / mock processes
 pgrep -x Xvfb                             # test displays you started
 ```
-Kill what you started (`kill <pid>`; the app also kills its own child in folder mode), stop test `Xvfb`
+Kill what you started (`kill <pid>`; the app also kills its own child group on a normal exit), stop test `Xvfb`
 displays, and remove scratch state (`/tmp/demo-config`, `/tmp/demo-cache`, screenshots in `/tmp`).
 Never kill a backend you did not start unless the user asks for it.
+
+### How the guarantee is built (do not weaken it)
+
+A backend launched by the UI is wrapped in a host-side guard script that runs `setsid` (own session, own process
+group, `/proc/<pid>/fd/1` and `/proc/<pid>/fd/2` on `$XDG_CACHE_HOME/comfy-gnome/backend.log`), writes its pid and
+then **watches a lock file the UI holds for its whole life** (`$XDG_CACHE_HOME/comfy-gnome/ui.lock`, `flock`).
+When the lock is released — window closed, `SIGTERM`, `SIGKILL`, a crash, the sandbox torn down, `systemd` stopping
+the unit — the guard sends `TERM` to its own process group and `KILL` three seconds later. The kernel does the work,
+so nothing depends on the UI running, on a signal arriving at the right moment, or on the host and the Flatpak sandbox
+sharing a pid namespace. Signals passed through `flatpak-spawn` die with that process, and `PR_SET_PDEATHSIG` only
+watches the immediate child, which `exec setsid` replaces — that is why the lock exists.
+
+Verify a UI exit like this (never by reading the code and assuming):
+```bash
+bash tools/demo/start.sh                    # or any config whose script is a plain `sleep`/loop
+# close the app with its ✕, then:
+cat $XDG_CACHE_HOME/comfy-gnome/backend.log | grep "UI is gone"   # expect one line
+kill -0 -$(cat $XDG_CACHE_HOME/comfy-gnome/backend.pid)           # expect: no such process
+```
+And the brutal case, which must also pass: `kill -9` the app, then the backend has to be gone within a second, with
+`backend.log` ending in "comfy-gnome: UI is gone, stopping the backend". A backend that traps `TERM` must still be
+gone within ~4 s (the guard escalates to `KILL`). Both were verified this session.
 
 ## State
 Phase 1 complete. Phase 2 complete except the output gallery and third-party UI widgets (see `ROADMAP.md`).
@@ -30,8 +66,10 @@ Verified on X11 (`GDK_BACKEND=x11`):
 - Splash auto-detects `/home/montel/Documents/ComfyUI`; **Launch ComfyUI** (folder mode) starts
   `venv/bin/python main.py --port 8188`, log streams (ANSI stripped), backend connects.
 - Script mode with `start_comfy_hefty.sh`: ComfyUI starts, Thorium replaced by the `sleep infinity` shim.
-- Closing the window kills the backend process group (folder mode verified; script-mode group kill verified
-  manually with `kill -TERM -- -PGID`, which runs the script's cleanup trap). `kill -9` of the app → PDEATHSIG kills python.
+- Closing the window stops the backend process group **in every case** (session 28c): the guard watches a lock the
+  UI holds, so `✕`, `SIGTERM`, `SIGKILL`, a crash or a sandbox teardown all end the backend — `SIGKILL` of the app is
+  followed by the backend dying within a second, a `TERM`-trapping backend within ~4 s (verified headless and inside
+  the Flatpak sandbox). A second UI instance is refused by the same lock, so two UIs can never share one backend.
 - Skip → workspace, connection polling, node drag, zoom-at-pointer, bundled icons render under the user's `gnome` icon theme.
 Screenshots: `docs/screenshots/`.
 
@@ -1095,3 +1133,80 @@ visible, just as it is when doing this in a web browser on HTML. No placeholder 
 - The drag ghost **is** verifiable headlessly: press, move twice with ~1 s between, `scrot -o shot.png`, then release.
   Verified that way: a queue row's `harbour_00003_.png` ghosts as its 44 px thumbnail, an MTB cell as its tile-sized
   thumbnail, both centred on the pointer — the picture, no text, no icon, no full-resolution window.
+
+## Session 28c — the backend dies with the UI, including the brutal exits
+
+Director's report: *"When I open flatpak, the old jobs are still present and new fix isn't seen"* plus *"make sure
+that closing flatpak closes the backend"*, with the standing expectation that leaving a self-launched backend open
+when the UI is closed is *"completely unacceptable … one step short of a critical issue"*. Both reports were the same
+bug seen from two sides.
+
+**What the director's machine showed.** Two Flatpak instances were running (`bwrap … comfy-gnome`, PIDs 544243 at
+19:18:16 and 548825 at 19:20:07) — both started *before* the drag-ghost rebuild finished at 19:20, hence "new fix isn't
+seen". Port 8188 was owned by `python main.py --port 8188`, PID 454826, started 18:03:37 with **PPID 1**: a backend the
+app had spawned earlier and then abandoned. Its `/history` was still in memory, so the next UI start listed yesterday's
+jobs as current — "the old jobs are still present". `~/.var/app/io.github.comfygnome.ComfyGnome/cache/comfy-gnome/`
+held only `backend.log` and the old `host-exec.sh`, no `backend.pid`, so nothing could reap it automatically.
+
+**Why every previous mechanism failed.** All of them watched a process that was already gone:
+`PR_SET_PDEATHSIG(SIGTERM)` fires on the immediate child, which is `sh -c 'exec setsid …'` — `exec` replaces that
+process, so the death of the *app* is invisible to the session leader; `flatpak-spawn --watch-bus` watches the
+sandbox's bus, not the app; and a `SIGKILL` of the app inside the sandbox delivers nothing to the host at all. The
+pidfile scheme only works when `stop()` actually runs, which is exactly what a crash prevents.
+
+**The fix: the kernel does the work.** The UI claims an exclusive `flock` on
+`$XDG_CACHE_HOME/comfy-gnome/ui.lock` for its whole life and hands the path to the backend's session leader. The
+guard script (`$XDG_CACHE_HOME/comfy-gnome/backend-guard.sh`, written for **both** builds) writes its pid file, then
+*waits on that lock*, and when it becomes free — window closed, `SIGTERM`, a crash, `SIGKILL`, the sandbox torn down —
+sends `TERM` to its own process group and `KILL` three seconds later:
+
+```sh
+echo $$ > "$1"                       # $1 pid file, $2 UI lock (empty = no watchdog), $3 log
+lock="$2"; log="$3"; shift 3
+if [ -n "$lock" ]; then
+  exec 9>"$lock"
+  ( trap '' TERM INT HUP             # the watchdog lives in the group it is about to TERM
+    while ! flock -n 9 2>/dev/null; do sleep 1; done
+    echo "comfy-gnome: UI is gone, stopping the backend" >>"$log" 2>/dev/null
+    kill -TERM -$$ 2>/dev/null; sleep 3; kill -KILL -$$ 2>/dev/null ) &
+fi
+exec "$@"
+```
+
+`src/backend.rs`: `lock_path()`, `claim_ui()` / `ui_held()` / `take_lock()` (`libc::flock` with `LOCK_EX|LOCK_NB`),
+`host_files()` (guard + pid file + lock path, no longer Flatpak-only), `spawn()` reaps a leftover from an older build
+via `kill_group(&pidfile)` and builds `exec setsid <guard> <pid> <lock> <log> …` (still through
+`flatpak-spawn --host --watch-bus` in the sandbox), `struct Backend { proc, pidfile }`, `stop()` / `stop_hard()` /
+`is_running()` all fence their `kill -0` / `kill` through `flatpak-spawn --host sh` when `in_flatpak()`, so they act in
+the host's pid namespace. `src/main.rs` claims the lock before building the app: the same lock doubles as the
+single-instance guard (the app is *not* single-instance through `GApplication` — proved under `dbus-run-session`: the
+first instance owned `io.github.comfygnome.ComfyGnome` while a second one ran happily), because two UIs would otherwise
+share one backend and the first one to exit would tear it down under the other.
+
+**Two bugs found by testing the nasty cases, not the happy one.**
+1. The watchdog's `kill -TERM -$$` also killed the watchdog itself (same group, default `TERM` handling), so the `KILL`
+   escalation never ran and a `TERM`-trapping backend survived indefinitely. Fixed with `trap '' TERM INT HUP` inside
+   the watchdog subshell — now the trapping backend dies at 4 s.
+2. `pkill -f '<script name>'` also matches the outer `sh -c … exec setsid …` and the guard, and a `pkill` against a
+   `TERM`-trapping script does nothing at all. Count processes by the pid file, not by pattern.
+
+**Verified** (headless `Xvfb :97`, `XDG_CONFIG_HOME=/tmp/gt/cfg` with a fake launch script, `port=8199`):
+`kill -9` of the app → backend gone in 1 s, `backend.log` containing "UI is gone"; a second launch → "another instance
+is already running" and exit 0; clicking ✕ → app and backend both gone, pid file removed; a `trap "" TERM INT HUP`
+backend → gone at 4 s. **Across the Flatpak boundary** the same lock is what the host-side guard watches: with a
+sandboxed instance holding `~/.var/app/io.github.comfygnome.ComfyGnome/cache/comfy-gnome/ui.lock` (its own claim) and
+the guard watching that identical host path, `kill -9` of the sandboxed process made the host guard log
+"comfy-gnome: UI is gone, stopping the backend" and kill the backend at 4 s — while the lock was still held the guard
+correctly stayed quiet. `backend-guard.sh` and `ui.lock` both appear at that host path when the sandboxed app starts,
+so the sandbox and the host open the same inode.
+
+**Read this before testing a backend in the Flatpak:** the sandbox's session bus (`/run/flatpak/bus`) is shared by all
+instances of the app, so `flatpak run` while another instance exists just activates that instance and exits 0 without a
+window — use `flatpak run --command=sh <id> -c 'exec dbus-run-session -- comfy-gnome'` to get a standalone instance for
+tests. And `ss -ltnp` showed the director's orphan (PID 454826) squatting on **both** 8188 and 8199, which makes every
+folder-mode test launch die instantly with "[backend process exited]" and answer "HTTP/1.0 404 Not Found" — check the
+port's owner before blaming the launcher.
+
+**What the director must do once:** close the two Flatpak windows that were started before this build (they are pre-fix
+binaries; their windows cannot stop anything) and kill the orphan from 18:03 (`kill 454826`) — it predates the pid
+file, so nothing knows about it. Every launch after that is covered.

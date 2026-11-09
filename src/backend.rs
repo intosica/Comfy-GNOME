@@ -143,19 +143,76 @@ fn browser_shim_dir() -> std::io::Result<PathBuf> {
     Ok(dir)
 }
 
-/// Flatpak teardown needs the *host* process group: the pids visible here are in
-/// the sandbox namespace, and `--watch-bus` only kills flatpak-spawn's direct
-/// child (setsid detaches the real backend from it). This host helper becomes the
-/// session leader, records its pid, then execs the target in place, so the
-/// recorded pid stays the group leader.
-fn flatpak_host_files() -> std::io::Result<(PathBuf, PathBuf)> {
+/// Where the UI holds the lock the backend guard watches.
+pub fn lock_path() -> PathBuf {
+    glib::user_cache_dir().join("comfy-gnome/ui.lock")
+}
+
+/// The backend's session leader. It records its pid, then — while the UI holds [`lock_path`] — keeps
+/// a watchdog that stops the whole group the instant that lock is free again. The kernel drops a
+/// `flock` when the process holding it dies, so the backend cannot outlive the UI even if the UI is
+/// SIGKILLed, crashes, or its sandbox is torn down: no name-space, portal or pid tracking involved.
+///
+/// The pid file is what `stop()` kills, on the host in Flatpak (`setsid` + `--host` put the group in
+/// the host namespace) and here otherwise.
+fn host_files() -> std::io::Result<(PathBuf, PathBuf, PathBuf)> {
     use std::os::unix::fs::PermissionsExt;
     let dir = glib::user_cache_dir().join("comfy-gnome");
     std::fs::create_dir_all(&dir)?;
-    let helper = dir.join("host-exec.sh");
-    std::fs::write(&helper, "#!/bin/sh\n# Comfy-GNOME: backend host session (pid file arg, then command)\necho $$ > \"$1\" || exit 1\nshift\nexec \"$@\"\n")?;
-    std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755))?;
-    Ok((helper, dir.join("backend.pid")))
+    let guard = dir.join("backend-guard.sh");
+    std::fs::write(
+        &guard,
+        "#!/bin/sh\n\
+         # Comfy-GNOME backend guard: $1 pid file, $2 UI lock (empty = no watchdog), $3 log, then the command.\n\
+         echo $$ > \"$1\" || exit 1\n\
+         lock=\"$2\"; log=\"$3\"\n\
+         shift 3\n\
+         if [ -n \"$lock\" ]; then\n\
+           exec 9>\"$lock\"\n\
+           (\n\
+             trap \'\' TERM INT HUP\n\
+             while ! flock -n 9 2>/dev/null; do sleep 1; done\n\
+             echo \"comfy-gnome: UI is gone, stopping the backend\" >>\"$log\" 2>/dev/null\n\
+             kill -TERM -$$ 2>/dev/null\n\
+             sleep 3\n\
+             kill -KILL -$$ 2>/dev/null\n\
+           ) &\n\
+         fi\n\
+         exec \"$@\"\n",
+    )?;
+    std::fs::set_permissions(&guard, std::fs::Permissions::from_mode(0o755))?;
+    Ok((guard, dir.join("backend.pid"), lock_path()))
+}
+
+thread_local! {
+    /// The app-wide UI lock: held for the whole life of this process, released by the kernel however
+    /// the process ends. This *is* the single-instance guard (a GApplication name can be defeated:
+    /// two launches of this binary both ran while one owned the well-known name), and it is also the
+    /// signal [`host_files`]' guard watches to stop a backend whose UI is gone.
+    static UI_LOCK: std::cell::RefCell<Option<std::fs::File>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Claim this process as *the* Comfy-GNOME session. `false` = another instance already holds the
+/// lock, so there is nothing to do: a second UI would fight the first over one backend.
+pub fn claim_ui() -> bool {
+    let Some(f) = take_lock() else { return false };
+    UI_LOCK.with(|l| *l.borrow_mut() = Some(f));
+    true
+}
+
+fn ui_held() -> bool {
+    UI_LOCK.with(|l| l.borrow().is_some())
+}
+
+fn take_lock() -> Option<std::fs::File> {
+    use std::os::unix::io::AsRawFd;
+    let path = lock_path();
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let f = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(path).ok()?;
+    // SAFETY: flock on a descriptor we own; EWOULDBLOCK just means someone else holds it.
+    (unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0).then_some(f)
 }
 
 fn shell_quote(p: &std::path::Path) -> String {
@@ -221,10 +278,8 @@ impl Tail {
 
 pub struct Backend {
     pub proc: gio::Subprocess,
-    /// Flatpak only: host-side pid file written by the session-leader helper.
-    /// ponytail: graceful stop kills the host group; a hard crash before stop
-    /// still leaves it behind (same as before).
-    pidfile: Option<PathBuf>,
+    /// Written by the session-leader guard: the pid whose process group is this launch.
+    pidfile: PathBuf,
 }
 
 impl Drop for Backend {
@@ -233,94 +288,66 @@ impl Drop for Backend {
     }
 }
 
-/// Flatpak: TERM (then KILL after 3 s) the host process group recorded in `pidfile`.
-/// Dash's `kill` rejects `--`, hence no `--` in the host snippet.
-fn kill_host_group(pidfile: &Path) {
+/// TERM the recorded process group, wait up to 3 s, then KILL it. In Flatpak the pids are in the
+/// host namespace, so the portal runs the snippet there. Dash's `kill` rejects `--`, hence none.
+fn kill_group(pidfile: &Path) {
     let Ok(pid) = std::fs::read_to_string(pidfile) else { return };
     let pid = pid.trim();
     if pid.is_empty() {
         return;
     }
-    let _ = std::process::Command::new("flatpak-spawn")
-        .args([
-            "--host", "sh", "-c",
-            "p=$1; kill -TERM -\"$p\" 2>/dev/null; i=0; \
+    let script = "p=$1; kill -TERM -\"$p\" 2>/dev/null; i=0; \
              while kill -0 -\"$p\" 2>/dev/null && [ $i -lt 30 ]; do sleep 0.1; i=$((i+1)); done; \
-             kill -KILL -\"$p\" 2>/dev/null",
-            "sh", pid,
-        ])
+             kill -KILL -\"$p\" 2>/dev/null";
+    let mut cmd = if in_flatpak() {
+        let mut c = std::process::Command::new("flatpak-spawn");
+        c.arg("--host");
+        c
+    } else {
+        std::process::Command::new("sh")
+    };
+    let _ = cmd
+        .args(["sh", "-c", script, "sh", pid])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status();
 }
 
 impl Backend {
-    /// Kill the whole process group (the script plus the python it spawned).
+    /// Kill the whole process group (the guard, the script and the python it spawned).
     pub fn stop(&self) {
-        if let Some(pf) = &self.pidfile {
-            // Flatpak: the group lives in the host pid namespace; ask the portal
-            // to TERM it, wait up to 3 s, then KILL. Dash's `kill` rejects `--`,
-            // hence no `--` in the host snippet.
-            kill_host_group(pf);
-            let _ = std::fs::remove_file(pf);
-            self.proc.send_signal(15);
-            return;
-        }
-        if let Some(pid) = self.proc.identifier() {
-            let _ = std::process::Command::new("kill").args(["-TERM", "--", &format!("-{pid}")]).stderr(std::process::Stdio::null()).status();
-        }
+        kill_group(&self.pidfile);
+        let _ = std::fs::remove_file(&self.pidfile);
         self.proc.send_signal(15);
     }
 
-    /// `stop`, then make sure the group is really gone: a ComfyUI that ignores
-    /// SIGTERM (or a script whose trap does not kill its python) used to outlive
-    /// the app, and the next launch then connected to that leftover backend —
-    /// which looks like "my history/queue came back from a dead session".
+    /// `stop`, then make sure nothing of the launch survives. `kill_group` already escalates to
+    /// SIGKILL after 3 s; this collects the leader as well.
     pub fn stop_hard(&self) {
         self.stop();
-        // Flatpak: stop() already TERMed/waited/KILLed the host group.
-        if self.pidfile.is_some() {
-            return;
-        }
-        let Some(pid) = self.proc.identifier().map(|p| p.to_string()) else { return };
-        // -0 tests the group, not just our direct child: scripts that did not
-        // `exec` leave python behind in the same group while exiting themselves.
-        for _ in 0..30 {
-            if !group_alive(&pid) {
-                return;
-            }
-            std::thread::sleep(Duration::from_millis(100));
-        }
-        eprintln!("backend: group {pid} survived SIGTERM for 3 s, sending SIGKILL");
-        let _ = std::process::Command::new("kill").args(["-KILL", "--", &format!("-{pid}")]).stderr(std::process::Stdio::null()).status();
         self.proc.force_exit();
     }
 
     pub fn is_running(&self) -> bool {
-        if let Some(pf) = &self.pidfile {
-            let Ok(pid) = std::fs::read_to_string(pf) else { return false };
-            let pid = pid.trim().to_string();
-            return !pid.is_empty()
-                && std::process::Command::new("flatpak-spawn")
-                    .args(["--host", "sh", "-c", "kill -0 -\"$1\"", "sh", pid.as_str()])
-                    .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null())
-                    .status()
-                    .map(|s| s.success())
-                    .unwrap_or(false);
+        let Ok(pid) = std::fs::read_to_string(&self.pidfile) else { return false };
+        let pid = pid.trim().to_string();
+        if pid.is_empty() {
+            return false;
         }
-        self.proc.identifier().is_some_and(|p| group_alive(&p))
+        let mut cmd = if in_flatpak() {
+            let mut c = std::process::Command::new("flatpak-spawn");
+            c.arg("--host");
+            c
+        } else {
+            std::process::Command::new("sh")
+        };
+        cmd.args(["sh", "-c", "kill -0 -\"$1\"", "sh", pid.as_str()])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
     }
-}
-
-fn group_alive(pid: &str) -> bool {
-    std::process::Command::new("kill")
-        .args(["-0", "--", &format!("-{pid}")])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
 }
 
 /// Launch ComfyUI per `cfg` (script or folder; caller checks one is set), streaming
@@ -343,17 +370,27 @@ pub fn spawn(cfg: &LaunchConfig, on_line: impl Fn(&str) + 'static) -> Result<Bac
         let d = browser_shim_dir().map_err(io_err)?;
         prefix += &format!("PATH='{}':\"$PATH\" ", d.display());
     }
-    let host_files = if in_flatpak() { Some(flatpak_host_files().map_err(io_err)?) } else { None };
-    // A previous app instance that died without stop() (SIGTERM/crash) leaves its host group
-    // running with a stdout pipe nobody reads: every print in ComfyUI then fails with
-    // "[Errno 32] Broken pipe" (KSampler's progress bar). Reap it before starting a new one.
-    if let Some((_, pidfile)) = &host_files {
-        kill_host_group(pidfile);
+    // Merged output goes to a file: stdout and stderr are the same fd, so their order survives and
+    // nothing in this process can close a pipe the backend is writing to (see [`log_path`]).
+    let log = log_path();
+    if let Some(dir) = log.parent() {
+        let _ = std::fs::create_dir_all(dir);
     }
-    let launch = match &host_files {
-        Some((helper, pidfile)) => format!("exec setsid {} {} ", shell_quote(helper), shell_quote(pidfile)),
-        None => "exec setsid ".to_string(),
-    };
+    let _ = std::fs::write(&log, b"");
+    let (guard, pidfile, lock_file) = host_files().map_err(io_err)?;
+    // A previous app instance that died before stop() ran (SIGKILL, a crash, a sandbox teardown) may
+    // still own this pid file — from a build without the guard. Reap it before starting a new one.
+    kill_group(&pidfile);
+    // The guard watches the lock this process claimed in `claim_ui`; when it is released (the kernel
+    // does that however the UI dies) the backend stops itself.
+    let lock_arg = if ui_held() { lock_file } else { PathBuf::new() };
+    let launch = format!(
+        "exec setsid {} {} {} {} ",
+        shell_quote(&guard),
+        shell_quote(&pidfile),
+        shell_quote(&lock_arg),
+        shell_quote(&log)
+    );
     // $0 = script (or "python"), $1 = working dir, rest = args.
     let (body, arg0, workdir): (String, std::ffi::OsString, PathBuf) = match (&cfg.script, &cfg.comfy_dir) {
         (Some(script), _) => (
@@ -372,13 +409,6 @@ pub fn spawn(cfg: &LaunchConfig, on_line: impl Fn(&str) + 'static) -> Result<Bac
         ),
         (None, None) => return Err(glib::Error::new(gio::IOErrorEnum::InvalidArgument, "nothing to launch")),
     };
-    // Merged output goes to a file: stdout and stderr are the same fd, so their order survives and
-    // nothing in this process can close a pipe the backend is writing to (see [`log_path`]).
-    let log = log_path();
-    if let Some(dir) = log.parent() {
-        let _ = std::fs::create_dir_all(dir);
-    }
-    let _ = std::fs::write(&log, b"");
     let body = format!("{} >>{} 2>&1", body, shell_quote(&log));
     argv.extend(["sh".into(), "-c".into(), body.into(), arg0, workdir.into()]);
     // The app owns the port: pass it in script mode too. Scripts commonly forward
@@ -390,10 +420,8 @@ pub fn spawn(cfg: &LaunchConfig, on_line: impl Fn(&str) + 'static) -> Result<Bac
     let argv_ref: Vec<&std::ffi::OsStr> = argv.iter().map(|s| s.as_os_str()).collect();
 
     let launcher = gio::SubprocessLauncher::new(gio::SubprocessFlags::STDIN_INHERIT);
-    // If we die without running stop() (crash, X connection loss), the kernel sends the
-    // child SIGTERM. Native: that child is the session leader we kill by group. Flatpak:
-    // --watch-bus reaches flatpak-spawn's direct child; stop() additionally kills the
-    // recorded host session (see flatpak_host_files).
+    // Belt and braces on top of the guard: if this process dies without stop(), the kernel sends the
+    // child SIGTERM, and Flatpak's --watch-bus tears down flatpak-spawn's child with the sandbox.
     // SAFETY: prctl is async-signal-safe.
     launcher.set_child_setup(|| unsafe {
         libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM);
@@ -421,7 +449,7 @@ pub fn spawn(cfg: &LaunchConfig, on_line: impl Fn(&str) + 'static) -> Result<Bac
         }
         glib::ControlFlow::Continue
     });
-    Ok(Backend { proc, pidfile: host_files.map(|(_, p)| p) })
+    Ok(Backend { proc, pidfile })
 }
 
 #[cfg(test)]
