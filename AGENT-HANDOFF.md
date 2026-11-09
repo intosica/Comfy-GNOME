@@ -1076,12 +1076,15 @@ visible, just as it is when doing this in a web browser on HTML. No placeholder 
 - **Cause**: a `GtkDragSource` whose only content provider is a value gets GTK's default drag icon, and for a string
   value that icon is a label with the payload text — which is exactly what session 28's `{"comfy_image": …}` payload
   put under the cursor. Nothing was wrong with the drop; the *icon* was the payload.
-- **Fix** (`src/workspace.rs`): `fn shown_texture(&gtk::Image) -> Option<gdk::Texture>` and
-  `pub(super) fn drag_icon(&gtk::DragSource, &gdk::Texture)` — `source.set_icon(Some(texture), w / 2, h / 2)`. Both
-  drag sources call it from inside `connect_prepare` (the only point where the icon may still be set), using the very
-  texture they already decoded for their thumbnail: queue rows pass `thumb.paintable()` (`src/workspace.rs` ~1481), MTB
-  tiles pass `cache.get(path)` (`src/workspace/media.rs` ~655). The icon is the picture at its natural size, centred on
-  the pointer — a browser drags an image the same way. No symbolic stand-in: a placeholder was ruled out explicitly.
+- **Fix** (`src/workspace.rs`): `pub(super) fn drag_icon(&gtk::DragSource, &gtk::Image)` wraps the *drawn thumbnail*
+  in a `gtk::WidgetPaintable` and calls `source.set_icon(Some(&paint), w / 2, h / 2)` — the ghost is therefore the
+  thumbnail at the size it appears on screen (44 px in a queue row, the cell size in the MTB grid), not the full
+  picture, so compositing stays cheap and the icon looks exactly like the tile it came from (rounded corners, card
+  background). Both drag sources call it from inside `connect_prepare` (the only point where the icon may still be
+  set): queue rows pass `thumb` (`src/workspace.rs` ~1481), MTB tiles pass their `gtk::Image` cell
+  (`src/workspace/media.rs`, `thumb_widget`). The first cut handed the raw texture to `set_icon`, which rendered the
+  picture at natural size (a 4 MP PNG became a 4 MP drag window); the director asked for the thumbnail's size and a
+  low-resolution render, hence the widget paintable. No symbolic stand-in: a placeholder was ruled out explicitly.
 - **Harness limitation (spent an hour on it, do not repeat)**: drops cannot be exercised on Xvfb at all. `GDK_DEBUG=dnd`
   shows `XdndEnter`/`XdndPosition` arriving and the destination answering `XdndStatus … action: 0`, with no
   `accept`/`motion`/`drop` on any `GtkDropTarget` — including one on `self.root` — and a 40-line **stock GTK4 app**
@@ -1090,5 +1093,5 @@ visible, just as it is when doing this in a web browser on HTML. No placeholder 
   headless display; verify ghost, payload and `[drop]` logic separately and leave the end-to-end drop to the director's
   real session.
 - The drag ghost **is** verifiable headlessly: press, move twice with ~1 s between, `scrot -o shot.png`, then release.
-  Verified that way at 512 px (a queue row's `harbour_00003_.png`, the grey meta PNG centred on the pointer) and at
-  natural size for an MTB tile (496×227 JPEG) — the picture, no text, no icon.
+  Verified that way: a queue row's `harbour_00003_.png` ghosts as its 44 px thumbnail, an MTB cell as its tile-sized
+  thumbnail, both centred on the pointer — the picture, no text, no icon, no full-resolution window.

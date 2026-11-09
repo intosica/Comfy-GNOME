@@ -598,6 +598,7 @@ impl Media {
         holder.set_valign(gtk::Align::Start);
         let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         let is_dir = path.is_dir();
+        let mut thumb_widget: Option<gtk::Image> = None;
         if is_dir {
             let ov = gtk::Overlay::new();
             ov.set_child(Some(&gtk::Box::new(gtk::Orientation::Vertical, 0)));
@@ -611,6 +612,7 @@ impl Media {
             // instead — and, unlike a `Gtk.ScrolledWindow`, it does not steal drag gestures from
             // the tile's `DragSource`.
             let pic = gtk::Image::builder().pixel_size(px).css_classes(["mtb-thumb"]).build();
+            thumb_widget = Some(pic.clone());
             if let Some(t) = self.cache.borrow().get(path) {
                 pic.set_paintable(Some(t));
             } else {
@@ -656,9 +658,8 @@ impl Media {
                 let paths = if me2.sel.borrow().contains(&p2) { me2.selected_paths() } else { vec![p2.clone()] };
                 let paths: Vec<String> = paths.iter().map(|p| p.to_string_lossy().into_owned()).collect();
                 let name = paths.first().map(|p| std::path::Path::new(p).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()).unwrap_or_default();
-                let tex = me2.cache.borrow().get(&p2).cloned();
-                if let Some(t) = tex {
-                    super::drag_icon(d, &t);
+                if let Some(t) = thumb_widget.as_ref() {
+                    super::drag_icon(d, t);
                 }
                 Some(gtk::gdk::ContentProvider::for_value(&super::image_drag_payload(&paths, &name, None).to_value()))
             });

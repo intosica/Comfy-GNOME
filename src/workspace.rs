@@ -207,17 +207,17 @@ fn image_drag_payload(paths: &[String], name: &str, query: Option<&str>) -> Stri
     serde_json::json!({IMAGE_DRAG_KEY: {"paths": paths, "name": name, "query": query}}).to_string()
 }
 
-/// The texture a picture widget is showing, once it has one.
-fn shown_texture(w: &gtk::Image) -> Option<gtk::gdk::Texture> {
-    w.paintable().and_then(|p| p.downcast::<gtk::gdk::Texture>().ok())
-}
-
-/// Drag icons are the picture itself, centred on the pointer — the way a browser shows the image
-/// under the cursor while you drag it. GTK's default icon for a string provider is a label with
-/// the payload's text, which is what the canvas payload would otherwise put on screen.
-pub(super) fn drag_icon(source: &gtk::DragSource, texture: &gtk::gdk::Texture) {
-    let (w, h) = (texture.intrinsic_width().max(1), texture.intrinsic_height().max(1));
-    source.set_icon(Some(texture), w / 2, h / 2);
+/// Drag icons are the thumbnail you grabbed, rendered at the size it is drawn on screen — a browser
+/// drags the element you picked, and a 44 px pixmap is far cheaper to composite than the full
+/// picture. Painting the drawn widget itself keeps the icon identical to its source (rounded
+/// corners, card background) and needs no per-widget special case. Centred on the pointer.
+pub(super) fn drag_icon(source: &gtk::DragSource, thumb: &gtk::Image) {
+    let paint = gtk::WidgetPaintable::new(Some(thumb));
+    let (w, h) = (paint.intrinsic_width().max(0), paint.intrinsic_height().max(0));
+    if w < 8 || h < 8 {
+        return; // not laid out yet: leave GTK's own icon rather than guess a size
+    }
+    source.set_icon(Some(&paint), w / 2, h / 2);
 }
 
 struct ImageDrag {
@@ -1496,9 +1496,7 @@ impl Workspace {
                 let (n, q) = (img.filename.clone(), img.query());
                 let thumb2 = thumb.clone();
                 drag.connect_prepare(move |d, _, _| {
-                    if let Some(t) = shown_texture(&thumb2) {
-                        drag_icon(d, &t);
-                    }
+                    drag_icon(d, &thumb2);
                     Some(gtk::gdk::ContentProvider::for_value(&image_drag_payload(&[], &n, Some(&q)).to_value()))
                 });
                 row.add_controller(drag);
