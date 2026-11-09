@@ -951,6 +951,9 @@ impl Canvas {
             let drag = gtk::GestureDrag::builder().button(gdk::BUTTON_PRIMARY).build();
             let (st, area, change) = (self.state.clone(), self.area.clone(), self.on_change.clone());
             drag.connect_drag_begin(move |g, x, y| {
+                // Take keyboard focus from the side panels: an entry there commits on
+                // focus-out, and Delete/Ctrl+S must reach the canvas again.
+                area.grab_focus();
                 let shift = g
                     .current_event()
                     .map(|e| e.modifier_state().contains(gdk::ModifierType::SHIFT_MASK))

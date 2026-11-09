@@ -529,6 +529,15 @@ pub fn subgraph_advanced_widgets(wf: &Workflow, host: &workflow::Node, reg: &Reg
     out
 }
 
+/// `p:<inner>:<idx>` row of subgraph type `sg` → (inner node id, widget name).
+pub fn interior_slot(wf: &Workflow, sg: &str, key: &str, reg: &Registry) -> Option<(String, String)> {
+    let (inner_id, idx) = key.strip_prefix("p:")?.split_once(':')?;
+    let idx: usize = idx.parse().ok()?;
+    let inner = wf.subgraphs.get(sg)?.graph.node(inner_id)?;
+    let s = prompt::widget_slots(inner, reg.get(&inner.ty)?).into_iter().find(|s| s.idx == idx)?;
+    Some((inner_id.to_owned(), s.name))
+}
+
 /// Image BBox Layout keeps its picture, boxes and mask in hidden widgets; the web
 /// extension draws an upload button, a preview with the boxes and an editor instead.
 /// Slots by name, so a reordered node definition still lines up.

@@ -733,6 +733,10 @@ impl Workspace {
             .sync_create()
             .build();
         {
+            let ps = panel_split.clone();
+            panel.close.connect_clicked(move |_| ps.set_show_sidebar(false));
+        }
+        {
             let drag = gtk::GestureDrag::new();
             let (sp2, tg, hd) = (split.clone(), toggle.clone(), handle.clone());
             drag.connect_drag_update(move |g, dx, _| {
@@ -2716,7 +2720,12 @@ impl Workspace {
 
     /// Expose an inner widget as a subgraph input (frontend "Show input"). Every instance
     /// of the subgraph grows the socket, because the tab path names no single instance.
-    fn promote_widget(&self, doc: &DocRef, sg: &str, node: &str, widget: &str, seed: Value) {
+    fn promote_widget(&self, doc: &DocRef, host: &str, sg: &str, node: &str, widget: &str, seed: Value) {
+        if self.append_proxy(doc, host, node, widget) {
+            self.append_log(&format!("[subgraph] shown input \"{widget}\""));
+            self.edited(doc);
+            return;
+        }
         let ty = self.promote_ty(doc, sg, node, widget, &seed);
         let res = {
             let mut d = doc.borrow_mut();
@@ -2744,41 +2753,59 @@ impl Workspace {
         }
     }
 
-    /// Show every promotable inner widget of the subgraph instance `host`.
+    /// Show every promotable inner widget of the subgraph instance `host` (the panel's
+    /// HIDDEN list: not promoted, legacy proxy or modern, and not wired inside).
     fn show_all_inputs(&self, doc: &DocRef, host: &str) {
-        let seeds: Vec<(String, String, Value)> = {
+        let (ty, seeds): (String, Vec<(String, String, Value)>) = {
             let d = doc.borrow();
             let Some(node) = graph_ref(&d).nodes.iter().find(|n| n.id == host) else { return };
-            let Some(sg) = d.wf.subgraphs.get(&node.ty) else { return };
-            let shown: Vec<&str> = node.inputs.iter().filter(|i| i.widget.is_some()).map(|i| i.name.as_str()).collect();
             let reg = self.registry.borrow();
-            let mut out = Vec::new();
-            for inner in &sg.graph.nodes {
-                let Some(def) = reg.get(&inner.ty) else { continue };
-                for s in prompt::widget_slots(inner, def).into_iter().filter(|s| s.role == prompt::Role::Value) {
-                    if inner.inputs.iter().any(|i| i.widget.as_deref() == Some(s.name.as_str()) && i.link.is_some()) {
-                        continue;
-                    }
-                    if shown.contains(&s.name.as_str()) {
-                        continue;
-                    }
-                    out.push((inner.id.clone(), s.name.clone(), s.value.clone()));
-                }
+            let seeds = graph_view::subgraph_advanced_widgets(&d.wf, node, &reg)
+                .into_iter()
+                .filter_map(|w| {
+                    let (inner, name) = graph_view::interior_slot(&d.wf, &node.ty, &w.key, &reg)?;
+                    Some((inner, name, w.value))
+                })
+                .collect();
+            (node.ty.clone(), seeds)
+        };
+        for (node, widget, seed) in seeds {
+            if self.append_proxy(doc, host, &node, &widget) {
+                continue;
             }
-            out
-        };
-        let ty = {
-            let d = doc.borrow();
-            graph_ref(&d).nodes.iter().find(|n| n.id == host).map(|n| n.ty.clone())
-        };
-        let Some(ty) = ty else { return };
-        let types: Vec<String> = seeds.iter().map(|(node, widget, seed)| self.promote_ty(doc, &ty, node, widget, seed)).collect();
+            let socket = self.promote_ty(doc, &ty, &node, &widget, &seed);
+            if let Err(e) = doc.borrow_mut().wf.promote(&ty, &node, &widget, &socket, seed) {
+                self.append_log(&format!("[subgraph] {e}"));
+            }
+        }
+        self.edited(doc);
+    }
+
+    /// On an instance still listing its promotions in legacy `properties.proxyWidgets`,
+    /// promote by appending there. 1.60 turns that list into subgraph inputs on load, in
+    /// list order after the existing ones, so a new real input would jump ahead of the
+    /// proxies; the appended entry lands last, as in the web. False: no legacy list.
+    fn append_proxy(&self, doc: &DocRef, host: &str, inner: &str, widget: &str) -> bool {
+        let mut d = doc.borrow_mut();
+        let Some(n) = graph_mut(&mut d).nodes.iter_mut().find(|n| n.id == host) else { return false };
+        let Some(list) = n.properties.get_mut("proxyWidgets").and_then(Value::as_array_mut) else { return false };
+        // `$$` entries are preview exposures: they don't make the instance a legacy one.
+        if !list.iter().any(|p| p[1].as_str().is_some_and(|w| !w.starts_with("$$"))) {
+            return false;
+        }
+        if !list.iter().any(|p| p[0].as_str() == Some(inner) && p[1].as_str() == Some(widget)) {
+            list.push(serde_json::json!([inner, widget]));
+        }
+        true
+    }
+
+    /// Drop a legacy `properties.proxyWidgets` entry of the instance `host`.
+    fn demote_proxy(&self, doc: &DocRef, host: &str, inner: &str, widget: &str) {
         {
             let mut d = doc.borrow_mut();
-            for ((node, widget, seed), socket) in seeds.into_iter().zip(types) {
-                if let Err(e) = d.wf.promote(&ty, &node, &widget, &socket, seed) {
-                    self.append_log(&format!("[subgraph] {e}"));
-                }
+            let Some(n) = graph_mut(&mut d).nodes.iter_mut().find(|n| n.id == host) else { return };
+            if let Some(list) = n.properties.get_mut("proxyWidgets").and_then(Value::as_array_mut) {
+                list.retain(|p| !(p[0].as_str() == Some(inner) && p[1].as_str() == Some(widget)));
             }
         }
         self.edited(doc);
@@ -2816,6 +2843,12 @@ impl Workspace {
         };
         {
             let mut d = doc.borrow_mut();
+            // Legacy proxies too; `$$` entries are preview exposures, not widgets.
+            if let Some(n) = graph_mut(&mut d).nodes.iter_mut().find(|n| n.id == host) {
+                if let Some(list) = n.properties.get_mut("proxyWidgets").and_then(Value::as_array_mut) {
+                    list.retain(|p| p[1].as_str().is_some_and(|w| w.starts_with("$$")));
+                }
+            }
             for name in names {
                 let at = d.wf.subgraphs.get(&ty).and_then(|s| s.inputs.iter().position(|i| i.name == name));
                 if let Some(at) = at {

@@ -401,6 +401,20 @@ fn write_graph(s: &mut Value, g: &Graph, object_links: bool) {
                 }
             }
         }
+        for (k, v) in [("color", &n.color), ("bgcolor", &n.bgcolor)] {
+            match v {
+                Some(c) => nv[k] = Value::from(c.as_str()),
+                None => {
+                    if let Some(o) = nv.as_object_mut() {
+                        o.remove(k);
+                    }
+                }
+            }
+        }
+        // The panel edits `proxyWidgets`; untouched nodes keep their stored object.
+        if !n.properties.is_null() && nv["properties"] != n.properties {
+            nv["properties"] = n.properties.clone();
+        }
         if n.collapsed {
             nv["flags"]["collapsed"] = Value::Bool(true);
         } else if nv["flags"]["collapsed"].as_bool() == Some(true) {
@@ -796,6 +810,24 @@ mod tests {
 
     /// The web saves widget-only nodes without their input sockets, so promotion has to
     /// create the socket it links to (otherwise "Show input" only worked on re-promoted rows).
+    #[test]
+    fn to_json_writes_panel_color_and_properties() {
+        let src = r##"{"version":0.4,"nodes":[
+            {"id":1,"type":"A","pos":[0,0],"size":[100,50],"inputs":[],"outputs":[],"color":"#322","bgcolor":"#533"},
+            {"id":2,"type":"B","pos":[0,0],"size":[100,50],"inputs":[],"outputs":[],"properties":{"k":1}}],
+            "links":[],"groups":[]}"##;
+        let mut wf = Workflow::from_str(src).expect("parse");
+        wf.root.nodes[0].color = None;
+        wf.root.nodes[0].bgcolor = None;
+        wf.root.nodes[1].color = Some("#223".into());
+        wf.root.nodes[1].properties["k"] = serde_json::json!(2);
+        let out = wf.to_json();
+        let n = out["nodes"].as_array().unwrap();
+        assert!(n[0].get("color").is_none() && n[0].get("bgcolor").is_none());
+        assert_eq!(n[1]["color"], "#223");
+        assert_eq!(n[1]["properties"]["k"], 2);
+    }
+
     #[test]
     fn promote_creates_the_missing_widget_socket() {
         let src = r##"{"version":0.4,"nodes":[{"id":1,"type":"sg-1","pos":[0,0],"size":[200,100],
