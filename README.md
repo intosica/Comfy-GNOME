@@ -6,7 +6,7 @@
 
 <p align="center">A native GTK4 / libadwaita frontend for <a href="https://github.com/comfyanonymous/ComfyUI">ComfyUI</a>, written in Rust.</p>
 
-<p align="center"><b>0.2.0-beta.1</b> — beta: fixes and features land fast, saved workflows stay compatible.
+<p align="center"><b>0.2.0-beta.2</b> — beta: fixes and features land fast, saved workflows stay compatible.
 See <a href="CHANGELOG.md">CHANGELOG.md</a>.</p>
 
 <p align="center"><img src="docs/screenshots/graph.png" alt="Comfy-GNOME editing a workflow"></p>

@@ -8,6 +8,10 @@ version that promises stability.
 
 ## [Unreleased]
 
+## [0.2.0-beta.2] — 2026-11-09
+
+Palettes, lightbox captions and the Settings dialog, on top of the properties panel.
+
 ### Added
 
 - **Color palettes** — Settings → Appearance → *Color Palette* lists the frontend's Dark, Light, Solarized, Arc, Nord and
@@ -80,4 +84,5 @@ backend's media, queue, templates and settings.
   day groups and thumbnails, image lightbox, live TAESD / Latent2RGB previews and a progress strip.
 - Templates, backend-driven Settings, faithful saving (an untouched workflow round-trips byte-identically).
 
+[0.2.0-beta.2]: https://github.com/intosica/Comfy-GNOME/releases/tag/v0.2.0-beta.2
 [0.2.0-beta.1]: https://github.com/intosica/Comfy-GNOME/releases/tag/v0.2.0-beta.1
