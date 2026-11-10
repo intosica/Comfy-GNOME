@@ -795,7 +795,7 @@ app.registerExtension({
     #[test]
     #[ignore]
     fn live_categories() {
-        let c = Client::new("127.0.0.1", 8188);
+        let c = Client::new("127.0.0.1", std::env::var("COMFY_PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(8188));
         let t = std::time::Instant::now();
         let cat = catalog(&c);
         let values = c.settings().unwrap_or_default();

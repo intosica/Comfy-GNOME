@@ -25,8 +25,9 @@ version that promises stability.
 
 ### Fixed
 
-- Settings opened while the backend was still connecting stayed on "Loading…" forever; the dialog now lists the stored
-  state at once and reloads with the real definitions as soon as the backend answers.
+- Settings opened before the backend connected never got its APPLICATION SETTINGS (first "Loading…" forever, then an
+  empty list): closing hides the window and reopening re-presented that stale copy. The dialog now waits for the
+  backend and fills itself in, hidden or not.
 - Settings could sit on "Loading…" forever: a panic in the definition scan (or a stalled backend) is now contained —
   a bad file is skipped, fetching has a 30 s budget, and a failed scan falls back to the stored keys with an error in the footer.
 - Settings showed placeholder string names for core settings: the definition scan skipped the frontend chunk

@@ -8,7 +8,6 @@
 //! `POST /api/settings/{key}` runs in a worker and the footer reports the outcome.
 
 use super::Workspace;
-use crate::api;
 use crate::settings_defs::{self, category_label, plain, Catalog, SettingDef};
 use adw::prelude::*;
 use serde_json::Value;
@@ -42,7 +41,6 @@ struct Dlg {
     values: RefCell<BTreeMap<String, Value>>,
     /// Definitions merged with the stored keys; None while loading.
     cat: RefCell<Option<Rc<Catalog>>>,
-    client: Option<api::Client>,
     /// Workspace, so a snap setting takes effect without a reconnect.
     ws: Workspace,
     /// One entry per nav row; `None` for captions.
@@ -70,7 +68,6 @@ pub(super) fn open(ws: &Workspace) {
         win.present();
         return;
     }
-    let client = ws.client.borrow().clone();
     install_css();
 
     let win = adw::Window::builder().title("Settings").default_width(1040).default_height(780).build();
@@ -153,7 +150,6 @@ pub(super) fn open(ws: &Workspace) {
         search: search.clone(),
         values: RefCell::new(BTreeMap::new()),
         cat: RefCell::new(None),
-        client: client.clone(),
         ws: ws.clone(),
         pages: RefCell::new(Vec::new()),
         current: RefCell::new(Page::User),
@@ -187,28 +183,22 @@ pub(super) fn open(ws: &Workspace) {
     OPEN.with(|o| *o.borrow_mut() = Some(win.downgrade()));
 
     // Definitions (cached after the first scan) + current values, off the main thread.
-    let Some(c) = client else {
-        // Without this the nav keeps its "Loading…" spinner forever.
-        dlg.status.set_text("Not connected to a backend.");
-        dlg.cat.replace(Some(Rc::new(settings_defs::merge(&Catalog::default(), &BTreeMap::new()))));
-        fill_nav(&dlg);
-        // Backend still starting: reopen with real data once it answers.
-        let (ws, weak) = (ws.clone(), win.downgrade());
-        gtk::glib::spawn_future_local(async move {
-            while ws.client.borrow().is_none() {
-                gtk::glib::timeout_future(std::time::Duration::from_secs(1)).await;
-                if weak.upgrade().is_none_or(|w| !w.is_visible()) {
-                    return;
-                }
-            }
-            close_open();
-            OPEN.with(|o| *o.borrow_mut() = None);
-            open(&ws);
-        });
-        return;
-    };
-    dlg.status.set_text("Loading settings…");
+    // Opened before the backend connects: wait for it. The window is a singleton that is
+    // hidden, not destroyed, so this must fill *this* dialog even while it is hidden;
+    // reopening later just presents it again.
+    let (ws, weak) = (ws.clone(), win.downgrade());
     gtk::glib::spawn_future_local(async move {
+        let c = loop {
+            if let Some(c) = ws.client.borrow().clone() {
+                break c;
+            }
+            dlg.status.set_text("Not connected to a backend yet; settings load when it answers.");
+            gtk::glib::timeout_future(std::time::Duration::from_secs(1)).await;
+            if weak.upgrade().is_none() {
+                return;
+            }
+        };
+        dlg.status.set_text("Loading settings…");
         let res = gtk::gio::spawn_blocking(move || {
             let cat = settings_defs::catalog(&c);
             let values = c.settings();
@@ -527,7 +517,7 @@ fn commit(d: &Rc<Dlg>, key: &str, v: Value) {
         drop(values);
         d.ws.set_snap(always, grid);
     }
-    let Some(c) = d.client.clone() else { return };
+    let Some(c) = d.ws.client.borrow().clone() else { return };
     let (k, status) = (key.to_owned(), d.status.clone());
     let key = k.clone();
     gtk::glib::spawn_future_local(async move {
@@ -703,7 +693,7 @@ fn caption_row(d: &Rc<Dlg>, g: &adw::PreferencesGroup) {
 
 fn about(d: &Rc<Dlg>) {
     title(d, "About");
-    let backend = d.client.as_ref().map(|c| c.base_url().to_owned()).unwrap_or_else(|| "not connected".into());
+    let backend = d.ws.client.borrow().as_ref().map(|c| c.base_url().to_owned()).unwrap_or_else(|| "not connected".into());
     let ver = d.values.borrow().get("Comfy.InstalledVersion").and_then(Value::as_str).unwrap_or("?").to_owned();
     let pkgs = [("Comfy-GNOME", env!("CARGO_PKG_VERSION").to_owned()), ("ComfyUI backend", format!("{ver} — {backend}")), ("GTK", format!("{}.{}.{}", gtk::major_version(), gtk::minor_version(), gtk::micro_version())), ("Node types", d.nodes.to_string())];
     let g = group(d, "");
