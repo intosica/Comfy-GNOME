@@ -937,6 +937,7 @@ pub fn scene(
             collapsed: n.collapsed,
             pinned: n.pinned,
             subgraph: wf.subgraphs.contains_key(&n.ty),
+            shape: n.shape,
             ..Node::default()
         };
         // A widget sits on the socket whose name it carries, so its dot is on that row.
@@ -1403,6 +1404,7 @@ mod tests {
             bgcolor: None,
             collapsed: false,
             pinned: false,
+            shape: 0,
         };
         let lora = "Select the LoRA to add to the text";
         n.widgets_values[1] = json!("MOSS/x.safetensors");

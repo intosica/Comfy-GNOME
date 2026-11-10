@@ -26,6 +26,8 @@ thread_local! {
 enum Page {
     User,
     Cat(String),
+    /// Our own settings (Comfy-GNOME section), listed right after "Comfy".
+    Gnome,
     Keybinding,
     Extension,
     About,
@@ -258,6 +260,12 @@ fn fill_nav(d: &Rc<Dlg>) {
         Some(cat) => {
             for c in &cat.categories {
                 item(d, category_label(c), cat_icon(c), Page::Cat(c.clone()));
+                if c == "Comfy" {
+                    item(d, "Comfy-GNOME", "cg-comfy-gnome-symbolic", Page::Gnome);
+                }
+            }
+            if !cat.categories.iter().any(|c| c == "Comfy") {
+                item(d, "Comfy-GNOME", "cg-comfy-gnome-symbolic", Page::Gnome);
             }
         }
         None => {
@@ -343,6 +351,14 @@ fn show(d: &Rc<Dlg>, page: &Page) {
         Page::User => user(d),
         Page::Keybinding => keybindings(d),
         Page::About => about(d),
+        Page::Gnome => {
+            title(d, "Comfy-GNOME");
+            let g = group(d, "Editing");
+            text_editor_row(d, &g);
+            caption_row(d, &g);
+            let g = group(d, "Sidebar");
+            side_theme_row(d, &g);
+        }
         Page::Extension => match cat {
             Some(cat) => extensions(d, &cat),
             None => loading(d, "Extension"),
@@ -351,9 +367,6 @@ fn show(d: &Rc<Dlg>, page: &Page) {
             title(d, category_label(c));
             if c == "Appearance" {
                 palette_row(d);
-                let g = group(d, "Comfy-GNOME");
-                text_editor_row(d, &g);
-                caption_row(d, &g);
             }
             let Some(cat) = cat else { return loading(d, "") };
             let defs: Vec<&SettingDef> = cat.defs.iter().filter(|s| s.category() == c && !OURS.contains(&s.id.as_str())).collect();
@@ -504,6 +517,9 @@ fn commit(d: &Rc<Dlg>, key: &str, v: Value) {
     if key == CAPTION {
         set_caption_above(v.as_str() == Some("above"));
     }
+    if key == SIDE_THEME {
+        d.ws.set_side_themed(v.as_bool().unwrap_or(false));
+    }
     if key == TEXT_EDITOR {
         crate::canvas::widgets::set_inline_text(v.as_str() == Some("inline"));
     }
@@ -617,6 +633,9 @@ pub const TEXT_EDITOR: &str = "ComfyGNOME.TextEditor";
 /// Server setting: where the image preview's "name - 1/3" line sits, `"below"` (default) or `"above"`.
 pub const CAPTION: &str = "ComfyGNOME.PreviewCaption";
 
+/// Server setting: `true` paints the left sidebar in the palette's menu colours.
+pub const SIDE_THEME: &str = "ComfyGNOME.SidebarTheme";
+
 thread_local!(static CAPTION_ABOVE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) });
 pub fn set_caption_above(on: bool) {
     CAPTION_ABOVE.with(|c| c.set(on));
@@ -688,6 +707,18 @@ fn caption_row(d: &Rc<Dlg>, g: &adw::PreferencesGroup) {
         .build();
     let d = d.clone();
     r.connect_selected_notify(move |c| commit(&d, CAPTION, Value::from(if c.selected() == 1 { "above" } else { "below" })));
+    g.add(&r);
+}
+
+fn side_theme_row(d: &Rc<Dlg>, g: &adw::PreferencesGroup) {
+    let r = adw::ComboRow::builder()
+        .title("Left sidebar colour")
+        .subtitle("Theme: the colour palette's menu colour. Original: the default GNOME look")
+        .model(&gtk::StringList::new(&["Original", "Theme"]))
+        .selected(d.ws.side_themed() as u32)
+        .build();
+    let d = d.clone();
+    r.connect_selected_notify(move |c| commit(&d, SIDE_THEME, Value::Bool(c.selected() == 1)));
     g.add(&r);
 }
 

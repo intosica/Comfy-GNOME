@@ -38,7 +38,7 @@ struct Ui {
     doc: DocRef,
     pos: (f64, f64),
     link: Option<Link>,
-    dlg: gtk::Window,
+    dlg: Rc<dyn Fn()>,
     st: RefCell<St>,
     entry: gtk::Text,
     applied: gtk::Box,
@@ -282,7 +282,7 @@ impl Ui {
                 self.ws.connect_new(&self.doc, &new_id, req);
             }
         }
-        self.dlg.close();
+        (self.dlg)();
     }
 }
 
@@ -470,9 +470,33 @@ fn type_filter(ui: &Rc<Ui>, kind: FilterKind) -> gtk::MenuButton {
 
 impl Workspace {
     pub(super) fn add_node_dialog(&self, doc: &DocRef, pos: (f64, f64), link: Option<Link>) {
-        let Some(win) = self.root.root().and_downcast::<gtk::Window>() else { return };
-        let dlg = gtk::Window::builder().transient_for(&win).modal(true).decorated(false).default_width(880).default_height(660).build();
-        dlg.add_css_class("addnode");
+        // An in-window card over a dark scrim (not a modal window): a click on the scrim, the
+        // canvas around the card, closes it like the web's NodeSearchBoxPopover.
+        let Some(host) = self.root.ancestor(gtk::Overlay::static_type()).and_downcast::<gtk::Overlay>() else { return };
+        let scrim = gtk::Box::builder().css_classes(["cg-scrim-light"]).hexpand(true).vexpand(true).build();
+        let card = gtk::Box::builder().css_classes(["addnode", "background"]).halign(gtk::Align::Center).valign(gtk::Align::Center)
+            .width_request(880).height_request(660).overflow(gtk::Overflow::Hidden).build();
+        scrim.append(&card);
+        let dlg: Rc<dyn Fn()> = {
+            let (host, scrim, canvas) = (host.clone(), scrim.clone(), doc.borrow().canvas.area.clone());
+            Rc::new(move || {
+                if scrim.parent().is_some() {
+                    host.remove_overlay(&scrim);
+                    canvas.grab_focus();
+                }
+            })
+        };
+        let click = gtk::GestureClick::new();
+        {
+            let (dlg, card) = (dlg.clone(), card.clone());
+            click.connect_pressed(move |g, _, x, y| {
+                let Some(w) = g.widget() else { return };
+                if !w.pick(x, y, gtk::PickFlags::DEFAULT).is_some_and(|p| p == card || p.is_ancestor(&card)) {
+                    dlg();
+                }
+            });
+        }
+        scrim.add_controller(click);
 
         // Input row: applied filter chips + text box.
         let applied = gtk::Box::new(gtk::Orientation::Horizontal, 6);
@@ -536,7 +560,8 @@ impl Workspace {
         root.append(&bar);
         root.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
         root.append(&body);
-        dlg.set_child(Some(&root));
+        root.set_hexpand(true);
+        card.append(&root);
 
         let mut c = Content::default();
         // NodeSearchBoxPopover.showNewSearchBox: a dragged-out link pre-applies a type filter.
@@ -616,16 +641,16 @@ impl Workspace {
                 match key {
                     gtk::gdk::Key::Down => ui.select(i + 1),
                     gtk::gdk::Key::Up => ui.select(i.saturating_sub(1)),
-                    gtk::gdk::Key::Escape => dlg.close(),
+                    gtk::gdk::Key::Escape => dlg(),
                     _ => return gtk::glib::Propagation::Proceed,
                 }
                 gtk::glib::Propagation::Stop
             });
         }
-        dlg.add_controller(keys);
+        scrim.add_controller(keys);
 
         ui.refresh();
-        dlg.present();
+        host.add_overlay(&scrim);
         entry.grab_focus();
     }
 }

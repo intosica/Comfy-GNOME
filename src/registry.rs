@@ -82,6 +82,8 @@ pub struct NodeDef {
     pub dev_only: bool,
     /// Partner/API node (`api_node`): shown under the Partner filter.
     pub api_node: bool,
+    /// `output_node`: a sink the backend executes for its side effect (Save/Preview…).
+    pub output_node: bool,
     /// Slot types the node can take / produce, incl. dynamic controls (see `nodesearch::slot_types`).
     pub input_types: Vec<String>,
     pub output_types: Vec<String>,
@@ -208,6 +210,7 @@ fn parse_node(key: &str, d: &Value) -> Option<NodeDef> {
         search_aliases: d["search_aliases"].as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_owned)).collect()).unwrap_or_default(),
         dev_only: d["dev_only"].as_bool().unwrap_or(false),
         api_node: d["api_node"].as_bool().unwrap_or(false),
+        output_node: d["output_node"].as_bool().unwrap_or(false),
         input_types: crate::nodesearch::slot_types::input_types(d),
         output_types: crate::nodesearch::slot_types::output_types(d),
     })

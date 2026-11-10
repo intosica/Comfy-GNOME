@@ -23,6 +23,8 @@ pub struct Workspace {
     wf_list: gtk::ListBox,
     /// Sidebar row index → workflow file path (rows never reorder, only hide).
     files: Rc<RefCell<Vec<String>>>,
+    /// Expanded workflow folders (relative paths).
+    wf_open: Rc<RefCell<std::collections::HashSet<String>>>,
     crumbs: gtk::Box,
     back: gtk::Button,
     queue_list: gtk::ListBox,
@@ -89,6 +91,7 @@ mod addnode;
 mod ere;
 mod library;
 mod masking;
+mod menus;
 mod media;
 mod panel;
 mod reaper;
@@ -96,6 +99,8 @@ mod session;
 mod settings;
 mod templates;
 mod tabmenu;
+
+use menus::{danger, item, item_i, Entry};
 
 type DocRef = Rc<RefCell<Doc>>;
 
@@ -160,6 +165,21 @@ fn snapshot(wf: &workflow::Workflow) -> Value {
 
 /// Title text of a workflow row. libadwaita < 1.6 makes `AdwActionRow` a `GtkListBoxRow`
 /// itself, so the title can live on the row or on its child — handle both.
+/// Swap a folder row's chevron icon (the one image showing a pan-* icon).
+fn set_chevron(w: &gtk::Widget, open: bool) {
+    let mut c = w.first_child();
+    while let Some(ch) = c {
+        if let Some(img) = ch.downcast_ref::<gtk::Image>() {
+            if img.icon_name().is_some_and(|n| n.starts_with("cg-lucide-chevron-")) {
+                img.set_icon_name(Some(if open { "cg-lucide-chevron-down-symbolic" } else { "cg-lucide-chevron-right-symbolic" }));
+                return;
+            }
+        }
+        set_chevron(&ch, open);
+        c = ch.next_sibling();
+    }
+}
+
 fn row_title(row: &gtk::ListBoxRow) -> String {
     if let Some(r) = row.downcast_ref::<adw::ActionRow>() {
         return r.title().to_string();
@@ -180,25 +200,6 @@ fn graph_mut(d: &mut Doc) -> &mut workflow::Graph {
 }
 
 /// One row of a context menu: a button, a separator, or a row of colour swatches.
-enum Entry {
-    Item { label: String, danger: bool, enabled: bool, icon: Option<&'static str>, f: Box<dyn Fn()> },
-    Line,
-    Swatches(Vec<(u32, Box<dyn Fn()>)>),
-}
-
-fn item(label: impl Into<String>, f: impl Fn() + 'static) -> Entry {
-    Entry::Item { label: label.into(), danger: false, enabled: true, icon: None, f: Box::new(f) }
-}
-
-/// Menu item with an icon, optionally greyed out.
-fn item_i(icon: &'static str, label: impl Into<String>, enabled: bool, f: impl Fn() + 'static) -> Entry {
-    Entry::Item { label: label.into(), danger: false, enabled, icon: Some(icon), f: Box::new(f) }
-}
-
-fn danger(label: impl Into<String>, f: impl Fn() + 'static) -> Entry {
-    Entry::Item { label: label.into(), danger: true, enabled: true, icon: None, f: Box::new(f) }
-}
-
 /// In-app picture drag payload. Pictures in the queue and in the MTB browser live on the backend
 /// (which may be remote), so the drag carries the `/view` query and the canvas fetches the bytes —
 /// the same path a local file takes once it is read off disk.
@@ -285,6 +286,8 @@ fn load_css() {
     let css = gtk::CssProvider::new();
     css.load_from_string(
         ".queue-thumb { border-radius: 6px; }
+         popover.cg-menu > contents { padding: 0; }
+         button.cg-menu-row { font-weight: normal; min-height: 30px; padding: 2px 4px; }
          textview.prompt-editor, textview.prompt-editor text { font-size: 11.5pt; }
          popover.prompt-popover > contents { padding: 8px; }
          scrolledwindow.inline-editor { border-radius: 4px; box-shadow: 0 0 0 2px @accent_bg_color; background: #151515; }
@@ -293,7 +296,8 @@ fn load_css() {
          box.mtb-thumb, window.mtb-thumb { border-radius: 4px; }
          box.mtb-tile { padding: 4px; border-radius: 8px; }
          box.mtb-tile.mtb-selected { background: alpha(@accent_bg_color, 0.32); box-shadow: inset 0 0 0 2px @accent_bg_color; }
-         window.addnode { border-radius: 12px; border: 1px solid @borders; }
+         box.addnode { border-radius: 12px; border: 1px solid @borders; box-shadow: 0 8px 32px rgba(0,0,0,0.5); }
+         .cg-scrim-light { background: rgba(0,0,0,0.45); }
          text.ns-input, .ns-input { font-size: 1.05em; }
          button.ns-chip { border-radius: 999px; padding: 3px 12px; min-height: 0; background: alpha(@window_fg_color, 0.08); font-size: 0.92em; }
          button.ns-chip.active { background: @window_fg_color; color: @window_bg_color; }
@@ -363,6 +367,15 @@ fn load_css() {
 }
 
 impl Workspace {
+    /// Left sidebar in the palette's menu colours (`true`) or libadwaita's own grey (`false`).
+    pub(crate) fn set_side_themed(&self, on: bool) {
+        if on { self.root.add_css_class("cg-side-themed") } else { self.root.remove_css_class("cg-side-themed") }
+    }
+
+    pub(crate) fn side_themed(&self) -> bool {
+        self.root.has_css_class("cg-side-themed")
+    }
+
     pub fn new() -> Self {
         load_css();
         // Sidebar ----------------------------------------------------------------
@@ -387,13 +400,33 @@ impl Workspace {
         wf_page.append(&wf_bar);
         wf_page.append(&wf_scroller);
         // ponytail: client-side filter only; server-side search once lists get huge.
+        // Folder tree: rows are "dir:<path>" folders or plain file paths; a row shows when
+        // every ancestor folder is open. Searching flattens to matching files.
+        let wf_open: Rc<RefCell<std::collections::HashSet<String>>> = Rc::default();
         {
+            let q: Rc<RefCell<String>> = Rc::default();
+            let (q2, open) = (q.clone(), wf_open.clone());
+            wf_list.set_filter_func(move |row| {
+                let name = row.widget_name();
+                let q = q2.borrow();
+                let (path, dir) = match name.strip_prefix("dir:") { Some(p) => (p, true), None => (name.as_str(), false) };
+                if !q.is_empty() {
+                    return !dir && row_title(row).to_lowercase().contains(q.as_str());
+                }
+                let open = open.borrow();
+                let mut cur = String::new();
+                let mut parts: Vec<&str> = path.split('/').collect();
+                parts.pop();
+                parts.iter().all(|p| {
+                    if !cur.is_empty() { cur.push('/') }
+                    cur.push_str(p);
+                    open.contains(&cur)
+                })
+            });
             let list = wf_list.clone();
             search.connect_search_changed(move |e| {
-                let q = e.text().to_lowercase();
-                list.set_filter_func(move |row| {
-                    q.is_empty() || row_title(row).to_lowercase().contains(&q)
-                });
+                *q.borrow_mut() = e.text().to_lowercase();
+                list.invalidate_filter();
             });
         }
         side_stack.add_titled_with_icon(&wf_page, Some("workflows"), "Workflows", "cg-folder-symbolic");
@@ -684,22 +717,28 @@ impl Workspace {
         let handle = gtk::Box::builder().width_request(6).cursor(&gtk::gdk::Cursor::from_name("col-resize", None).unwrap()).build();
         handle.add_css_class("sidebar-handle");
         let side_box = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        side_box.add_css_class("cg-side");
         side_tb.set_hexpand(true);
         side_box.append(&side_tb);
         side_box.append(&handle);
-        // Size classes: the sidebar squeezes its padding/fonts in steps as it narrows.
+        // Size classes: the sidebar squeezes its padding/fonts in steps as it narrows. Steps
+        // carry 12 px of hysteresis, so a width hovering on a threshold does not flap between
+        // the two layouts (which reads as jitter while dragging).
         let last = Cell::new(i32::MAX);
-        let (r1, r2) = (reload.clone(), q_reload.clone());
+        let (r1, r2, s1) = (reload.clone(), q_reload.clone(), search.clone());
         side_box.add_tick_callback(move |b, _| {
             let w = b.width();
             if w != last.get() {
                 last.set(w);
-                // The least useful buttons give way first.
+                let at = |c: &str, lo: i32| if b.has_css_class(c) { w < lo + 12 } else { w < lo };
+                for (c, lo) in [("side-s", 300), ("side-xs", 230)] {
+                    if at(c, lo) { b.add_css_class(c) } else { b.remove_css_class(c) }
+                }
+                // The least useful controls give way first; the search field is unusable
+                // once the bar is a rail, so it goes last (below the compact classes).
                 r1.set_visible(w >= 230);
                 r2.set_visible(w >= 230);
-                for (c, on) in [("side-s", w < 300), ("side-xs", w < 230)] {
-                    if on { b.add_css_class(c) } else { b.remove_css_class(c) }
-                }
+                s1.set_visible(w >= 200);
             }
             gtk::glib::ControlFlow::Continue
         });
@@ -710,7 +749,7 @@ impl Workspace {
             // Four stacked pages need ~270 px for the switcher to stay clickable. The
             // default max (280sp) froze the sidebar at one width; raise it so the panel
             // grows with the window and MTB/Queue/Workflows get the extra rows/columns.
-            .min_sidebar_width(240.0)
+            .min_sidebar_width(160.0)
             .max_sidebar_width(620.0)
             .sidebar_width_fraction(0.34)
             .build();
@@ -745,17 +784,17 @@ impl Workspace {
                 let Some((sx, sy)) = g.start_point() else { return };
                 let Some(p) = hd.compute_point(&sp2, &gtk::graphene::Point::new((sx + dx) as f32, sy as f32)) else { return };
                 let w = p.x() as f64 + 3.0;
-                // Narrowest width: the switcher's tabs just touching. Dragging well past it hides the sidebar.
-                // Below that the tabs squeeze (see the side-s / side-xs CSS) instead of stopping.
-                let min_w = 128.0;
+                // Narrowest width: the switching tabs still clickable. Dragging well past it
+                // hides the sidebar; anywhere above it the bar follows the pointer.
+                let min_w = 160.0;
                 if w < min_w - 40.0 {
                     tg.set_active(false);
                     return;
                 }
-                let w = w.clamp(min_w, 900.0);
-                sp2.set_min_sidebar_width(0.0); // keep min <= max while shrinking
-                sp2.set_max_sidebar_width(w);
-                sp2.set_min_sidebar_width(w);
+                // One property write per motion event (three min/max writes re-laid the
+                // split on every pixel and made the drag choppy).
+                let total = sp2.width().max(1) as f64;
+                sp2.set_sidebar_width_fraction((w.clamp(min_w, 900.0) / total).clamp(0.0, 1.0));
             });
             handle.add_controller(drag);
         }
@@ -797,6 +836,7 @@ impl Workspace {
             tabs,
             docs: Rc::default(),
             wf_list,
+            wf_open,
             files: Rc::default(),
             crumbs,
             back,
@@ -999,6 +1039,11 @@ impl Workspace {
             keys.add_shortcut(gtk::Shortcut::new(
                 gtk::ShortcutTrigger::parse_string("Delete"),
                 Some(gtk::CallbackAction::new(move |_, _| {
+                    let group = me.active_doc().and_then(|d| d.borrow().canvas.selected_group().map(|g| (d.clone(), g)));
+                    if let Some((d, g)) = group {
+                        me.delete_group(&d, g);
+                        return gtk::glib::Propagation::Stop;
+                    }
                     me.with_selection(|ws, d, ids| ws.delete_nodes(d, ids));
                     gtk::glib::Propagation::Stop
                 })),
@@ -1032,13 +1077,7 @@ impl Workspace {
                 gtk::ShortcutTrigger::parse_string("<Control>a"),
                 Some(gtk::CallbackAction::new(move |_, _| {
                     // While a text field has focus Ctrl+A belongs to the text, not the canvas.
-                    let typing = me
-                        .root
-                        .root()
-                        .and_downcast::<gtk::Window>()
-                        .and_then(|w| gtk::prelude::GtkWindowExt::focus(&w))
-                        .is_some_and(|f| f.is::<gtk::Text>() || f.is::<gtk::Entry>());
-                    if !typing {
+                    if !me.typing() {
                         if let Some(d) = me.active_doc() {
                             me.select_all(&d);
                         }
@@ -1046,6 +1085,25 @@ impl Workspace {
                     gtk::glib::Propagation::Stop
                 })),
             ));
+            for (trigger, paste) in [("<Control>c", false), ("<Control>v", true)] {
+                let me = ws.clone();
+                keys.add_shortcut(gtk::Shortcut::new(
+                    gtk::ShortcutTrigger::parse_string(trigger),
+                    Some(gtk::CallbackAction::new(move |_, _| {
+                        // Text fields keep their own copy/paste.
+                        if me.typing() {
+                            return gtk::glib::Propagation::Proceed;
+                        }
+                        let Some(d) = me.active_doc() else { return gtk::glib::Propagation::Proceed };
+                        if paste {
+                            me.paste(&d, None);
+                        } else {
+                            me.copy(&d);
+                        }
+                        gtk::glib::Propagation::Stop
+                    })),
+                ));
+            }
             let me = ws.clone();
             keys.add_shortcut(gtk::Shortcut::new(
                 gtk::ShortcutTrigger::parse_string("<Control>g"),
@@ -1088,6 +1146,12 @@ impl Workspace {
     /// Convert the open workflow to an API prompt and queue it.
     /// `front`: queue ahead of everything pending (frontend: shift+Run / Ctrl+Shift+Enter).
     fn queue_prompt(&self, front: bool) {
+        self.queue_prompt_to(front, None);
+    }
+
+    /// Queue, optionally pruned to `targets` (node ids of the open graph) and what feeds them
+    /// (rgthree "Queue Selected Output Nodes").
+    fn queue_prompt_to(&self, front: bool, targets: Option<&[String]>) {
         let Some(client) = self.client.borrow().clone() else {
             self.append_log("[run] not connected");
             return;
@@ -1115,7 +1179,10 @@ impl Workspace {
                 for line in crate::dasiwa::before_queue(&mut d.wf) {
                     self.append_log(&line);
                 }
-                let (p, w) = prompt::build(&d.wf, &reg);
+                let (mut p, w) = prompt::build(&d.wf, &reg);
+                if let Some(t) = targets {
+                    prompt::prune(&mut p, t);
+                }
                 (p, w, d.wf.to_json())
             };
             let n = api_prompt.as_object().map_or(0, |o| o.len());
@@ -1187,6 +1254,19 @@ impl Workspace {
             let Some(row) = row else { return };
             // Row widget name = file path (index shifts when the list is filtered).
             let name = row.widget_name().to_string();
+            if let Some(dir) = name.strip_prefix("dir:") {
+                let opened = {
+                    let mut o = me.wf_open.borrow_mut();
+                    if !o.remove(dir) { o.insert(dir.to_owned()); true } else { false }
+                };
+                // Chevron is the first prefix added, i.e. the last child of the prefix box.
+                if let Some(r) = row.downcast_ref::<adw::ActionRow>() {
+                    set_chevron(r.upcast_ref(), opened);
+                }
+                let l = me.wf_list.clone();
+                glib::idle_add_local_once(move || { l.unselect_all(); l.invalidate_filter(); });
+                return;
+            }
             let file = if name.is_empty() { me.files.borrow().get(row.index() as usize).cloned() } else { Some(name) };
             if let Some(f) = file {
                 me.load_workflow(f);
@@ -1953,22 +2033,47 @@ impl Workspace {
         while let Some(row) = self.wf_list.row_at_index(0) {
             self.wf_list.remove(&row);
         }
+        // Folders first, then files, each sorted case-insensitively (web sidebar order).
+        let mut entries: Vec<(String, bool)> = Vec::new();
+        let mut dirs = std::collections::BTreeSet::new();
         for f in &files {
-            let row = match f.rsplit_once('/') {
-                // AdwActionRow titles are Pango markup: escape '&' in workflow names.
-                Some((dir, name)) => adw::ActionRow::builder()
-                    .title(glib::markup_escape_text(name.trim_end_matches(".json")))
-                    .subtitle(glib::markup_escape_text(dir))
-                    .build(),
-                None => adw::ActionRow::builder().title(glib::markup_escape_text(f.trim_end_matches(".json"))).build(),
-            };
-            if self.bookmarks.borrow().contains(f) {
-                row.add_prefix(&gtk::Image::from_icon_name("cg-starred-symbolic"));
+            let mut acc = String::new();
+            for part in f.split('/').rev().skip(1).collect::<Vec<_>>().into_iter().rev() {
+                if !acc.is_empty() { acc.push('/') }
+                acc.push_str(part);
+                dirs.insert(acc.clone());
             }
-            row.set_tooltip_text(Some(f));
-            row.set_widget_name(f);
+        }
+        entries.extend(dirs.into_iter().map(|d| (d, true)));
+        entries.extend(files.iter().map(|f| (f.clone(), false)));
+        let key = |(p, dir): &(String, bool)| -> Vec<(bool, String)> {
+            let parts: Vec<&str> = p.split('/').collect();
+            let n = parts.len();
+            parts.iter().enumerate().map(|(i, s)| (i + 1 == n && !dir, s.to_lowercase())).collect()
+        };
+        entries.sort_by_key(key);
+        let open = self.wf_open.borrow();
+        for (p, dir) in &entries {
+            let depth = p.matches('/').count() as i32;
+            let name = p.rsplit('/').next().unwrap_or(p);
+            let row = adw::ActionRow::builder().title(glib::markup_escape_text(name.trim_end_matches(".json"))).build();
+            row.set_margin_start(depth * 14);
+            if *dir {
+                let icon = if open.contains(p) { "cg-lucide-chevron-down-symbolic" } else { "cg-lucide-chevron-right-symbolic" };
+                row.add_prefix(&gtk::Image::from_icon_name(icon));
+                row.add_prefix(&gtk::Image::from_icon_name("cg-folder-symbolic"));
+                row.set_widget_name(&format!("dir:{p}"));
+            } else {
+                if self.bookmarks.borrow().contains(p) {
+                    row.add_prefix(&gtk::Image::from_icon_name("cg-starred-symbolic"));
+                }
+                row.set_tooltip_text(Some(p));
+                row.set_widget_name(p);
+            }
             self.wf_list.append(&row);
         }
+        drop(open);
+        self.wf_list.invalidate_filter();
         self.append_log(&format!("{} workflows", files.len()));
     }
 
@@ -2082,6 +2187,7 @@ impl Workspace {
         }
         self.docs.borrow_mut().push(doc.clone());
         overlay.add_overlay(&self.selection_toolbar(&doc));
+        overlay.add_overlay(&self.group_toolbar(&doc));
         {
             // Double-click: subgraph instance → drill in; empty space → Add Node search.
             let me = self.clone();
@@ -2543,6 +2649,15 @@ impl Workspace {
     }
 
     /// Run `f` with the active tab and its current selection (no-op when empty).
+    /// A text field has keyboard focus (Ctrl+A/C/V belong to it then).
+    fn typing(&self) -> bool {
+        self.root
+            .root()
+            .and_downcast::<gtk::Window>()
+            .and_then(|w| gtk::prelude::GtkWindowExt::focus(&w))
+            .is_some_and(|f| f.is::<gtk::Text>() || f.is::<gtk::Entry>() || f.is::<gtk::TextView>())
+    }
+
     fn with_selection(&self, f: impl Fn(&Self, &DocRef, &[String])) {
         let Some(doc) = self.active_doc() else { return };
         let mut ids = doc.borrow().canvas.selected();
@@ -2879,6 +2994,7 @@ impl Workspace {
     }
 
     fn delete_group(&self, doc: &DocRef, gi: usize) {
+        doc.borrow().canvas.select_group(None);
         {
             let mut d = doc.borrow_mut();
             let g = graph_mut(&mut d);
@@ -2959,92 +3075,6 @@ impl Workspace {
         self.edited(doc);
     }
 
-    /// Open a popover menu at widget coordinates. Plain buttons, not GMenuModel:
-    /// menu-item action resolution through widget action groups proved unreliable here.
-    fn show_menu(&self, area: &impl IsA<gtk::Widget>, x: f64, y: f64, entries: Vec<Entry>) {
-        let pop = gtk::Popover::new();
-        pop.set_has_arrow(false);
-        pop.set_position(gtk::PositionType::Bottom);
-        let bx = gtk::Box::new(gtk::Orientation::Vertical, 2);
-        for e in entries {
-            match e {
-                Entry::Item { label, danger, enabled, icon, f } => {
-                    let lb = gtk::Label::builder().label(&label).xalign(0.0).build();
-                    if danger {
-                        lb.add_css_class("error");
-                    }
-                    let row = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-                    row.set_margin_start(10);
-                    row.set_margin_end(18);
-                    if let Some(i) = icon {
-                        let im = gtk::Image::from_icon_name(i);
-                        im.set_margin_end(8);
-                        row.append(&im);
-                    }
-                    row.append(&lb);
-                    let b = gtk::Button::builder().child(&row).sensitive(enabled).build();
-                    b.add_css_class("flat");
-                    b.set_halign(gtk::Align::Fill);
-                    let p = pop.downgrade();
-                    b.connect_clicked(move |_| {
-                        if let Some(p) = p.upgrade() {
-                            p.popdown();
-                        }
-                        f();
-                    });
-                    bx.append(&b);
-                }
-                Entry::Line => {
-                    let sep = gtk::Separator::new(gtk::Orientation::Horizontal);
-                    sep.set_margin_top(3);
-                    sep.set_margin_bottom(3);
-                    bx.append(&sep);
-                }
-                Entry::Swatches(list) => {
-                    let row = gtk::Box::new(gtk::Orientation::Horizontal, 4);
-                    row.set_margin_start(10);
-                    row.set_margin_top(4);
-                    row.set_margin_bottom(4);
-                    for (hex, f) in list {
-                        let da = gtk::DrawingArea::new();
-                        da.set_content_width(20);
-                        da.set_content_height(20);
-                        da.set_draw_func(move |_, cr, w, h| {
-                            cr.set_source_rgb(
-                                ((hex >> 16) & 0xff) as f64 / 255.0,
-                                ((hex >> 8) & 0xff) as f64 / 255.0,
-                                (hex & 0xff) as f64 / 255.0,
-                            );
-                            cr.rectangle(0.0, 0.0, w as f64, h as f64);
-                            cr.fill().ok();
-                        });
-                        let b = gtk::Button::builder().child(&da).build();
-                        b.add_css_class("flat");
-                        let p = pop.downgrade();
-                        b.connect_clicked(move |_| {
-                            if let Some(p) = p.upgrade() {
-                                p.popdown();
-                            }
-                            f();
-                        });
-                        row.append(&b);
-                    }
-                    bx.append(&row);
-                }
-            }
-        }
-        bx.set_margin_top(6);
-        bx.set_margin_bottom(6);
-        bx.set_margin_start(6);
-        bx.set_margin_end(6);
-        pop.set_child(Some(&bx));
-        pop.set_parent(area);
-        pop.set_pointing_to(Some(&gtk::gdk::Rectangle::new(x as i32, y as i32, 1, 1)));
-        let p = pop.clone();
-        pop.connect_closed(move |_| p.unparent());
-        pop.popup();
-    }
-
     /// Run a widget-row menu action (see `canvas::widgets::menu`).
     fn widget_row_action(&self, doc: &DocRef, id: &str, row: usize, action: canvas::widgets::Action) {
         let Some((_, key, value)) = doc.borrow().canvas.widget_at_id(id, row) else { return };
@@ -3075,79 +3105,6 @@ impl Workspace {
 
     /// Context menu for whatever the right click landed on.
     /// Node actions, shared by the canvas context menu and the floating selection toolbox.
-    fn node_entries(&self, doc: &DocRef, id: &str, ids: &[String]) -> Vec<Entry> {
-        let (mode, collapsed, title, is_sub) = {
-            let d = doc.borrow();
-            match graph_ref(&d).node(id) {
-                Some(n) => (n.mode, n.collapsed, n.title.clone().unwrap_or_default(), d.wf.subgraphs.contains_key(&n.ty)),
-                None => return Vec::new(),
-            }
-        };
-        let bypassed = mode == workflow::MODE_BYPASS;
-        let muted = mode == workflow::MODE_NEVER;
-        let mut entries: Vec<Entry> = Vec::new();
-        {
-            let (me, d, i) = (self.clone(), doc.clone(), ids.to_vec());
-            entries.push(item(
-                if bypassed { "Un-Bypass Node" } else { "Bypass Node (Ctrl+B)" },
-                move || me.bypass(&d, &i),
-            ));
-        }
-        {
-            let (me, d, i) = (self.clone(), doc.clone(), ids.to_vec());
-            entries.push(item(
-                if muted { "Un-Mute Node" } else { "Mute Node (Ctrl+M)" },
-                move || me.mute(&d, &i),
-            ));
-        }
-        {
-            let (me, d, i) = (self.clone(), doc.clone(), ids.to_vec());
-            entries.push(item(if collapsed { "Expand Node" } else { "Collapse Node" }, move || me.collapse(&d, &i)));
-        }
-        entries.push(Entry::Swatches(
-            NODE_COLORS
-                .iter()
-                .map(|(_, rgb)| {
-                    let (me, d, i, rgb2) = (self.clone(), doc.clone(), ids.to_vec(), *rgb);
-                    (rgb2, Box::new(move || me.set_node_color(&d, &i, Some(rgb2))) as Box<dyn Fn()>)
-                })
-                .collect(),
-        ));
-        entries.push(Entry::Line);
-        {
-            let (me, d) = (self.clone(), doc.clone());
-            let (node, initial) = (id.to_owned(), title.clone());
-            entries.push(item("Edit Title…", move || {
-                let (me2, d2, node2, initial2) = (me.clone(), d.clone(), node.clone(), initial.clone());
-                me.text_dialog("Node Title", &initial2, move |t| me2.set_title(&d2, &node2, t));
-            }));
-        }
-        if is_sub {
-            let (me, d) = (self.clone(), doc.clone());
-            let node = id.to_owned();
-            entries.push(item("Open Subgraph", move || me.open_node(&d, &node)));
-        }
-        if self.image_slot(doc, id).is_some() {
-            let (me, d, node) = (self.clone(), doc.clone(), id.to_owned());
-            entries.push(item("Open in Mask Editor", move || me.open_mask_editor(&d, &node)));
-        }
-        if self.bbox_slots_pub(doc, id) {
-            let (me, d, node) = (self.clone(), doc.clone(), id.to_owned());
-            entries.push(item("Edit Boxes & Mask…", move || {
-                me.on_bbox(&d, &node, "bbox:edit", serde_json::Value::Null);
-            }));
-        }
-        {
-            let (me, d, i) = (self.clone(), doc.clone(), ids.to_vec());
-            entries.push(item("Duplicate Node", move || me.duplicate_nodes(&d, &i)));
-        }
-        {
-            let (me, d, i) = (self.clone(), doc.clone(), ids.to_vec());
-            entries.push(danger("Delete Node", move || me.delete_nodes(&d, &i)));
-        }
-        entries
-    }
-
     /// Floating toolbox above the selected node(s) — `reference/Node Selection/`. It only offers
     /// what this engine can actually do (delete, colour, frame into a group, bypass, the node
     /// menu); it follows the selection every frame so panning and zooming keep it attached.
@@ -3330,106 +3287,6 @@ impl Workspace {
             });
         }
         bar.upcast()
-    }
-
-    fn context_menu(&self, doc: &DocRef, x: f64, y: f64, hit: canvas::Hit) {
-        // Pseudo-nodes have no model counterpart: fall back to the canvas menu.
-        let hit = match &hit {
-            canvas::Hit::Node(id) if !graph_ref(&doc.borrow()).nodes.iter().any(|n| &n.id == id) => canvas::Hit::Empty,
-            _ => hit,
-        };
-        let area = doc.borrow().canvas.area.clone();
-        let ids = doc.borrow().canvas.selected();
-        let mut entries: Vec<Entry> = Vec::new();
-        // A widget row can carry its own actions (Power Lora rows, …). The list comes from
-        // `canvas::widgets::menu`, so a custom widget kind opts in by adding one match arm
-        // there rather than by teaching this menu about each node type.
-        if let canvas::Hit::Widget(id, w) = &hit {
-            let actions = doc.borrow().canvas.widget_menu(id, *w);
-            if !actions.is_empty() {
-                for (label, action, enabled) in actions {
-                    let (me, d, id2, w2) = (self.clone(), doc.clone(), id.clone(), *w);
-                    entries.push(item_i("", label, enabled, move || me.widget_row_action(&d, &id2, w2, action)));
-                }
-            }
-        }
-        if let canvas::Hit::Widget(id, _) = &hit {
-            if entries.is_empty() {
-                // Nothing row-specific: fall back to the node's menu.
-                let node = canvas::Hit::Node(id.clone());
-                return self.context_menu(doc, x, y, node);
-            }
-        }
-        match hit {
-            canvas::Hit::Widget(..) => {}
-            canvas::Hit::Node(id) => entries.extend(self.node_entries(doc, &id, &ids)),
-            canvas::Hit::Group(gi) => {
-                let title = {
-                    let d = doc.borrow();
-                    graph_ref(&d).groups.get(gi).map(|g| g.title.clone()).unwrap_or_default()
-                };
-                {
-                    let (me, d) = (self.clone(), doc.clone());
-                    let initial = title.clone();
-                    entries.push(item("Rename Group…", move || {
-                        let (me2, d2, initial2) = (me.clone(), d.clone(), initial.clone());
-                        me.text_dialog("Group Title", &initial2, move |t| me2.rename_group(&d2, gi, t));
-                    }));
-                }
-                entries.push(Entry::Swatches(
-                    [
-                        ("#3f789e", 0x3f789e),
-                        ("#ff6b6b", 0xff6b6b),
-                        ("#59b259", 0x59b259),
-                        ("#b39ddb", 0xb39ddb),
-                        ("#ffd500", 0xffd500),
-                        ("#59d0ff", 0x59d0ff),
-                        ("#ff8fb1", 0xff8fb1),
-                        ("#ffa931", 0xffa931),
-                    ]
-                    .into_iter()
-                    .map(|(hex, rgb)| {
-                        let (me, d) = (self.clone(), doc.clone());
-                        (rgb, Box::new(move || me.set_group_color(&d, gi, hex)) as Box<dyn Fn()>)
-                    })
-                    .collect(),
-                ));
-                {
-                    let (me, d) = (self.clone(), doc.clone());
-                    entries.push(item("Fit to Group", move || me.fit_group(&d, gi)));
-                }
-                {
-                    let (me, d) = (self.clone(), doc.clone());
-                    entries.push(danger("Delete Group", move || me.delete_group(&d, gi)));
-                }
-            }
-            canvas::Hit::Empty => {
-                let (zoom, off) = doc.borrow().canvas.view();
-                let pos = ((x - off.0) / zoom, (y - off.1) / zoom);
-                {
-                    let (me, d) = (self.clone(), doc.clone());
-                    entries.push(item("Add Node…", move || me.add_node_dialog(&d, pos, None)));
-                }
-                {
-                    let (me, d, i) = (self.clone(), doc.clone(), ids.clone());
-                    entries.push(item("Add Group", move || me.add_group(&d, &i, Some(pos))));
-                }
-                entries.push(Entry::Line);
-                {
-                    let (me, d) = (self.clone(), doc.clone());
-                    entries.push(item("Select All (Ctrl+A)", move || me.select_all(&d)));
-                }
-                {
-                    let d = doc.clone();
-                    entries.push(item("Fit View", move || d.borrow().canvas.fit_view()));
-                }
-                {
-                    let d = doc.clone();
-                    entries.push(item("Reset View", move || d.borrow().canvas.reset_view()));
-                }
-            }
-        }
-        self.show_menu(&area, x, y, entries);
     }
 
     fn text_dialog(&self, title: &str, initial: &str, on_ok: impl Fn(String) + 'static) {
@@ -3696,6 +3553,7 @@ impl Workspace {
                 .to_owned();
             crate::canvas::widgets::set_inline_text(v.get(settings::TEXT_EDITOR).and_then(Value::as_str) == Some("inline"));
             settings::set_caption_above(v.get(settings::CAPTION).and_then(Value::as_str) == Some("above"));
+            me.set_side_themed(v.get(settings::SIDE_THEME).and_then(Value::as_bool).unwrap_or(false));
             crate::theme::set_server_palettes(v.get("Comfy.CustomColorPalettes"));
             crate::theme::set(v.get(settings::PALETTE).and_then(Value::as_str).unwrap_or("dark"));
             me.redraw_canvases();
@@ -3815,6 +3673,7 @@ impl Workspace {
                 self.progress.set_fraction(0.0);
                 self.progress.set_visible(false);
                 self.set_running(Some(&n));
+                self.follow(&n);
                 self.append_log(&format!("[ws] executing node {n}"));
                 self.refresh_queue();
             }

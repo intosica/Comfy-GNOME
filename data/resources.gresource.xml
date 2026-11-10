@@ -14,6 +14,7 @@
     <file preprocess="xml-stripblanks">icons/scalable/actions/cg-edit-clear-symbolic.svg</file>
     <file preprocess="xml-stripblanks">icons/scalable/actions/cg-edit-copy-symbolic.svg</file>
     <file preprocess="xml-stripblanks">icons/scalable/actions/cg-edit-delete-symbolic.svg</file>
+    <file preprocess="xml-stripblanks">icons/scalable/actions/cg-comfy-gnome-symbolic.svg</file>
     <file preprocess="xml-stripblanks">icons/scalable/actions/cg-emblem-system-symbolic.svg</file>
     <file preprocess="xml-stripblanks">icons/scalable/actions/cg-folder-pictures-symbolic.svg</file>
     <file preprocess="xml-stripblanks">icons/scalable/actions/cg-folder-symbolic.svg</file>

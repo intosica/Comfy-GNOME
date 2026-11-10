@@ -64,6 +64,8 @@ pub struct Node {
     pub pinned: bool,
     /// Subgraph instance: drawn with a marker, double-click opens it.
     pub subgraph: bool,
+    /// litegraph `shape`: 1 box, 2 round (default), 4 card.
+    pub shape: i64,
 }
 
 /// Region boxes (normalised to the picture) and a painted mask over a node's preview.
@@ -196,6 +198,8 @@ enum Drag {
     Widget { node: usize, w: usize, zone: Zone, base: Value, moved: bool },
     /// Bottom-right grip: `start` is the size at drag begin, `snap` rounds to the grid.
     Resize { idx: usize, start: (f64, f64), snap: bool },
+    /// Group's bottom-right corner: `start` is the rect at drag begin.
+    GroupResize { idx: usize, start: [f64; 4], snap: bool },
 }
 
 /// A wire being dragged, anchored at one end. The free end is on the opposite
@@ -229,6 +233,8 @@ struct State {
     pointer: (f64, f64),
     /// Selected node ids (survives re-scenes: ids are stable).
     sel: HashSet<String>,
+    /// Group picked by its title bar (frontend group selection → group toolbox).
+    sel_group: Option<usize>,
     /// Decoded previews by `/view` query; `None` while loading or when undecodable.
     images: HashMap<String, Option<gtk::cairo::ImageSurface>>,
     /// Multiline text widgets scrolled with the wheel: node id → widget key → canvas px.
@@ -801,8 +807,39 @@ impl Canvas {
     }
 
     pub fn select(&self, ids: &[String]) {
-        self.state.borrow_mut().sel = ids.iter().cloned().collect();
+        let mut s = self.state.borrow_mut();
+        s.sel = ids.iter().cloned().collect();
+        s.sel_group = None;
+        drop(s);
         self.area.queue_draw();
+    }
+
+    /// Group selected by its title bar, if it still exists.
+    pub fn selected_group(&self) -> Option<usize> {
+        let s = self.state.borrow();
+        s.sel_group.filter(|&g| g < s.groups.len())
+    }
+
+    pub fn select_group(&self, g: Option<usize>) {
+        let mut s = self.state.borrow_mut();
+        s.sel.clear();
+        s.sel_group = g;
+        drop(s);
+        self.area.queue_draw();
+    }
+
+    /// Selected group in area coordinates (x, y, w) + its colour, for the group toolbox.
+    pub fn group_box(&self) -> Option<(f64, f64, f64, Option<u32>)> {
+        let s = self.state.borrow();
+        let g = s.groups.get(s.sel_group?)?;
+        let (x, y) = s.view.to_screen((g.rect[0], g.rect[1]));
+        Some((x, y, g.rect[2] * s.view.zoom, g.color))
+    }
+
+    /// Canvas point under the pointer (paste target).
+    pub fn pointer(&self) -> (f64, f64) {
+        let s = self.state.borrow();
+        s.view.to_canvas(s.pointer)
     }
 
     /// Zoom/pan so every node is visible (falls back to reset when empty).
@@ -944,6 +981,7 @@ impl Canvas {
                     .map(|e| e.modifier_state().contains(gdk::ModifierType::CONTROL_MASK))
                     .unwrap_or(false);
                 let mut s = st.borrow_mut();
+                s.sel_group = None;
                 let c = s.view.to_canvas((x, y));
                 let r = 9.0 / s.view.zoom; // constant ~9 screen px, whatever the zoom
                 if let Some((idx, out, si)) = s.hit_slot(c, r) {
@@ -1023,6 +1061,21 @@ impl Canvas {
                     return;
                 }
                 let hit = s.order.iter().rposition(|&i| s.nodes[i].contains(c));
+                // Group corner grip (litegraph `isInResize`): only when no node covers it.
+                let gcorner = if hit.is_some() { None } else {
+                    s.groups.iter().rposition(|g| {
+                        let (rx, ry) = (g.rect[0] + g.rect[2], g.rect[1] + g.rect[3]);
+                        c.0 <= rx && c.1 <= ry && (c.0 - rx) + (c.1 - ry) > -2.0 * hs
+                    })
+                };
+                if let Some(idx) = gcorner {
+                    let start = s.groups[idx].rect;
+                    s.sel.clear();
+                    s.drag = Some(Drag::GroupResize { idx, start, snap: shift || s.snap_always });
+                    drop(s);
+                    area.queue_draw();
+                    return;
+                }
                 if let Some(oi) = hit {
                     // Litegraph's collapse button: the square at the node's top-left title
                     // corner (one click toggles). It sits above the body, so test it before
@@ -1129,6 +1182,7 @@ impl Canvas {
                         .map(|i| (i, s.nodes[i].pos))
                         .collect();
                     s.sel.clear();
+                    s.sel_group = Some(gi);
                     s.drag = Some(Drag::Group { idx: gi, start: r, nodes, grab: c });
                 } else if ctrl {
                     s.drag = Some(Drag::Band { start: c, end: c });
@@ -1159,6 +1213,13 @@ impl Canvas {
                         for (i, p) in nodes.iter() {
                             st.nodes[*i].pos = (p.0 + d.0, p.1 + d.1);
                         }
+                    }
+                    Some(Drag::GroupResize { idx, start, snap }) => {
+                        let c = view.to_canvas((sx + dx, sy + dy));
+                        let grid = if *snap { st.snap_grid } else { 0.0 };
+                        let g = &mut st.groups[*idx].rect;
+                        g[2] = snap_to(c.0 - start[0], grid).max(140.0);
+                        g[3] = snap_to(c.1 - start[1], grid).max(80.0);
                     }
                     Some(Drag::Resize { idx, snap, .. }) => {
                         let c = view.to_canvas((sx + dx, sy + dy));
@@ -1225,7 +1286,19 @@ impl Canvas {
                         changed = start.iter().any(|(i, p)| s.nodes[*i].pos != *p);
                     }
                     Some(Drag::Resize { idx, start, .. }) => changed = s.nodes[idx].size != start,
+                    Some(Drag::GroupResize { idx, start, .. }) => changed = s.groups[idx].rect != start,
                     Some(Drag::Group { idx, start, nodes, .. }) => {
+                        // Snap the group's origin; its nodes ride along by the same offset.
+                        if shift || s.snap_always {
+                            let grid = s.snap_grid;
+                            let r = s.groups[idx].rect;
+                            let d = (snap_to(r[0], grid) - r[0], snap_to(r[1], grid) - r[1]);
+                            s.groups[idx].rect = [r[0] + d.0, r[1] + d.1, snap_to(r[2], grid).max(grid), snap_to(r[3], grid).max(grid)];
+                            for (i, _) in nodes.iter() {
+                                let n = &mut s.nodes[*i];
+                                n.pos = (n.pos.0 + d.0, n.pos.1 + d.1);
+                            }
+                        }
                         changed = s.groups[idx].rect != start || nodes.iter().any(|(i, p)| s.nodes[*i].pos != *p)
                     }
                     Some(Drag::Band { start, end }) => {
@@ -1386,6 +1459,22 @@ pub fn parse_color(s: &str) -> Option<u32> {
     }
 }
 
+/// Node outline in its litegraph shape: box = square corners, card = only the top ones rounded.
+fn shaped(cr: &gtk::cairo::Context, shape: i64, x: f64, y: f64, w: f64, h: f64, r: f64) {
+    match shape {
+        1 => cr.rectangle(x, y, w, h),
+        4 => {
+            cr.new_sub_path();
+            cr.arc(x + w - r, y + r, r, -PI / 2.0, 0.0);
+            cr.line_to(x + w, y + h);
+            cr.line_to(x, y + h);
+            cr.arc(x + r, y + r, r, PI, 1.5 * PI);
+            cr.close_path();
+        }
+        _ => rounded_rect(cr, x, y, w, h, r),
+    }
+}
+
 fn rounded_rect(cr: &gtk::cairo::Context, x: f64, y: f64, w: f64, h: f64, r: f64) {
     cr.new_sub_path();
     cr.arc(x + w - r, y + r, r, -PI / 2.0, 0.0);
@@ -1471,10 +1560,22 @@ fn draw(cr: &gtk::cairo::Context, s: &State, w: f64, h: f64) {
         rgba(cr, c, 0.6);
         cr.rectangle(x, y, gw, 34.0);
         cr.fill().ok();
+        // Resize grip (litegraph draws a small triangle in the bottom-right corner).
+        cr.move_to(x + gw, y + gh);
+        cr.line_to(x + gw - 10.0, y + gh);
+        cr.line_to(x + gw, y + gh - 10.0);
+        cr.fill().ok();
         rgb(cr, 0xdddddd);
         cr.set_font_size(22.0);
         cr.move_to(x + 8.0, y + 25.0);
         text::show(cr, &g.title);
+    }
+    if let Some(g) = s.sel_group.and_then(|i| s.groups.get(i)) {
+        let [x, y, gw, gh] = g.rect;
+        rgba(cr, 0xffffff, 0.85);
+        cr.set_line_width(2.0 / v.zoom);
+        cr.rectangle(x, y, gw, gh);
+        cr.stroke().ok();
     }
 
     // `Comfy.LinkRenderMode` -1 hides them entirely (litegraph's Hidden).
@@ -1547,10 +1648,10 @@ fn draw(cr: &gtk::cairo::Context, s: &State, w: f64, h: f64) {
         if !visible(x, y - TITLE_H, nw, nh + TITLE_H) { continue; }
         let alpha = if n.mode == 2 { 0.4 } else { 1.0 };
         // Cheap drop shadow: one offset translucent fill (no blur).
-        rounded_rect(cr, x + 2.0, y - TITLE_H + 4.0, nw, nh + TITLE_H, 9.0);
+        shaped(cr, n.shape, x + 2.0, y - TITLE_H + 4.0, nw, nh + TITLE_H, 9.0);
         rgba(cr, 0x000000, 0.3 * alpha);
         cr.fill().ok();
-        rounded_rect(cr, x, y - TITLE_H, nw, nh + TITLE_H, 8.0);
+        shaped(cr, n.shape, x, y - TITLE_H, nw, nh + TITLE_H, 8.0);
         rgba(cr, if n.mode == 4 { 0x9a3a9a } else { n.bgcolor.unwrap_or_else(|| pal.lg("NODE_DEFAULT_BGCOLOR", 0x353535)) }, alpha);
         cr.fill_preserve().ok();
         let dragging = matches!(&s.drag, Some(Drag::Nodes { idx, .. }) if *idx == i) || s.sel.contains(&n.id);
@@ -1560,7 +1661,7 @@ fn draw(cr: &gtk::cairo::Context, s: &State, w: f64, h: f64) {
 
         // Title bar
         cr.save().ok();
-        rounded_rect(cr, x, y - TITLE_H, nw, nh + TITLE_H, 8.0);
+        shaped(cr, n.shape, x, y - TITLE_H, nw, nh + TITLE_H, 8.0);
         cr.clip();
         rgba(cr, if n.mode == 4 { 0x7a2a7a } else { n.color.unwrap_or_else(|| pal.lg("NODE_DEFAULT_COLOR", 0x333333)) }, alpha);
         cr.rectangle(x, y - TITLE_H, nw, TITLE_H);
@@ -1593,13 +1694,13 @@ fn draw(cr: &gtk::cairo::Context, s: &State, w: f64, h: f64) {
         if s.sel.contains(&n.id) {
             rgb(cr, pal.lg("NODE_BOX_OUTLINE_COLOR", 0xffffff));
             cr.set_line_width(2.0 / v.zoom);
-            rounded_rect(cr, x - 3.0, y - TITLE_H - 3.0, nw + 6.0, nh + TITLE_H + 6.0, 10.0);
+            shaped(cr, n.shape, x - 3.0, y - TITLE_H - 3.0, nw + 6.0, nh + TITLE_H + 6.0, 10.0);
             cr.stroke().ok();
         }
         if s.running.as_deref() == Some(n.id.as_str()) {
             rgb(cr, 0x3fc35a);
             cr.set_line_width(3.0 / v.zoom);
-            rounded_rect(cr, x - 2.0, y - TITLE_H - 2.0, nw + 4.0, nh + TITLE_H + 4.0, 9.0);
+            shaped(cr, n.shape, x - 2.0, y - TITLE_H - 2.0, nw + 4.0, nh + TITLE_H + 4.0, 9.0);
             cr.stroke().ok();
         }
         if n.collapsed { continue; }

@@ -203,7 +203,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.send(200, node_info())
         if p == "/api/userdata":
             return self.send(200, [dict(path=f"{n}.json", size=4200, modified=1767225600) for n in
-                                   [TEMPLATES[0], "Anima - Reference", "ComfyUI_00004", "portrait_lighting"]])
+                                   [TEMPLATES[0], "Anima - Reference", "ComfyUI_00004", "portrait_lighting",
+                                    "Portraits/portrait_lighting"]])
         if p.startswith("/api/userdata/"):
             name = p.rsplit("/", 1)[-1]
             return self.send(200, graph_for(name), "application/json")

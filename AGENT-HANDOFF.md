@@ -1,6 +1,6 @@
 # AGENT HANDOFF
 
-_Last updated: session 32 (the properties panel behaves, not just looks: selection follows the canvas, the subgraph editor keeps its state, colour/properties save, legacy proxy order matches 1.60; version 0.2.0-beta.1 tagged and pushed. The backend lock from session 28c is unchanged).
+_Last updated: session 34 (context menus, quick-search dismissal, group snapping, workflow folders, sidebar rail; session 33 was palettes/settings). Earlier: session 32 (the properties panel behaves, not just looks: selection follows the canvas, the subgraph editor keeps its state, colour/properties save, legacy proxy order matches 1.60; version 0.2.0-beta.1 tagged and pushed. The backend lock from session 28c is unchanged).
 
 Project: **Comfy-GNOME** at `/home/montel/Documents/Comfy-GNOME` (renamed from `GNOME-Comfyu` → `GNOME-ComfyUI` → this).
 Crate/binary `comfy-gnome`, app id `io.github.comfygnome.ComfyGnome` (`APP_ID` in `src/main.rs`).
@@ -1404,3 +1404,39 @@ tree after the version bump.
 - Text Editor options: `legacy` (pop-up) / `inline`. Window controls already matched `reference/Minimize Window Exit.png`.
 - Known: a few combos show raw stored values (e.g. "Sidebar size: null"); settings with JS-function widgets stay read-only.
 - Verified under Xvfb against a local backend; backend/Xvfb/scratch removed afterwards.
+
+## Session 34 — context menus, quick-search dismissal, group snapping, folder list, sidebar rail (2026-11-09)
+
+Seven items from the director, all live-tested under Xvfb against the demo mock (`tools/demo/mock_backend.py`).
+
+- **Quick node browser** (double-click empty canvas) was a decorated modal window; it is now an in-window card on a
+  scrim added to the window's `gtk::Overlay` (`src/workspace/addnode.rs`, `Workspace::add_node_dialog`). The scrim's
+  `GestureClick` closes the card when the pick under the pointer is not the card or a descendant. The old
+  `dlg: gtk::Window` became `dlg: Rc<dyn Fn()>` so the closing code (`apply`, Esc) is unchanged.
+- **Groups snap to the grid**: group move snapped its origin on drag end and carried the nodes by the same delta
+  (`canvas/mod.rs` `Drag::Group` arm), group resize snapped width/height (`Drag::GroupResize`, Shift or
+  `Comfy.SnapToGrid.GridSize`).
+- **Context menus** (`src/workspace/menus.rs`, new): node / subgraph / group / group-select / canvas, built from the
+  reference screenshots. Group-selection page is a colour grid plus *Rename*, *Copy*, *Duplicate*, *Convert to
+  Subgraph*, … A menu row is `button.cg-menu-row` in a `popover.cg-menu`; heading rows are insensitive labels.
+  Menus act through `Workspace` helpers (`convert_to_subgraph`, `unpack_subgraph`, `arrange`, `pin_all`,…), so a menu
+  item never re-implements graph logic.
+- **Settings**: `Page::Gnome`, a separate APPLICATION SETTINGS entry ("Comfy-GNOME", `cg-comfy-gnome-symbolic`) after
+  *Comfy* and before *Lite Graph*; the icon is the app icon with the ComfyUI glyph knocked out of a white puzzle
+  (`data/icons/scalable/actions/cg-comfy-gnome-symbolic.svg`). New *Left sidebar colour* combo
+  (`ComfyGNOME.SidebarTheme`, default Original).
+- **Themed sidebar**: `Workspace::set_side_themed` toggles `cg-side-themed` on the root split; `theme.rs::side_css`
+  paints `.cg-side` (and its headerbar/scroller/list rows) with `comfy-menu-bg` in its own `CssProvider`. LESSON:
+  `@define-color` only resolves inside the provider that declares it, so these rules cannot live in the shared
+  `load_css` sheet.
+- **Workflow folders**: the sidebar builds `dir:<path>` rows from the `userdata` listing's nested paths; the list
+  filter keeps a row visible while every ancestor folder is open. The demo mock now serves `Portraits/portrait_lighting`
+  so the tree is visible in demos.
+- **Sidebar rail**: classes are applied with 12 px hysteresis, the drag sets one `sidebar-width-fraction` per motion
+  event (three min/max writes re-laid the split per pixel and felt choppy), `min_sidebar_width` is 160 px, and the
+  search entry hides below 200 px (reload buttons below 230 px, as before).
+- Gotchas found: `cargo build` after editing only `*.svg`/gresource files finishes in 0.08 s and serves the old icon —
+  `touch build.rs` first; on Xvfb a click on a combo popover row is unreliable, keyboard (`Up`/`Down`/`Return`) works;
+  a `pkill -f mock_backend` in the same shell also kills the shell (use `setsid` + a pattern that cannot match the
+  command line).
+- `cargo test`: 65 passed, 4 ignored. Backend mock, Xvfb and scratch dirs removed afterwards.

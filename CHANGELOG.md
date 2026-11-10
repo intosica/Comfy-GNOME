@@ -8,6 +8,37 @@ version that promises stability.
 
 ## [Unreleased]
 
+## [0.2.0-beta.3] — 2026-11-09
+
+Context menus, quick-search dismissal, group snapping, workflow folders and a narrower sidebar.
+
+### Added
+
+- **Right-click menus** for nodes, subgraphs, groups, the group-selection box and the canvas, matching
+  `reference/Node Right-Click.png`, `Subgraph Right-Click.png`, `Group Right-Click.png`, `Group Select.png` and
+  `Grid Right-Click.png`: node reload/convert/properties/queue/mode, subgraph edit/unpack/open, group rename /
+  duplicate / colour / convert-to-subgraph / fit-to-nodes, arrange selection, palette picker, and the canvas
+  cleanup / reboot / add-node / add-group / paste / pin / follow-execution actions (`src/workspace/menus.rs`).
+- **Comfy-GNOME** settings has its own APPLICATION SETTINGS entry under *Comfy* and above *Lite Graph* (mono-white
+  app icon), instead of living under *Appearance*.
+- **Left sidebar colour** (Settings → Comfy-GNOME → Sidebar, `ComfyGNOME.SidebarTheme`): *Original* keeps
+  libadwaita's grey, *Theme* paints the bar with the palette's menu colour (follows palette switches).
+
+### Changed
+
+- The left sidebar squeezes in smoother steps: the size classes carry 12 px of hysteresis (no flapping on a
+  threshold), the drag writes a single fraction instead of three min/max widths, the bar can be narrowed to a
+  160 px rail, and the search field hides below 200 px where it cannot be typed in.
+
+### Fixed
+
+- The quick node browser (double-click on empty canvas) now closes when clicking anywhere off its card — the
+  canvas, the dimmed area, or another control.
+- Groups snap to the grid when moved and resized (Shift or `Comfy.SnapToGrid.GridSize`), with the group's nodes
+  riding along.
+- Workflow subfolders from the backend's `userdata` listing appear in the sidebar as folder rows (collapsible),
+  and a workflow stays visible while every ancestor folder is open (the list filter used to drop nested names).
+
 ## [0.2.0-beta.2] — 2026-11-09
 
 Palettes, lightbox captions and the Settings dialog, on top of the properties panel.
@@ -84,5 +115,6 @@ backend's media, queue, templates and settings.
   day groups and thumbnails, image lightbox, live TAESD / Latent2RGB previews and a progress strip.
 - Templates, backend-driven Settings, faithful saving (an untouched workflow round-trips byte-identically).
 
+[0.2.0-beta.3]: https://github.com/intosica/Comfy-GNOME/releases/tag/v0.2.0-beta.3
 [0.2.0-beta.2]: https://github.com/intosica/Comfy-GNOME/releases/tag/v0.2.0-beta.2
 [0.2.0-beta.1]: https://github.com/intosica/Comfy-GNOME/releases/tag/v0.2.0-beta.1

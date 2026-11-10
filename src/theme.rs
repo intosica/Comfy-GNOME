@@ -129,6 +129,37 @@ pub fn set(id: &str) {
         prov.load_from_string(&css);
     });
     CURRENT.with(|c| *c.borrow_mut() = p);
+    side_css();
+}
+
+thread_local!(static CSS_SIDE: std::cell::RefCell<Option<gtk::CssProvider>> = const { std::cell::RefCell::new(None) });
+
+/// Left sidebar in the palette's menu colours: `.cg-side` inside a `.cg-side-themed` root.
+/// Its own provider, because `@define-color` is only visible to rules in the same provider.
+fn side_css() {
+    let p = current();
+    let (bg, fg) = (
+        format!("#{:06x}", p.comfy("comfy-menu-bg", if p.light { 0xe0e0e0 } else { 0x353535 })),
+        format!("#{:06x}", p.comfy("fg-color", if p.light { 0x222222 } else { 0xffffff })),
+    );
+    let css = format!(
+        "@define-color cg_side_bg {bg}; @define-color cg_side_fg {fg};
+         .cg-side-themed .cg-side, .cg-side-themed .cg-side headerbar,
+         .cg-side-themed .cg-side scrolledwindow, .cg-side-themed .cg-side viewport,
+         .cg-side-themed .cg-side list, .cg-side-themed .cg-side list > row
+         {{ background-color: @cg_side_bg; color: @cg_side_fg; }}"
+    );
+    CSS_SIDE.with(|c| {
+        let mut c = c.borrow_mut();
+        let prov = c.get_or_insert_with(|| {
+            let prov = gtk::CssProvider::new();
+            if let Some(d) = gtk::gdk::Display::default() {
+                gtk::style_context_add_provider_for_display(&d, &prov, gtk::STYLE_PROVIDER_PRIORITY_USER);
+            }
+            prov
+        });
+        prov.load_from_string(&css);
+    });
 }
 
 pub fn current() -> Rc<Palette> {

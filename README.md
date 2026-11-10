@@ -6,7 +6,7 @@
 
 <p align="center">A native GTK4 / libadwaita frontend for <a href="https://github.com/comfyanonymous/ComfyUI">ComfyUI</a>, written in Rust.</p>
 
-<p align="center"><b>0.2.0-beta.2</b> — beta: fixes and features land fast, saved workflows stay compatible.
+<p align="center"><b>0.2.0-beta.3</b> — beta: fixes and features land fast, saved workflows stay compatible.
 See <a href="CHANGELOG.md">CHANGELOG.md</a>.</p>
 
 <p align="center"><img src="docs/screenshots/graph.png" alt="Comfy-GNOME editing a workflow"></p>
@@ -34,6 +34,9 @@ the backend's `userdata` folder.
 - **Link Render Mode** — spline, straight, linear or hidden wires, live from Settings (`Comfy.LinkRenderMode`).
 - **Color palettes** — Settings → Appearance: the frontend's Dark, Light, Solarized, Arc, Nord and Github palettes, your web UI custom palettes, and any ComfyUI-format palette JSON in `~/.config/comfy-gnome/themes/`.
 - **Image preview** — click the dark area to close; the file name sits above or below the picture (your choice in Settings).
+- **Context menus** — right-click a node, a subgraph, a group, the group-selection box or empty canvas for the same
+  actions as the web UI (reload / convert / properties / modes, edit / unpack / open subgraph, rename / duplicate /
+  colour / fit-to-nodes, add node / add group / paste / pin / follow execution / arrange / cleanup).
 - **Row menus** — right-click any Power Lora row to toggle it, move it up/down or remove it.
 - **Collapsible log** — the Log/Preview pane folds into a thin bar with the `▼`/`▲` toggle, and comes back with
   one click; the bar never disappears.

@@ -42,6 +42,29 @@ struct Flattener<'a> {
 }
 
 /// Returns the API prompt plus human-readable warnings (unknown node types, recursion…).
+/// Keep only the prompt nodes for `targets` (a key or the last `:` segment of one, so inner
+/// nodes of every subgraph instance match) and their ancestors.
+pub fn prune(prompt: &mut Value, targets: &[String]) {
+    let Some(o) = prompt.as_object_mut() else { return };
+    let mut keep: Vec<String> = o.keys().filter(|k| targets.iter().any(|t| *k == t || k.ends_with(&format!(":{t}")))).cloned().collect();
+    let mut i = 0;
+    while i < keep.len() {
+        let deps: Vec<String> = o[&keep[i]]["inputs"]
+            .as_object()
+            .into_iter()
+            .flat_map(|m| m.values())
+            .filter_map(|v| v.as_array().filter(|a| a.len() == 2 && a[1].is_u64()).and_then(|a| a[0].as_str().map(str::to_owned)))
+            .collect();
+        for d in deps {
+            if !keep.contains(&d) && o.contains_key(&d) {
+                keep.push(d);
+            }
+        }
+        i += 1;
+    }
+    o.retain(|k, _| keep.contains(k));
+}
+
 pub fn build(wf: &Workflow, reg: &Registry) -> (Value, Vec<String>) {
     let mut f = Flattener { wf, reg, ctxs: Vec::new(), children: HashMap::new(), warnings: Vec::new() };
     f.ctxs.push(Ctx { graph: &wf.root, prefix: String::new(), parent: None });
@@ -478,6 +501,20 @@ fn bypass_input(node: &Node, slot: usize, ty: &str) -> Option<usize> {
         return Some(slot);
     }
     ins.iter().position(|i| i.ty == ty).or_else(|| ins.iter().position(|i| types_compatible(&i.ty, ty)))
+}
+
+#[cfg(test)]
+mod prune_tests {
+    #[test]
+    fn prune_keeps_ancestors() {
+        let mut p = serde_json::json!({
+            "1": {"inputs": {}}, "2": {"inputs": {"a": ["1", 0]}}, "3": {"inputs": {"a": ["2", 0]}}, "4": {"inputs": {"a": ["1", 0]}}
+        });
+        super::prune(&mut p, &["3".into()]);
+        let mut k: Vec<_> = p.as_object().unwrap().keys().cloned().collect();
+        k.sort();
+        assert_eq!(k, ["1", "2", "3"]);
+    }
 }
 
 #[cfg(test)]

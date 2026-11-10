@@ -480,6 +480,13 @@ impl Panel {
         }
     }
 
+    /// Open the subgraph editor ("Edit Subgraph Widgets"); a no-op unless a subgraph is shown.
+    pub(super) fn open_editor(&self) {
+        if self.sub_btn.is_visible() {
+            self.sub_btn.set_active(true);
+        }
+    }
+
     fn close_editor(&self) {
         self.sub_btn.set_visible(false);
         if self.sub_btn.is_active() {

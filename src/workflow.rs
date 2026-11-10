@@ -14,6 +14,8 @@
 use serde_json::Value;
 use std::collections::HashMap;
 
+mod convert;
+
 /// Node ids are numbers in files, except nodes unpacked from subgraphs ("39:7"),
 /// so they are kept as strings.
 pub const SUBGRAPH_INPUT_ID: &str = "-10";
@@ -61,6 +63,8 @@ pub struct Node {
     pub collapsed: bool,
     /// `flags.pinned`: the node cannot be dragged or resized.
     pub pinned: bool,
+    /// litegraph `shape` (1 box, 2 round, 4 card); 0 = not set.
+    pub shape: i64,
 }
 
 #[derive(Debug, Clone)]
@@ -122,6 +126,7 @@ impl Node {
             bgcolor: None,
             collapsed: false,
             pinned: false,
+            shape: 0,
         }
     }
 }
@@ -420,6 +425,11 @@ fn write_graph(s: &mut Value, g: &Graph, object_links: bool) {
         } else if nv["flags"]["collapsed"].as_bool() == Some(true) {
             nv["flags"]["collapsed"] = Value::Bool(false);
         }
+        if n.shape != 0 {
+            nv["shape"] = Value::from(n.shape);
+        } else if let Some(o) = nv.as_object_mut() {
+            o.remove("shape");
+        }
         if n.pinned {
             nv["flags"]["pinned"] = Value::Bool(true);
         } else if nv["flags"]["pinned"].as_bool() == Some(true) {
@@ -658,6 +668,7 @@ fn parse_node(n: &Value) -> Option<Node> {
         bgcolor: n["bgcolor"].as_str().map(str::to_owned),
         collapsed: n["flags"]["collapsed"].as_bool().unwrap_or(false),
         pinned: n["flags"]["pinned"].as_bool().unwrap_or(false),
+        shape: n["shape"].as_i64().unwrap_or(0),
     })
 }
 
