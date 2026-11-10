@@ -188,7 +188,23 @@ pub(super) fn open(ws: &Workspace) {
 
     // Definitions (cached after the first scan) + current values, off the main thread.
     let Some(c) = client else {
+        // Without this the nav keeps its "Loading…" spinner forever.
         dlg.status.set_text("Not connected to a backend.");
+        dlg.cat.replace(Some(Rc::new(settings_defs::merge(&Catalog::default(), &BTreeMap::new()))));
+        fill_nav(&dlg);
+        // Backend still starting: reopen with real data once it answers.
+        let (ws, weak) = (ws.clone(), win.downgrade());
+        gtk::glib::spawn_future_local(async move {
+            while ws.client.borrow().is_none() {
+                gtk::glib::timeout_future(std::time::Duration::from_secs(1)).await;
+                if weak.upgrade().is_none_or(|w| !w.is_visible()) {
+                    return;
+                }
+            }
+            close_open();
+            OPEN.with(|o| *o.borrow_mut() = None);
+            open(&ws);
+        });
         return;
     };
     dlg.status.set_text("Loading settings…");
