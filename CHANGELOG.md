@@ -25,6 +25,8 @@ version that promises stability.
 
 ### Fixed
 
+- Settings could sit on "Loading…" forever: a panic in the definition scan (or a stalled backend) is now contained —
+  a bad file is skipped, fetching has a 30 s budget, and a failed scan falls back to the stored keys with an error in the footer.
 - Settings showed placeholder string names for core settings: the definition scan skipped the frontend chunk
   that now holds the core list. Real names, categories and dropdowns are back (Comfy, Lite Graph, Appearance, Mask Editor).
 

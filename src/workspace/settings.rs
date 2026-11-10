@@ -200,7 +200,8 @@ pub(super) fn open(ws: &Workspace) {
             (merged, values)
         })
         .await;
-        let Ok((merged, values)) = res else { return };
+        // A worker panic used to leave "Loading…" up forever; show the stored keys instead.
+        let (merged, values) = res.unwrap_or_else(|_| (settings_defs::merge(&Catalog::default(), &BTreeMap::new()), Err("settings scan failed".into())));
         match values {
             Ok(v) => {
                 dlg.values.replace(v);

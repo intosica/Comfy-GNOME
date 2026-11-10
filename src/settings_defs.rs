@@ -78,16 +78,21 @@ pub fn catalog(c: &Client) -> Arc<Catalog> {
 fn build(c: &Client) -> Catalog {
     let mut b = Builder::default();
     for (_, text) in frontend_chunks(c) {
-        b.scan(&text, "Core", true);
+        scan_safely(&mut b, &text, "Core", true);
     }
     let paths: Vec<String> = c.get("/extensions").ok().and_then(|v| v.as_array().map(|a| a.iter().filter_map(|p| p.as_str().map(str::to_owned)).collect())).unwrap_or_default();
     for (p, text) in paths.iter().zip(fetch_all(c, &paths)) {
         let pack = p.trim_start_matches("/extensions/").split('/').next().unwrap_or("").to_owned();
         if let Some(text) = text {
-            b.scan(&text, &pack, false);
+            scan_safely(&mut b, &text, &pack, false);
         }
     }
     b.finish()
+}
+
+/// The scanner is a hand-written tokenizer over arbitrary third-party JS: one bad file is skipped, not fatal.
+fn scan_safely(b: &mut Builder, text: &str, pack: &str, frontend: bool) {
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| b.scan(text, pack, frontend)));
 }
 
 /// Frontend chunks reachable from `index.html`, breadth first (bounded). Vendor and i18n
@@ -120,12 +125,17 @@ fn frontend_chunks(c: &Client) -> Vec<(String, String)> {
 /// GET many paths on 8 threads; results keep the input order.
 fn fetch_all(c: &Client, paths: &[String]) -> Vec<Option<String>> {
     let next = std::sync::atomic::AtomicUsize::new(0);
+    // ponytail: 30 s budget per batch; slower backends get a partial catalog (unfetched files = no defs).
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     let out: Mutex<Vec<Option<String>>> = Mutex::new(vec![None; paths.len()]);
     std::thread::scope(|s| {
         for _ in 0..8 {
             s.spawn(|| loop {
                 let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 let Some(p) = paths.get(i) else { break };
+                if std::time::Instant::now() > deadline {
+                    break;
+                }
                 let text = c.view_query(&encode_path(p)).ok().map(|b| String::from_utf8_lossy(&b).into_owned());
                 out.lock().unwrap()[i] = text;
             });
