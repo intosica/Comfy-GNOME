@@ -93,7 +93,7 @@ fn build(c: &Client) -> Catalog {
 /// Frontend chunks reachable from `index.html`, breadth first (bounded). Vendor and i18n
 /// bundles never hold definitions and are most of the bytes, so they're skipped.
 fn frontend_chunks(c: &Client) -> Vec<(String, String)> {
-    const SKIP: [&str; 4] = ["vendor-", "nodeDefs-", "main-", "commands-"];
+    const SKIP: [&str; 4] = ["vendor-", "nodeDefs-", "settings-", "commands-"];
     const MAX_FILES: usize = 400;
     const MAX_BYTES: usize = 24 << 20;
     let Some(index) = c.view_query("/").ok().map(|b| String::from_utf8_lossy(&b).into_owned()) else { return Vec::new() };
@@ -152,7 +152,8 @@ pub fn merge(cat: &Catalog, values: &BTreeMap<String, Value>) -> Catalog {
     let mut out = cat.clone();
     let known: HashSet<&str> = cat.defs.iter().map(|d| d.id.as_str()).collect();
     for (k, v) in values {
-        if known.contains(k.as_str()) || cat.hidden.contains(k) {
+        // ComfyGNOME.* are this app's own keys, drawn by workspace/settings.rs.
+        if known.contains(k.as_str()) || cat.hidden.contains(k) || k.starts_with("ComfyGNOME.") {
             continue;
         }
         let kind = match v {

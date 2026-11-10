@@ -441,8 +441,10 @@ fn wrap(cr: &Context, text: &str, max: f64) -> Vec<String> {
 /// `scroll`: the text offset of a multiline widget, in canvas pixels.
 pub fn draw(cr: &Context, w: &Widget, r: [f64; 4], linked: bool, scroll: f64) {
     let [x, y, rw, rh] = r;
-    let base = if matches!(w.kind, WKind::Button) { 0x3a3a3a } else { 0x222222 };
-    let (dim, txt) = if linked { (0x555555, 0x777777) } else { (0x888888, 0xdddddd) };
+    let pal = crate::theme::current();
+    let (wbg, wtxt, wsec) = (pal.lg("WIDGET_BGCOLOR", 0x222222), pal.lg("WIDGET_TEXT_COLOR", 0xdddddd), pal.lg("WIDGET_SECONDARY_TEXT_COLOR", 0x888888));
+    let base = if matches!(w.kind, WKind::Button) { crate::theme::mix(wbg, wtxt, 0.1) } else { wbg };
+    let (dim, txt) = if linked { (pal.lg("WIDGET_DISABLED_TEXT_COLOR", 0x555555), wsec) } else { (wsec, wtxt) };
     pill(cr, r, base);
     let ty = y + rh.min(ROW_H) / 2.0 + 4.0;
     match &w.kind {

@@ -32,7 +32,8 @@ Each phase ends with a runnable build, updated `AGENT-HANDOFF.md`, and screensho
       written back; unknown JSON fields preserved and **bit-faithful** (open → save → the file is unchanged, verified
       on a real 29-node graph and on one with a subgraph definition; `converted_node_count` unchanged by
       `comfyui validate workflow`; needs serde_json's `float_roundtrip`)
-- [x] Slot **type colours** (16-entry palette from `LGraphCanvas.link_type_colors`)
+- [x] Slot **type colours** from the active colour palette
+- [x] **Colour palettes**: frontend Dark/Light/Solarized/Arc/Nord/Github, web custom palettes, user JSON in `~/.config/comfy-gnome/themes` (session 33); idea only: import palettes from colour-reference sites
 - [x] Link editing: drag from an output/input to wire, drag off an input to unplug, **shift+drag** an output to
       de-anchor the far end (wire keeps hanging from its input, drop it on another output to re-source it), hover ring
       on type-compatible targets only

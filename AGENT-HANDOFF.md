@@ -1389,3 +1389,18 @@ Versioning started here: `Cargo.toml` = `0.2.0-beta.1`, tagged `v0.2.0-beta.1`, 
 the version and a Versioning section. Still missing from the panel: **Favorite** in the row menu, the Nodes tab, a
 multi-selection title and the "Workflow Overview" title. Both builds (system release + Flatpak) were rebuilt from this
 tree after the version bump.
+
+## Session 33
+
+- Preview lightbox (`Workspace::show_lightbox`, src/workspace.rs) is now a scrim added to the window's `gtk::Overlay`
+  (src/main.rs wraps the stack in one): click off the drawn picture or Esc closes; caption above/below by
+  `ComfyGNOME.PreviewCaption` (`settings::caption_above`).
+- Palettes: `src/theme.rs` (`Palette`, `list`, `set`, `current`, `set_server_palettes`, `mix`); built-ins in
+  `data/palettes/` extracted from frontend 1.45 `executionErrorStore-*.js` (BACKGROUND_IMAGE stripped). Canvas reads
+  `theme::current()` in `canvas::draw`, `type_color` and `widgets::draw`. User palettes: `~/.config/comfy-gnome/themes`.
+- Settings: root cause of placeholder names was `frontend_chunks` SKIP containing `main-` (now holds the lazy
+  GraphView chunk with core defs); SKIP is `vendor-/nodeDefs-/settings-/commands-`. `ComfyGNOME.*` keys are hidden from
+  the synthetic list; `Comfy.ColorPalette`/`CustomColorPalettes` are drawn by `palette_row`.
+- Text Editor options: `legacy` (pop-up) / `inline`. Window controls already matched `reference/Minimize Window Exit.png`.
+- Known: a few combos show raw stored values (e.g. "Sidebar size: null"); settings with JS-function widgets stay read-only.
+- Verified under Xvfb against a local backend; backend/Xvfb/scratch removed afterwards.

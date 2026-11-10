@@ -17,6 +17,7 @@ mod settings_defs;
 mod workflow;
 mod canvas;
 mod splash;
+mod theme;
 mod workspace;
 
 use adw::prelude::*;
@@ -94,7 +95,7 @@ fn build_window(app: &adw::Application) {
         .title("Comfy-GNOME")
         .default_width(1280)
         .default_height(800)
-        .content(&stack)
+        .content(&adw::gtk::Overlay::builder().child(&stack).build())
         .build();
 
     let ws = workspace::Workspace::new();

@@ -32,6 +32,8 @@ the backend's `userdata` folder.
 - **Prompt editing** — a real text editor for prompt boxes: Ctrl+↑/↓ weights the word or selection
   `(word:1.05)`, Ctrl+Enter applies, Enter inserts a newline, long prompts wrap instead of scrolling out of sight.
 - **Link Render Mode** — spline, straight, linear or hidden wires, live from Settings (`Comfy.LinkRenderMode`).
+- **Color palettes** — Settings → Appearance: the frontend's Dark, Light, Solarized, Arc, Nord and Github palettes, your web UI custom palettes, and any ComfyUI-format palette JSON in `~/.config/comfy-gnome/themes/`.
+- **Image preview** — click the dark area to close; the file name sits above or below the picture (your choice in Settings).
 - **Row menus** — right-click any Power Lora row to toggle it, move it up/down or remove it.
 - **Collapsible log** — the Log/Preview pane folds into a thin bar with the `▼`/`▲` toggle, and comes back with
   one click; the bar never disappears.

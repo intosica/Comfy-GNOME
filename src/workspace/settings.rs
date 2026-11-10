@@ -343,12 +343,13 @@ fn show(d: &Rc<Dlg>, page: &Page) {
         Page::Cat(c) => {
             title(d, category_label(c));
             if c == "Appearance" {
+                palette_row(d);
                 let g = group(d, "Comfy-GNOME");
-                theme_row(&g);
                 text_editor_row(d, &g);
+                caption_row(d, &g);
             }
             let Some(cat) = cat else { return loading(d, "") };
-            let defs: Vec<&SettingDef> = cat.defs.iter().filter(|s| s.category() == c).collect();
+            let defs: Vec<&SettingDef> = cat.defs.iter().filter(|s| s.category() == c && !OURS.contains(&s.id.as_str())).collect();
             let mut sections: Vec<&str> = Vec::new();
             for s in &defs {
                 if !sections.contains(&s.section()) {
@@ -380,7 +381,7 @@ fn matches(d: &Rc<Dlg>, q: &str) {
     title(d, "Matches");
     let Some(cat) = d.cat.borrow().clone() else { return loading(d, "") };
     let hit = |s: &SettingDef| [&s.name, &s.id, &s.tooltip].iter().any(|t| t.to_lowercase().contains(q));
-    let hits: Vec<&SettingDef> = cat.defs.iter().filter(|s| hit(s)).take(200).collect();
+    let hits: Vec<&SettingDef> = cat.defs.iter().filter(|s| hit(s) && !OURS.contains(&s.id.as_str())).take(200).collect();
     note(d, &format!("{} setting(s) for “{q}”", hits.len()));
     for c in &cat.categories {
         let in_cat: Vec<&&SettingDef> = hits.iter().filter(|s| s.category() == c).collect();
@@ -489,6 +490,13 @@ fn commit(d: &Rc<Dlg>, key: &str, v: Value) {
         let mode = v.as_i64().unwrap_or(2) as i32;
         d.ws.set_link_mode(mode);
     }
+    if key == PALETTE {
+        crate::theme::set(v.as_str().unwrap_or("dark"));
+        d.ws.redraw_canvases();
+    }
+    if key == CAPTION {
+        set_caption_above(v.as_str() == Some("above"));
+    }
     if key == TEXT_EDITOR {
         crate::canvas::widgets::set_inline_text(v.as_str() == Some("inline"));
     }
@@ -592,38 +600,87 @@ fn extensions(d: &Rc<Dlg>, cat: &Catalog) {
     }
 }
 
-fn theme_row(g: &adw::PreferencesGroup) {
-    let model = gtk::StringList::new(&["Follow system", "Light", "Dark"]);
-    let sm = adw::StyleManager::default();
-    let sel = match sm.color_scheme() {
-        adw::ColorScheme::ForceLight => 1,
-        adw::ColorScheme::ForceDark => 2,
-        _ => 0,
-    };
-    let r = adw::ComboRow::builder().title("Theme").subtitle("Applied by this app only").model(&model).selected(sel).build();
-    r.connect_selected_notify(|c| {
-        adw::StyleManager::default().set_color_scheme(match c.selected() {
-            1 => adw::ColorScheme::ForceLight,
-            2 => adw::ColorScheme::ForceDark,
-            _ => adw::ColorScheme::Default,
-        })
+/// Settings the web UI also has, which we render ourselves (as a real picker).
+const OURS: [&str; 2] = ["Comfy.ColorPalette", "Comfy.CustomColorPalettes"];
+/// The web UI's own key: the chosen palette's id (`dark`, `light`, `nord`, a file stem in the themes folder, …).
+pub const PALETTE: &str = "Comfy.ColorPalette";
+
+/// Server setting (so every client shares it): `"inline"` or `"legacy"` (the default pop-up).
+pub const TEXT_EDITOR: &str = "ComfyGNOME.TextEditor";
+/// Server setting: where the image preview's "name - 1/3" line sits, `"below"` (default) or `"above"`.
+pub const CAPTION: &str = "ComfyGNOME.PreviewCaption";
+
+thread_local!(static CAPTION_ABOVE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) });
+pub fn set_caption_above(on: bool) {
+    CAPTION_ABOVE.with(|c| c.set(on));
+}
+pub fn caption_above() -> bool {
+    CAPTION_ABOVE.with(std::cell::Cell::get)
+}
+
+fn palette_row(d: &Rc<Dlg>) {
+    let g = group(d, "");
+    let pals = crate::theme::list();
+    let cur = d.values.borrow().get(PALETTE).and_then(Value::as_str).unwrap_or("dark").to_owned();
+    let names: Vec<&str> = pals.iter().map(|(_, n)| n.as_str()).collect();
+    let r = adw::ComboRow::builder()
+        .title("Color Palette")
+        .subtitle("Built in, plus any palette JSON in the themes folder")
+        .model(&gtk::StringList::new(&names))
+        .selected(pals.iter().position(|(i, _)| *i == cur).unwrap_or(0) as u32)
+        .build();
+    r.add_prefix(&gtk::Image::from_icon_name("cg-applications-graphics-symbolic"));
+    let ids: Vec<String> = pals.into_iter().map(|(i, _)| i).collect();
+    let dd = d.clone();
+    r.connect_selected_notify(move |c| {
+        if let Some(id) = ids.get(c.selected() as usize) {
+            commit(&dd, PALETTE, Value::from(id.as_str()));
+        }
     });
+    // Import: copy a ComfyUI-format palette JSON into the themes folder and re-render.
+    let imp = gtk::Button::builder().icon_name("cg-document-open-symbolic").valign(gtk::Align::Center).tooltip_text("Import a palette (.json)").css_classes(["flat"]).build();
+    let dd = d.clone();
+    imp.connect_clicked(move |_| {
+        let dd = dd.clone();
+        gtk::FileDialog::new().open(Some(&dd.win.clone()), gtk::gio::Cancellable::NONE, move |res| {
+            let Some(f) = res.ok().and_then(|f| f.path()) else { return };
+            let ok = std::fs::read_to_string(&f).ok().and_then(|j| crate::theme::parse(&j)).is_some();
+            let dest = crate::theme::user_dir().join(f.file_name().unwrap_or_default());
+            if ok && std::fs::create_dir_all(crate::theme::user_dir()).is_ok() && std::fs::copy(&f, dest).is_ok() {
+                dd.status.set_text("Palette imported");
+                let cur = dd.current.borrow().clone();
+                show(&dd, &cur);
+            } else {
+                dd.status.set_text("Not a ComfyUI palette file (needs id, name, colors)");
+            }
+        });
+    });
+    r.add_suffix(&imp);
     g.add(&r);
 }
 
-/// Server setting (so every client shares it): `"inline"` or `"popup"` (the default).
-pub const TEXT_EDITOR: &str = "ComfyGNOME.TextEditor";
-
 fn text_editor_row(d: &Rc<Dlg>, g: &adw::PreferencesGroup) {
-    let model = gtk::StringList::new(&["Pop-up editor", "Edit in place"]);
+    let model = gtk::StringList::new(&["Legacy (pop-up editor)", "Edit in place"]);
     let r = adw::ComboRow::builder()
-        .title("Text boxes")
+        .title("Text Editor")
         .subtitle("Where multiline prompts are edited")
         .model(&model)
         .selected(crate::canvas::widgets::inline_text() as u32)
         .build();
     let d = d.clone();
-    r.connect_selected_notify(move |c| commit(&d, TEXT_EDITOR, Value::from(if c.selected() == 1 { "inline" } else { "popup" })));
+    r.connect_selected_notify(move |c| commit(&d, TEXT_EDITOR, Value::from(if c.selected() == 1 { "inline" } else { "legacy" })));
+    g.add(&r);
+}
+
+fn caption_row(d: &Rc<Dlg>, g: &adw::PreferencesGroup) {
+    let r = adw::ComboRow::builder()
+        .title("Image preview file name")
+        .subtitle("Shown outside the picture, on the dimmed backdrop")
+        .model(&gtk::StringList::new(&["Below the image", "Above the image"]))
+        .selected(caption_above() as u32)
+        .build();
+    let d = d.clone();
+    r.connect_selected_notify(move |c| commit(&d, CAPTION, Value::from(if c.selected() == 1 { "above" } else { "below" })));
     g.add(&r);
 }
 

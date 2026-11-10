@@ -6,6 +6,28 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 The project is in **beta**: the `0.x` versions may change saved behaviour between releases, `1.0.0` is the first
 version that promises stability.
 
+## [Unreleased]
+
+### Added
+
+- **Color palettes** — Settings → Appearance → *Color Palette* lists the frontend's Dark, Light, Solarized, Arc, Nord and
+  Github palettes (`data/palettes/*.json`), the web UI's custom palettes (`Comfy.CustomColorPalettes`) and any
+  ComfyUI-format JSON in `~/.config/comfy-gnome/themes/` (Import button copies one there). Applies to the canvas
+  (background, grid, nodes, sockets, widgets) and recolours the GTK chrome. Stored in `Comfy.ColorPalette`.
+  `src/theme.rs` is the single place to add another palette source.
+- **Image preview file name** (Settings → Appearance → Comfy-GNOME): "name - 1/3" is drawn outside the picture, below
+  (default) or above (`ComfyGNOME.PreviewCaption`).
+
+### Changed
+
+- Image preview is a scrim over the window: clicking the dark area (anywhere off the picture and its buttons) closes it.
+- *Text Editor* setting (was "Text boxes") now reads "Legacy (pop-up editor)" / "Edit in place".
+
+### Fixed
+
+- Settings showed placeholder string names for core settings: the definition scan skipped the frontend chunk
+  that now holds the core list. Real names, categories and dropdowns are back (Comfy, Lite Graph, Appearance, Mask Editor).
+
 ## [0.2.0-beta.1] — 2026-11-09
 
 Properties panel, tracked against the ComfyUI 1.60.0 frontend (`src/components/rightSidePanel/`).

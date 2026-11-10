@@ -1742,33 +1742,27 @@ impl Workspace {
     }
 
     /// Full-size image over the dimmed workspace (`reference/Image Preview.png`): the picture
-    /// keeps its own resolution, floats at 90 % of the window and leaves the chrome visible.
+    /// floats on a scrim added to the window's overlay; a click anywhere off the picture and its
+    /// buttons closes it. The file name sits outside the picture (`ComfyGNOME.PreviewCaption`).
     fn show_lightbox(&self, items: &[(String, String)], start: usize) {
         let Some(client) = self.client.borrow().clone() else { return };
+        let Some(host) = self.root.ancestor(gtk::Overlay::static_type()).and_downcast::<gtk::Overlay>() else { return };
         if items.is_empty() {
             return;
         }
-        let win = self.root.root().and_downcast::<gtk::Window>();
-        let (w, h) = win.as_ref().map(|w| (w.width(), w.height())).unwrap_or((1280, 800));
-        let dlg = adw::Dialog::builder()
-            .content_width((w * 9 / 10).clamp(480, 2400))
-            .content_height((h * 9 / 10).clamp(360, 1500))
-            .build();
+        static CSS: std::sync::Once = std::sync::Once::new();
+        CSS.call_once(|| {
+            let css = gtk::CssProvider::new();
+            css.load_from_string(".cg-scrim { background: rgba(0,0,0,0.72); } .cg-scrim .cg-cap { color: white; font-weight: 600; }");
+            if let Some(d) = gtk::gdk::Display::default() {
+                gtk::style_context_add_provider_for_display(&d, &css, gtk::STYLE_PROVIDER_PRIORITY_APPLICATION);
+            }
+        });
 
         let items = Rc::new(items.to_vec());
         let at = Rc::new(std::cell::Cell::new(start.min(items.len() - 1)));
-        let pic = gtk::Picture::builder()
-            .content_fit(gtk::ContentFit::Contain)
-            .can_shrink(true)
-            .hexpand(true)
-            .vexpand(true)
-            .build();
-        let caption = gtk::Label::builder()
-            .halign(gtk::Align::Center)
-            .valign(gtk::Align::End)
-            .margin_bottom(14)
-            .css_classes(["osd", "caption"])
-            .build();
+        let pic = gtk::Picture::builder().content_fit(gtk::ContentFit::Contain).can_shrink(true).hexpand(true).vexpand(true).build();
+        let caption = gtk::Label::builder().halign(gtk::Align::Center).css_classes(["cg-cap"]).ellipsize(gtk::pango::EllipsizeMode::Middle).build();
 
         // `gen` drops a decode that finished after the user already flipped to the next image.
         let gen = Rc::new(std::cell::Cell::new(0u32));
@@ -1780,7 +1774,7 @@ impl Workspace {
                 gen.set(n);
                 let i = at.get();
                 let (name, query) = items[i].clone();
-                caption.set_text(&format!("{name}  ·  {}/{}", i + 1, items.len()));
+                caption.set_text(&format!("{name} - {}/{}", i + 1, items.len()));
                 let (client, pic, caption, gen) = (client.clone(), pic.clone(), caption.clone(), gen.clone());
                 glib::spawn_future_local(async move {
                     match gio::spawn_blocking(move || client.view_query(&query)).await {
@@ -1813,7 +1807,7 @@ impl Workspace {
             })
         };
 
-        let overlay = gtk::Overlay::builder().child(&pic).build();
+        let overlay = gtk::Overlay::builder().child(&pic).vexpand(true).build();
         let nav = |icon: &str, halign: gtk::Align, d: i32, tip: &str| {
             let b = gtk::Button::builder()
                 .icon_name(icon)
@@ -1832,30 +1826,55 @@ impl Workspace {
         let next = nav("cg-go-next-symbolic", gtk::Align::End, 1, "Next image");
         overlay.add_overlay(&prev);
         overlay.add_overlay(&next);
-        overlay.add_overlay(&caption);
-        let close = gtk::Button::builder()
-            .icon_name("cg-window-close-symbolic")
-            .halign(gtk::Align::End)
-            .valign(gtk::Align::Start)
-            .margin_top(8)
-            .margin_end(8)
-            .tooltip_text("Close")
-            .css_classes(["osd", "circular"])
-            .build();
-        {
-            let dlg = dlg.clone();
-            close.connect_clicked(move |_| {
-                dlg.close();
-            });
-        }
-        overlay.add_overlay(&close);
         for b in [&prev, &next] {
             b.set_visible(items.len() > 1);
         }
 
+        // Caption outside the picture, above or below per setting.
+        let col = gtk::Box::builder().orientation(gtk::Orientation::Vertical).spacing(10).margin_top(24).margin_bottom(24).margin_start(48).margin_end(48).build();
+        let above = settings::caption_above();
+        if above {
+            col.append(&caption);
+        }
+        col.append(&overlay);
+        if !above {
+            col.append(&caption);
+        }
+        let scrim = gtk::Box::builder().css_classes(["cg-scrim"]).focusable(true).hexpand(true).vexpand(true).build();
+        scrim.append(&col);
+        col.set_hexpand(true);
+
+        let close: Rc<dyn Fn()> = {
+            let (host, scrim) = (host.clone(), scrim.clone());
+            Rc::new(move || host.remove_overlay(&scrim))
+        };
+
+        let click = gtk::GestureClick::new();
+        {
+            let (pic, scrim, close) = (pic.clone(), scrim.clone(), close.clone());
+            click.connect_pressed(move |_, _, x, y| {
+                // Inside the drawn picture (Contain letterboxes the widget) = keep open.
+                let inside = pic.paintable().zip(scrim.compute_point(&pic, &gtk::graphene::Point::new(x as f32, y as f32))).is_some_and(|(p, pt)| {
+                    let (px, py) = (pt.x() as f64, pt.y() as f64);
+                    let (iw, ih) = (p.intrinsic_width() as f64, p.intrinsic_height() as f64);
+                    let (aw, ah) = (pic.width() as f64, pic.height() as f64);
+                    if iw <= 0.0 || ih <= 0.0 {
+                        return false;
+                    }
+                    let k = (aw / iw).min(ah / ih);
+                    let (dw, dh) = (iw * k, ih * k);
+                    (px - (aw - dw) / 2.0).abs() <= dw / 2.0 && (py - (ah - dh) / 2.0).abs() <= dh / 2.0
+                });
+                if !inside {
+                    close();
+                }
+            });
+        }
+        scrim.add_controller(click);
+
         let keys = gtk::EventControllerKey::new();
         {
-            let (step, dlg) = (step.clone(), dlg.clone());
+            let (step, close) = (step.clone(), close.clone());
             keys.connect_key_pressed(move |_, key, _, _| match key {
                 gtk::gdk::Key::Left | gtk::gdk::Key::Page_Up => {
                     step(-1);
@@ -1866,15 +1885,15 @@ impl Workspace {
                     glib::Propagation::Stop
                 }
                 gtk::gdk::Key::Escape => {
-                    dlg.close();
+                    close();
                     glib::Propagation::Stop
                 }
                 _ => glib::Propagation::Proceed,
             });
         }
-        dlg.add_controller(keys);
-        dlg.set_child(Some(&overlay));
-        dlg.present(win.as_ref());
+        scrim.add_controller(keys);
+        host.add_overlay(&scrim);
+        scrim.grab_focus();
         load();
     }
 
@@ -3635,6 +3654,12 @@ impl Workspace {
     }
 
     /// `Comfy.LinkRenderMode` for every canvas, present and future.
+    pub fn redraw_canvases(&self) {
+        for d in self.docs.borrow().iter() {
+            d.borrow().canvas.area.queue_draw();
+        }
+    }
+
     fn set_link_mode(&self, mode: i32) {
         self.link_mode.set(mode);
         for d in self.docs.borrow().iter() {
@@ -3670,6 +3695,10 @@ impl Workspace {
                 .unwrap_or("default")
                 .to_owned();
             crate::canvas::widgets::set_inline_text(v.get(settings::TEXT_EDITOR).and_then(Value::as_str) == Some("inline"));
+            settings::set_caption_above(v.get(settings::CAPTION).and_then(Value::as_str) == Some("above"));
+            crate::theme::set_server_palettes(v.get("Comfy.CustomColorPalettes"));
+            crate::theme::set(v.get(settings::PALETTE).and_then(Value::as_str).unwrap_or("dark"));
+            me.redraw_canvases();
             me.persist.set(v.get("Comfy.Workflow.Persist").and_then(Value::as_bool).unwrap_or(true));
             me.restore_session();
             if me.docs.borrow().is_empty() {

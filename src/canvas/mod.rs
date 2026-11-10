@@ -367,28 +367,9 @@ pub fn compatible(out_ty: &str, in_ty: &str) -> bool {
     in_ty.is_empty() || in_ty.split(',').any(|t| ok(t.trim()))
 }
 
-/// ComfyUI dark-palette socket colours (`src/assets/palettes/dark.json` → colors.node_slot),
-/// with litegraph's default link colour for everything else.
+/// Socket colour of a type in the live palette (`crate::theme`), the link colour for unlisted types.
 pub fn type_color(ty: &str) -> u32 {
-    match ty {
-        "CLIP" => 0xffd500,
-        "CLIP_VISION" => 0xa8dadc,
-        "CLIP_VISION_OUTPUT" => 0xad7452,
-        "CONDITIONING" => 0xffa931,
-        "CONTROL_NET" => 0x6ee7b7,
-        "IMAGE" => 0x64b5f6,
-        "LATENT" => 0xff9cf9,
-        "MASK" => 0x81c784,
-        "MODEL" => 0xb39ddb,
-        "STYLE_MODEL" => 0xc2ffae,
-        "VAE" => 0xff6e6e,
-        "NOISE" => 0xb0b0b0,
-        "GUIDER" => 0x66ffff,
-        "SAMPLER" => 0xecb4b4,
-        "SIGMAS" => 0xcdffcd,
-        "TAESD" => 0xdcc274,
-        _ => 0x99aa99,
-    }
+    crate::theme::current().slot(ty)
 }
 
 type WidgetCb = Box<dyn Fn(&str, &str, Value, bool)>;
@@ -1446,7 +1427,10 @@ fn link_path(cr: &gtk::cairo::Context, mode: i32, (ox, oy): (f64, f64), (ix, iy)
 
 fn draw(cr: &gtk::cairo::Context, s: &State, w: f64, h: f64) {
     // ponytail: cairo errors (OOM / invalid surface) are ignored with `.ok()`; nothing useful to recover.
-    rgb(cr, 0x202020);
+    let pal = crate::theme::current();
+    let bg = pal.comfy("bg-color", 0x202020);
+    let ink = if pal.light { 0 } else { 0xffffff };
+    rgb(cr, bg);
     cr.paint().ok();
 
     let v = s.view;
@@ -1460,7 +1444,7 @@ fn draw(cr: &gtk::cairo::Context, s: &State, w: f64, h: f64) {
         let (x1, y1) = v.to_canvas((w, h));
         // Two strokes: faint minor lines, slightly brighter every 5th (litegraph-style).
         cr.set_line_width(1.0 / v.zoom);
-        for (major, color) in [(false, 0x262626), (true, 0x2e2e2e)] {
+        for (major, color) in [(false, crate::theme::mix(bg, ink, 0.027)), (true, crate::theme::mix(bg, ink, 0.063))] {
             rgb(cr, color);
             let step = |k: f64| ((k / GRID).round() as i64).rem_euclid(5) == 0;
             let mut x = (x0 / GRID).floor() * GRID;
@@ -1567,10 +1551,10 @@ fn draw(cr: &gtk::cairo::Context, s: &State, w: f64, h: f64) {
         rgba(cr, 0x000000, 0.3 * alpha);
         cr.fill().ok();
         rounded_rect(cr, x, y - TITLE_H, nw, nh + TITLE_H, 8.0);
-        rgba(cr, if n.mode == 4 { 0x9a3a9a } else { n.bgcolor.unwrap_or(0x353535) }, alpha);
+        rgba(cr, if n.mode == 4 { 0x9a3a9a } else { n.bgcolor.unwrap_or_else(|| pal.lg("NODE_DEFAULT_BGCOLOR", 0x353535)) }, alpha);
         cr.fill_preserve().ok();
         let dragging = matches!(&s.drag, Some(Drag::Nodes { idx, .. }) if *idx == i) || s.sel.contains(&n.id);
-        rgb(cr, if dragging { 0xffffff } else { 0x111111 });
+        rgb(cr, if dragging { pal.lg("NODE_BOX_OUTLINE_COLOR", 0xffffff) } else { 0x111111 });
         cr.set_line_width(if dragging { 2.0 } else { 1.0 });
         cr.stroke().ok();
 
@@ -1578,7 +1562,7 @@ fn draw(cr: &gtk::cairo::Context, s: &State, w: f64, h: f64) {
         cr.save().ok();
         rounded_rect(cr, x, y - TITLE_H, nw, nh + TITLE_H, 8.0);
         cr.clip();
-        rgba(cr, if n.mode == 4 { 0x7a2a7a } else { n.color.unwrap_or(0x333333) }, alpha);
+        rgba(cr, if n.mode == 4 { 0x7a2a7a } else { n.color.unwrap_or_else(|| pal.lg("NODE_DEFAULT_COLOR", 0x333333)) }, alpha);
         cr.rectangle(x, y - TITLE_H, nw, TITLE_H);
         cr.fill().ok();
         if !n.collapsed {
@@ -1591,11 +1575,11 @@ fn draw(cr: &gtk::cairo::Context, s: &State, w: f64, h: f64) {
             continue;
         }
         cr.set_font_size(13.0);
-        rgb(cr, 0xd4d4d4);
+        rgb(cr, crate::theme::mix(pal.lg("NODE_TITLE_COLOR", 0x999999), pal.lg("NODE_SELECTED_TITLE_COLOR", 0xffffff), 0.7));
         cr.move_to(x + 28.0, y - TITLE_H / 2.0 + 5.0);
         text::show(cr, &widgets::fit(cr, &n.title, nw - 36.0));
         cr.restore().ok();
-        rgb(cr, 0x999999);
+        rgb(cr, pal.lg("NODE_TITLE_COLOR", 0x999999));
         if n.subgraph {
             // two stacked squares = "contains a graph"
             cr.rectangle(x + 8.0, y - TITLE_H / 2.0 - 6.0, 8.0, 8.0);
@@ -1607,7 +1591,7 @@ fn draw(cr: &gtk::cairo::Context, s: &State, w: f64, h: f64) {
             cr.fill().ok();
         }
         if s.sel.contains(&n.id) {
-            rgb(cr, 0xffffff);
+            rgb(cr, pal.lg("NODE_BOX_OUTLINE_COLOR", 0xffffff));
             cr.set_line_width(2.0 / v.zoom);
             rounded_rect(cr, x - 3.0, y - TITLE_H - 3.0, nw + 6.0, nh + TITLE_H + 6.0, 10.0);
             cr.stroke().ok();
@@ -1665,7 +1649,7 @@ fn draw(cr: &gtk::cairo::Context, s: &State, w: f64, h: f64) {
                     }
                 }
                 if shadowed { continue; }
-                rgb(cr, 0xaaaaaa);
+                rgb(cr, pal.lg("NODE_TEXT_COLOR", 0xaaaaaa));
                 let tw = text::width(cr, &slot.label);
                 cr.move_to(if out { px - 12.0 - tw } else { px + 12.0 }, py + 4.0);
                 text::show(cr, &slot.label);
