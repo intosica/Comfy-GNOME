@@ -523,6 +523,10 @@ fn commit(d: &Rc<Dlg>, key: &str, v: Value) {
     if key == TEXT_EDITOR {
         crate::canvas::widgets::set_inline_text(v.as_str() == Some("inline"));
     }
+    if key == "Comfy.Minimap.Visible" {
+        crate::canvas::set_minimap(v.as_bool().unwrap_or(true));
+        d.ws.redraw_canvases();
+    }
     if key == "Comfy.Execution.PreviewMethod" {
         d.ws.set_preview_method(v.as_str().unwrap_or("default"));
     }

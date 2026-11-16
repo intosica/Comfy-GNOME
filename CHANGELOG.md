@@ -8,6 +8,18 @@ version that promises stability.
 
 ## [Unreleased]
 
+## [0.2.0-beta.5] — 2026-11-16
+
+### Added
+
+- **Error reporting**: a failed run outlines the offending node in red with a `!` badge and lists the errors in a
+  banner on the canvas (click a line to jump to the node, ✕ to dismiss). Rejected prompts (validation errors) are
+  mapped to their nodes too.
+- **Node tooltips**: hovering a node shows its description (or its error message).
+- **Reroute nodes**: drawn as a compact pill; `Reroute` is available in the add-node menu even though the backend
+  does not list it.
+- **Minimap** (bottom-right): click or drag to pan; toggle with `Comfy.Minimap.Visible`.
+
 ## [0.2.0-beta.4] — 2026-11-16
 
 Runs natively on Wayland (COSMIC); the Flatpak launches again.

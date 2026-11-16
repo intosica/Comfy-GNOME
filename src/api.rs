@@ -21,7 +21,7 @@ pub enum WsEvent {
     /// `executing`: `node == None` means the prompt finished.
     Executing { node: Option<String>, prompt_id: Option<String> },
     ExecutionStart { prompt_id: String },
-    ExecutionError { message: String },
+    ExecutionError { message: String, node: String },
     /// Binary preview frame (JPEG/PNG bytes, header stripped) and the node the backend
     /// wants it shown on (`display_node_id`: subgraph/custom-sampler frames bubble to the host).
     Preview { bytes: Vec<u8>, display_node: Option<String> },
@@ -377,6 +377,26 @@ impl Client {
     }
 }
 
+/// Per-node messages of a rejected `/prompt` (`HTTP 400: {"node_errors": …}`).
+pub fn node_errors(e: &str) -> Vec<(String, String)> {
+    let Some(v) = e.split_once(": ").and_then(|(_, b)| serde_json::from_str::<Value>(b).ok()) else { return vec![] };
+    let mut out: Vec<(String, String)> = v["node_errors"]
+        .as_object()
+        .into_iter()
+        .flatten()
+        .map(|(id, n)| {
+            let msg = n["errors"].as_array().into_iter().flatten().filter_map(|x| x["message"].as_str()).collect::<Vec<_>>().join("; ");
+            (id.split(':').next().unwrap_or(id).to_owned(), msg)
+        })
+        .collect();
+    if out.is_empty() {
+        if let Some(m) = v["error"]["message"].as_str() {
+            out.push((String::new(), m.to_owned()));
+        }
+    }
+    out
+}
+
 fn err(e: ureq::Error) -> String {
     match e {
         ureq::Error::Status(code, r) => format!("HTTP {code}: {}", r.into_string().unwrap_or_default()),
@@ -557,6 +577,7 @@ pub fn parse_text(t: &str) -> Option<WsEvent> {
         },
         "execution_start" => WsEvent::ExecutionStart { prompt_id: s("prompt_id").unwrap_or_default() },
         "execution_error" => WsEvent::ExecutionError {
+            node: s("node_id").unwrap_or_default(),
             message: format!(
                 "{} (node {}): {}",
                 s("node_type").unwrap_or_default(),

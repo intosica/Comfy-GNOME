@@ -894,10 +894,11 @@ pub fn scene(
             .or_else(|| wf.subgraphs.get(&n.ty).map(|s| s.name.clone()))
             .or_else(|| node_def.map(|d| d.display_name.clone()))
             .unwrap_or_else(|| n.ty.clone());
+        let reroute = n.ty == "Reroute";
         let mut images = Vec::new();
         let widgets = build_widgets(wf, graph, n, reg, &mut images);
         // Saved sizes can be tiny/garbage in old files; `Node::relayout` grows the height to fit.
-        let size = (n.size.0.max(120.0), n.size.1.max(40.0));
+        let size = if reroute { (60.0, 26.0) } else { (n.size.0.max(120.0), n.size.1.max(40.0)) };
         let mut inputs: Vec<Slot> = n
             .inputs
             .iter()
@@ -923,7 +924,9 @@ pub fn scene(
         });
         let mut node = Node {
             id: n.id.clone(),
-            title,
+            title: if reroute { String::new() } else { title },
+            tip: node_def.map(|d| d.description.clone()).unwrap_or_default(),
+            reroute,
             pos: n.pos,
             size,
             inputs,

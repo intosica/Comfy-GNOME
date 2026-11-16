@@ -104,6 +104,12 @@ impl Registry {
             .map(|m| m.iter().filter_map(|(k, d)| Some((k.clone(), parse_node(k, d)?))).collect())
             .unwrap_or_default();
         let order = v.as_object().map(|m| m.keys().filter(|k| nodes_has(&nodes, k)).cloned().collect()).unwrap_or_default();
+        let mut nodes = nodes;
+        // Frontend-only node: the backend never lists it, but the add menu should.
+        if !nodes.contains_key("Reroute") {
+            let def = serde_json::json!({"input":{"required":{"v":["*",{}]}},"output":["*"],"category":"utils","python_module":"nodes","display_name":"Reroute"});
+            nodes.extend(parse_node("Reroute", &def).map(|d| ("Reroute".to_owned(), d)));
+        }
         let mut r = Self { nodes, order };
         r.mark_custom_widgets();
         r

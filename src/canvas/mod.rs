@@ -66,6 +66,10 @@ pub struct Node {
     pub subgraph: bool,
     /// litegraph `shape`: 1 box, 2 round (default), 4 card.
     pub shape: i64,
+    /// Hover tooltip (registry description).
+    pub tip: String,
+    /// Reroute: drawn as a bare pill with a socket at each end.
+    pub reroute: bool,
 }
 
 /// Region boxes (normalised to the picture) and a painted mask over a node's preview.
@@ -88,15 +92,19 @@ pub struct Group {
 }
 
 impl Node {
+    /// Drawn as a title-bar pill only.
+    fn flat(&self) -> bool {
+        self.collapsed || self.reroute
+    }
     fn body_h(&self) -> f64 {
-        if self.collapsed { 0.0 } else { self.size.1 }
+        if self.flat() { 0.0 } else { self.size.1 }
     }
     fn contains(&self, (x, y): (f64, f64)) -> bool {
         x >= self.pos.0 && x <= self.pos.0 + self.size.0 && y >= self.pos.1 - TITLE_H && y <= self.pos.1 + self.body_h()
     }
     /// `pos` is the top-left of the body; the title bar sits above it (litegraph convention).
     fn slot_pos(&self, output: bool, i: usize) -> (f64, f64) {
-        if self.collapsed {
+        if self.flat() {
             let x = if output { self.pos.0 + self.size.0 } else { self.pos.0 };
             return (x, self.pos.1 - TITLE_H / 2.0);
         }
@@ -153,7 +161,7 @@ impl Node {
 
     /// Interactive widget row under canvas point `c`, with the zone hit.
     fn widget_at(&self, c: (f64, f64)) -> Option<(usize, Zone)> {
-        if self.collapsed {
+        if self.flat() {
             return None;
         }
         self.widgets.iter().enumerate().find_map(|(i, w)| {
@@ -189,6 +197,8 @@ enum Drag {
     /// Moving the current selection; positions are captured at drag start.
     Nodes { idx: usize, grab: (f64, f64), start: Vec<(usize, (f64, f64))> },
     Pan { start_offset: (f64, f64) },
+    /// Pressed on the minimap: the view follows the pointer.
+    Mini,
     Link(LinkDrag),
     /// Rubber-band selection (ctrl + drag on empty canvas, as in litegraph).
     Band { start: (f64, f64), end: (f64, f64) },
@@ -241,6 +251,8 @@ struct State {
     text_scroll: HashMap<String, HashMap<String, f64>>,
     /// Host node id currently executing (green outline).
     running: Option<String>,
+    /// Host node id → error message from the last run (red badge, banner).
+    errors: Vec<(String, String)>,
     /// Snap node moves/resizes to `snap_grid` (`Comfy.SnapToGrid.GridSize`).
     snap_always: bool,
     snap_grid: f64,
@@ -283,7 +295,7 @@ fn snap_to(v: f64, grid: f64) -> f64 {
 
 impl State {
     fn toggle_collapse(&mut self, id: &str) {
-        if let Some(n) = self.nodes.iter_mut().find(|n| n.id == id) {
+        if let Some(n) = self.nodes.iter_mut().find(|n| n.id == id && !n.reroute) {
             n.collapsed = !n.collapsed;
             n.relayout();
         }
@@ -579,6 +591,11 @@ impl Canvas {
             n.relayout();
         }
         drop(s);
+        self.area.queue_draw();
+    }
+
+    pub fn set_errors(&self, errors: Vec<(String, String)>) {
+        self.state.borrow_mut().errors = errors;
         self.area.queue_draw();
     }
 
@@ -921,8 +938,23 @@ impl Canvas {
     fn setup_input(&self) {
         // Track pointer for zoom anchoring (scroll events carry no position).
         let motion = gtk::EventControllerMotion::new();
-        let st = self.state.clone();
-        motion.connect_motion(move |_, x, y| st.borrow_mut().pointer = (x, y));
+        let (st, area) = (self.state.clone(), self.area.clone());
+        motion.connect_motion(move |_, x, y| {
+            let mut s = st.borrow_mut();
+            s.pointer = (x, y);
+            let c = s.view.to_canvas((x, y));
+            let tip = s.order.iter().rev().map(|&i| &s.nodes[i]).find(|n| n.contains(c)).filter(|n| n.widget_at(c).is_none()).map(|n| {
+                match s.errors.iter().find(|e| e.0 == n.id) {
+                    Some(e) => format!("⚠ {}", e.1),
+                    None => n.tip.clone(),
+                }
+            });
+            drop(s);
+            let tip = tip.filter(|t| !t.is_empty());
+            if area.tooltip_text().map(|t| t.to_string()) != tip {
+                area.set_tooltip_text(tip.as_deref());
+            }
+        });
         self.area.add_controller(motion);
 
         // Scroll = zoom around pointer. Smooth (touchpad) deltas are fractional; powf handles both.
@@ -981,6 +1013,31 @@ impl Canvas {
                     .map(|e| e.modifier_state().contains(gdk::ModifierType::CONTROL_MASK))
                     .unwrap_or(false);
                 let mut s = st.borrow_mut();
+                let (aw, ah) = (area.width() as f64, area.height() as f64);
+                if let Some(b) = banner(&s, aw).filter(|b| x >= b[0] && x <= b[0] + b[2] && y >= b[1] && y <= b[1] + b[3]) {
+                    let i = ((y - b[1] - 2.0) / ERR_LINE).max(0.0) as usize;
+                    if i == 0 && x > b[0] + b[2] - 28.0 {
+                        s.errors.clear();
+                    } else if let Some((id, _)) = s.errors.get(i).filter(|_| i < ERR_SHOWN).cloned() {
+                        if let Some(n) = s.nodes.iter().find(|n| n.id == id) {
+                            let z = s.view.zoom;
+                            let (cx, cy) = (n.pos.0 + n.size.0 / 2.0, n.pos.1 + n.body_h() / 2.0);
+                            s.view.offset = (aw / 2.0 - cx * z, ah / 2.0 - cy * z);
+                            s.sel.clear();
+                            s.sel.insert(id);
+                        }
+                    }
+                    drop(s);
+                    area.queue_draw();
+                    return;
+                }
+                if minimap(&s, aw, ah).is_some_and(|(r, _)| x >= r[0] && x <= r[0] + r[2] && y >= r[1] && y <= r[1] + r[3]) {
+                    mini_pan(&mut s, (x, y), aw, ah);
+                    s.drag = Some(Drag::Mini);
+                    drop(s);
+                    area.queue_draw();
+                    return;
+                }
                 s.sel_group = None;
                 let c = s.view.to_canvas((x, y));
                 let r = 9.0 / s.view.zoom; // constant ~9 screen px, whatever the zoom
@@ -1197,6 +1254,12 @@ impl Canvas {
                 let mut s = st.borrow_mut();
                 let st = &mut *s;
                 let view = st.view;
+                if matches!(st.drag, Some(Drag::Mini)) {
+                    mini_pan(st, (sx + dx, sy + dy), area.width() as f64, area.height() as f64);
+                    drop(s);
+                    area.queue_draw();
+                    return;
+                }
                 match &mut st.drag {
                     Some(Drag::Nodes { idx, grab, start }) => {
                         let c = view.to_canvas((sx + dx, sy + dy));
@@ -1244,7 +1307,7 @@ impl Canvas {
                             wd.value = widgets::num_value(&wd.kind, widgets::as_num(base) + steps * widgets::step_of(&wd.kind));
                         }
                     }
-                    None => return,
+                    Some(Drag::Mini) | None => return,
                 }
                 drop(s);
                 area.queue_draw();
@@ -1666,7 +1729,7 @@ fn draw(cr: &gtk::cairo::Context, s: &State, w: f64, h: f64) {
         rgba(cr, if n.mode == 4 { 0x7a2a7a } else { n.color.unwrap_or_else(|| pal.lg("NODE_DEFAULT_COLOR", 0x333333)) }, alpha);
         cr.rectangle(x, y - TITLE_H, nw, TITLE_H);
         cr.fill().ok();
-        if !n.collapsed {
+        if !n.flat() {
             rgba(cr, 0x000000, 0.25);
             cr.rectangle(x, y - 1.0, nw, 1.0);
             cr.fill().ok();
@@ -1681,7 +1744,8 @@ fn draw(cr: &gtk::cairo::Context, s: &State, w: f64, h: f64) {
         text::show(cr, &widgets::fit(cr, &n.title, nw - 36.0));
         cr.restore().ok();
         rgb(cr, pal.lg("NODE_TITLE_COLOR", 0x999999));
-        if n.subgraph {
+        if n.reroute {
+        } else if n.subgraph {
             // two stacked squares = "contains a graph"
             cr.rectangle(x + 8.0, y - TITLE_H / 2.0 - 6.0, 8.0, 8.0);
             cr.rectangle(x + 12.0, y - TITLE_H / 2.0 - 2.0, 8.0, 8.0);
@@ -1697,13 +1761,25 @@ fn draw(cr: &gtk::cairo::Context, s: &State, w: f64, h: f64) {
             shaped(cr, n.shape, x - 3.0, y - TITLE_H - 3.0, nw + 6.0, nh + TITLE_H + 6.0, 10.0);
             cr.stroke().ok();
         }
+        if s.errors.iter().any(|e| e.0 == n.id) {
+            rgb(cr, 0xe53935);
+            cr.set_line_width(3.0 / v.zoom);
+            shaped(cr, n.shape, x - 2.0, y - TITLE_H - 2.0, nw + 4.0, nh + TITLE_H + 4.0, 9.0);
+            cr.stroke().ok();
+            cr.arc(x + nw, y - TITLE_H, 9.0, 0.0, 2.0 * PI);
+            cr.fill().ok();
+            rgb(cr, 0xffffff);
+            cr.set_font_size(13.0);
+            cr.move_to(x + nw - 2.5, y - TITLE_H + 4.5);
+            text::show(cr, "!");
+        }
         if s.running.as_deref() == Some(n.id.as_str()) {
             rgb(cr, 0x3fc35a);
             cr.set_line_width(3.0 / v.zoom);
             shaped(cr, n.shape, x - 2.0, y - TITLE_H - 2.0, nw + 4.0, nh + TITLE_H + 4.0, 9.0);
             cr.stroke().ok();
         }
-        if n.collapsed { continue; }
+        if n.flat() { continue; }
         // Resize grip, bottom-right (litegraph paints one in the corner too).
         rgb(cr, if s.sel.contains(&n.id) { 0xffffff } else { 0x5a5a5a });
         cr.set_line_width(2.0 / v.zoom);
@@ -1844,6 +1920,96 @@ fn draw(cr: &gtk::cairo::Context, s: &State, w: f64, h: f64) {
     cr.set_font_size(11.0);
     cr.move_to(8.0, h - 8.0);
     text::show(cr, &format!("zoom {:.0}%", v.zoom * 100.0));
+
+    if let Some((r, [k, ox, oy])) = minimap(s, w, h) {
+        rgba(cr, 0x000000, 0.55);
+        cr.rectangle(r[0], r[1], r[2], r[3]);
+        cr.fill().ok();
+        cr.save().ok();
+        cr.rectangle(r[0], r[1], r[2], r[3]);
+        cr.clip();
+        for n in &s.nodes {
+            rgba(cr, if s.sel.contains(&n.id) { 0xffffff } else { n.color.unwrap_or(0x8899aa) }, 0.8);
+            cr.rectangle(ox + n.pos.0 * k, oy + (n.pos.1 - TITLE_H) * k, (n.size.0 * k).max(1.5), ((n.body_h() + TITLE_H) * k).max(1.5));
+            cr.fill().ok();
+        }
+        rgb(cr, 0x7aa2ff);
+        cr.set_line_width(1.5);
+        let (cx, cy) = (-v.offset.0 / v.zoom, -v.offset.1 / v.zoom);
+        cr.rectangle(ox + cx * k, oy + cy * k, w / v.zoom * k, h / v.zoom * k);
+        cr.stroke().ok();
+        cr.restore().ok();
+        rgba(cr, 0xffffff, 0.3);
+        cr.set_line_width(1.0);
+        cr.rectangle(r[0], r[1], r[2], r[3]);
+        cr.stroke().ok();
+    }
+
+    if let Some(b) = banner(s, w) {
+        rgba(cr, 0x7a1c1c, 0.92);
+        cr.rectangle(b[0], b[1], b[2], b[3]);
+        cr.fill().ok();
+        cr.set_font_size(12.0);
+        rgb(cr, 0xffffff);
+        for (i, (id, msg)) in s.errors.iter().take(ERR_SHOWN).enumerate() {
+            let title = s.nodes.iter().find(|n| &n.id == id).map_or(id.as_str(), |n| n.title.as_str());
+            cr.move_to(b[0] + 8.0, b[1] + 2.0 + (i as f64 + 0.75) * ERR_LINE);
+            text::show(cr, &widgets::fit(cr, &format!("{title}: {}", msg.lines().next().unwrap_or("")), b[2] - 44.0));
+        }
+        if s.errors.len() > ERR_SHOWN {
+            cr.move_to(b[0] + 8.0, b[1] + 2.0 + (ERR_SHOWN as f64 + 0.75) * ERR_LINE);
+            text::show(cr, &format!("+{} more", s.errors.len() - ERR_SHOWN));
+        }
+        cr.move_to(b[0] + b[2] - 20.0, b[1] + 2.0 + 0.75 * ERR_LINE);
+        text::show(cr, "✕");
+    }
+}
+
+const ERR_LINE: f64 = 20.0;
+const ERR_SHOWN: usize = 4;
+
+/// Error banner rect (screen px).
+fn banner(s: &State, w: f64) -> Option<[f64; 4]> {
+    if s.errors.is_empty() {
+        return None;
+    }
+    let rows = s.errors.len().min(ERR_SHOWN) + usize::from(s.errors.len() > ERR_SHOWN);
+    let bw = (w - 20.0).min(600.0);
+    Some([(w - bw) / 2.0, 10.0, bw, rows as f64 * ERR_LINE + 4.0])
+}
+
+thread_local! {
+    static MINIMAP: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
+}
+
+/// `Comfy.Minimap.Visible`.
+pub fn set_minimap(on: bool) {
+    MINIMAP.with(|c| c.set(on));
+}
+
+/// Minimap rect (screen px) and the canvas→screen map `[scale, ox, oy]` fitting every node.
+fn minimap(s: &State, w: f64, h: f64) -> Option<([f64; 4], [f64; 3])> {
+    const MW: f64 = 180.0;
+    const MH: f64 = 120.0;
+    if !MINIMAP.with(std::cell::Cell::get) || s.nodes.is_empty() || w < MW * 2.0 || h < MH * 2.0 {
+        return None;
+    }
+    let mut b = [f64::MAX, f64::MAX, f64::MIN, f64::MIN];
+    for n in &s.nodes {
+        b = [b[0].min(n.pos.0), b[1].min(n.pos.1 - TITLE_H), b[2].max(n.pos.0 + n.size.0), b[3].max(n.pos.1 + n.body_h())];
+    }
+    let (bw, bh) = ((b[2] - b[0]).max(1.0), (b[3] - b[1]).max(1.0));
+    let k = ((MW - 8.0) / bw).min((MH - 8.0) / bh);
+    let r = [w - MW - 10.0, h - MH - 10.0, MW, MH];
+    Some((r, [k, r[0] + (MW - bw * k) / 2.0 - b[0] * k, r[1] + (MH - bh * k) / 2.0 - b[1] * k]))
+}
+
+/// Centre the view on the canvas point under minimap pixel `p`.
+fn mini_pan(s: &mut State, p: (f64, f64), w: f64, h: f64) {
+    if let Some((_, [k, ox, oy])) = minimap(s, w, h) {
+        let (cx, cy) = ((p.0 - ox) / k, (p.1 - oy) / k);
+        s.view.offset = (w / 2.0 - cx * s.view.zoom, h / 2.0 - cy * s.view.zoom);
+    }
 }
 
 #[cfg(test)]

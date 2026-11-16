@@ -1230,6 +1230,7 @@ impl Workspace {
                         }
                         cache.extend(queued);
                     }
+                    doc.borrow().canvas.set_errors(vec![]);
                     me.append_log(&format!("[run] queued {} prompt(s): {}", ids.len(), ids.join(", ")));
                     me.stop_btn.set_sensitive(true);
                     me.interrupt_btn.set_sensitive(true);
@@ -1237,7 +1238,10 @@ impl Workspace {
                     // Like the web frontend: step seeds (control_after_generate) once queued.
                     me.edited(&doc);
                 }
-                Ok(Err(e)) => me.append_log(&format!("[run] rejected: {e}")),
+                Ok(Err(e)) => {
+                    doc.borrow().canvas.set_errors(api::node_errors(&e));
+                    me.append_log(&format!("[run] rejected: {e}"))
+                }
                 Err(_) => me.append_log("[run] worker panicked"),
             }
         });
@@ -3546,6 +3550,7 @@ impl Workspace {
             me.set_snap(always, grid);
             // Litegraph's enum: -1 hidden, 0 straight, 1 linear, 2 spline (the default).
             me.set_link_mode(v.get("Comfy.LinkRenderMode").and_then(Value::as_i64).map_or(2, |m| m as i32));
+            canvas::set_minimap(v.get("Comfy.Minimap.Visible").and_then(Value::as_bool).unwrap_or(true));
             *me.preview_method.borrow_mut() = v
                 .get("Comfy.Execution.PreviewMethod")
                 .and_then(Value::as_str)
@@ -3683,8 +3688,12 @@ impl Workspace {
                 self.append_log(&format!("[ws] prompt {prompt_id} started"));
                 self.refresh_queue();
             }
-            ExecutionError { message } => {
+            ExecutionError { message, node } => {
                 self.progress.set_visible(false);
+                if let Some(d) = self.run_doc.borrow().as_ref().and_then(|w| w.upgrade()) {
+                    let id = node.split(':').next().unwrap_or_default().to_owned();
+                    d.borrow().canvas.set_errors(vec![(id, message.clone())]);
+                }
                 self.append_log(&format!("[ws] ERROR {message}"));
                 self.refresh_queue();
             }
