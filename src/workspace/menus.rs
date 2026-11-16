@@ -966,7 +966,7 @@ impl Workspace {
     }
 
     /// Centre the view on node `id` at the current zoom.
-    fn center_on(&self, doc: &DocRef, id: &str, select: bool) {
+    pub(super) fn center_on(&self, doc: &DocRef, id: &str, select: bool) {
         let d = doc.borrow();
         let Some(n) = graph_ref(&d).node(id) else { return };
         let (zoom, _) = d.canvas.view();

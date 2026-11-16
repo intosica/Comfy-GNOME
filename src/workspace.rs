@@ -53,6 +53,8 @@ pub struct Workspace {
     bottom: adw::ViewStack,
     /// Tab that queued the prompt now running (receives output previews / running outline).
     run_doc: Rc<RefCell<Option<std::rc::Weak<RefCell<Doc>>>>>,
+    /// Ctrl+F find bar.
+    find: Rc<find::Find>,
     /// Favourite workflow files (`workflows/.index.json`).
     bookmarks: Rc<RefCell<std::collections::HashSet<String>>>,
     temp_seq: Rc<std::cell::Cell<u32>>,
@@ -89,6 +91,7 @@ pub struct Workspace {
 
 mod addnode;
 mod ere;
+mod find;
 mod library;
 mod masking;
 mod menus;
@@ -521,6 +524,8 @@ impl Workspace {
         let canvas_overlay = gtk::Overlay::new();
         canvas_overlay.set_child(Some(&tabs));
         canvas_overlay.add_overlay(&bar);
+        let find = Rc::new(find::Find::new());
+        canvas_overlay.add_overlay(&find.root);
         canvas_pane.append(&canvas_overlay);
 
         let log = gtk::TextView::builder()
@@ -857,6 +862,7 @@ impl Workspace {
             job_wf: Rc::default(),
             bottom,
             run_doc: Rc::default(),
+            find,
             bookmarks: Rc::default(),
             temp_seq: Rc::default(),
             online: Rc::default(),
@@ -964,6 +970,15 @@ impl Workspace {
             stop.connect_clicked(move |_| me.interrupt());
             let me = ws.clone();
             let keys = gtk::ShortcutController::new();
+            let me2 = ws.clone();
+            keys.add_shortcut(gtk::Shortcut::new(
+                gtk::ShortcutTrigger::parse_string("<Control>f"),
+                Some(gtk::CallbackAction::new(move |_, _| {
+                    me2.open_find();
+                    gtk::glib::Propagation::Stop
+                })),
+            ));
+            ws.setup_find();
             keys.add_shortcut(gtk::Shortcut::new(
                 gtk::ShortcutTrigger::parse_string("<Control>comma"),
                 Some(gtk::CallbackAction::new(move |_, _| {

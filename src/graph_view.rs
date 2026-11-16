@@ -50,12 +50,13 @@ fn slot_widget(s: &WSlot, key: String) -> Widget {
     let mut w = Widget::new(label, key, kind_of(&s.input, s.role), value);
     w.advanced = truthy_opt(&s.input, "advanced");
     w.default = s.default.clone();
+    w.tip = s.input.opts["tooltip"].as_str().unwrap_or_default().to_owned();
     w
 }
 
 /// Display name of a node as the web frontend titles it (custom title, subgraph name,
 /// registry display name, else the type).
-fn node_label(wf: &Workflow, reg: &Registry, n: &workflow::Node) -> String {
+pub(crate) fn node_label(wf: &Workflow, reg: &Registry, n: &workflow::Node) -> String {
     n.title
         .clone()
         .filter(|t| !t.is_empty())

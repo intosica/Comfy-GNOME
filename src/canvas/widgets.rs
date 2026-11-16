@@ -63,6 +63,8 @@ pub struct Widget {
     pub source: String,
     /// Value the widget resets to (registry/default); `Null` when unknown.
     pub default: Value,
+    /// Hover tooltip (the node definition's `tooltip` for this input).
+    pub tip: String,
 }
 
 impl Widget {
@@ -77,6 +79,7 @@ impl Widget {
             advanced: false,
             source: String::new(),
             default: Value::Null,
+            tip: String::new(),
         }
     }
     pub fn multiline(&self) -> bool {

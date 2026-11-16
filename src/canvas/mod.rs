@@ -253,6 +253,9 @@ struct State {
     running: Option<String>,
     /// Host node id → error message from the last run (red badge, banner).
     errors: Vec<(String, String)>,
+    /// Find-bar matches (yellow outline) and the one the bar is on (orange).
+    hits: HashSet<String>,
+    hit_cur: Option<String>,
     /// Snap node moves/resizes to `snap_grid` (`Comfy.SnapToGrid.GridSize`).
     snap_always: bool,
     snap_grid: f64,
@@ -590,6 +593,18 @@ impl Canvas {
             n.images = keys;
             n.relayout();
         }
+        drop(s);
+        self.area.queue_draw();
+    }
+
+    pub fn same(&self, o: &Canvas) -> bool {
+        Rc::ptr_eq(&self.state, &o.state)
+    }
+
+    pub fn set_hits(&self, hits: HashSet<String>, cur: Option<String>) {
+        let mut s = self.state.borrow_mut();
+        s.hits = hits;
+        s.hit_cur = cur;
         drop(s);
         self.area.queue_draw();
     }
@@ -943,11 +958,12 @@ impl Canvas {
             let mut s = st.borrow_mut();
             s.pointer = (x, y);
             let c = s.view.to_canvas((x, y));
-            let tip = s.order.iter().rev().map(|&i| &s.nodes[i]).find(|n| n.contains(c)).filter(|n| n.widget_at(c).is_none()).map(|n| {
-                match s.errors.iter().find(|e| e.0 == n.id) {
+            let tip = s.order.iter().rev().map(|&i| &s.nodes[i]).find(|n| n.contains(c)).map(|n| match n.widget_at(c) {
+                Some((wi, _)) => n.widgets[wi].tip.clone(),
+                None => match s.errors.iter().find(|e| e.0 == n.id) {
                     Some(e) => format!("⚠ {}", e.1),
                     None => n.tip.clone(),
-                }
+                },
             });
             drop(s);
             let tip = tip.filter(|t| !t.is_empty());
@@ -1759,6 +1775,13 @@ fn draw(cr: &gtk::cairo::Context, s: &State, w: f64, h: f64) {
             rgb(cr, pal.lg("NODE_BOX_OUTLINE_COLOR", 0xffffff));
             cr.set_line_width(2.0 / v.zoom);
             shaped(cr, n.shape, x - 3.0, y - TITLE_H - 3.0, nw + 6.0, nh + TITLE_H + 6.0, 10.0);
+            cr.stroke().ok();
+        }
+        if s.hits.contains(&n.id) {
+            let cur = s.hit_cur.as_deref() == Some(n.id.as_str());
+            rgb(cr, if cur { 0xff8c00 } else { 0xffd500 });
+            cr.set_line_width(if cur { 5.0 } else { 3.0 } / v.zoom);
+            shaped(cr, n.shape, x - 4.0, y - TITLE_H - 4.0, nw + 8.0, nh + TITLE_H + 8.0, 11.0);
             cr.stroke().ok();
         }
         if s.errors.iter().any(|e| e.0 == n.id) {

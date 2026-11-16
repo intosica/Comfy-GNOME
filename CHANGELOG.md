@@ -8,6 +8,16 @@ version that promises stability.
 
 ## [Unreleased]
 
+## [0.2.0-beta.6] — 2026-11-16
+
+### Added
+
+- **Find in workflow (Ctrl+F)**: a browser-style find bar. It searches everything the workflow holds, not just
+  node text boxes: node titles and types, ids, widget labels and values (prompts, notes, combos, numbers), socket
+  names, properties and group titles, including inside subgraphs. All matching nodes are outlined, Enter /
+  Shift+Enter (or Ctrl+G) step through them and the view jumps to each, entering subgraphs when needed.
+- **Parameter tooltips**: hovering a widget shows the node definition's tooltip for that input.
+
 ## [0.2.0-beta.5] — 2026-11-16
 
 ### Added

@@ -6,7 +6,7 @@
 
 <p align="center">A native GTK4 / libadwaita frontend for <a href="https://github.com/comfyanonymous/ComfyUI">ComfyUI</a>, written in Rust.</p>
 
-<p align="center"><b>0.2.0-beta.5</b> — beta: fixes and features land fast, saved workflows stay compatible.
+<p align="center"><b>0.2.0-beta.6</b> — beta: fixes and features land fast, saved workflows stay compatible.
 See <a href="CHANGELOG.md">CHANGELOG.md</a>.</p>
 
 <p align="center"><img src="docs/screenshots/graph.png" alt="Comfy-GNOME editing a workflow"></p>
@@ -105,6 +105,7 @@ group, native or Flatpak — including a script's `python` and browser shim.
 | Ctrl+G | Group selection |
 | Ctrl+S | Save |
 | Ctrl+, | Settings |
+| Ctrl+F | Find in workflow (titles, widget values, prompts, notes, groups, subgraphs) |
 | Ctrl+↑/↓ | Weight the word or selection in a prompt |
 | ←/→ or PgUp/PgDn | Step through a job's images in the lightbox |
 | Shift-click | Add to selection (Shift when closing a tab skips the unsaved prompt) |
