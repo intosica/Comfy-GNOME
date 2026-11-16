@@ -8,6 +8,18 @@ version that promises stability.
 
 ## [Unreleased]
 
+## [0.2.0-beta.7] — 2026-11-16
+
+### Added
+
+- **Video and audio viewing**: outputs under `images`, `gifs` (VHS), `video` and `audio` are now picked up from
+  live runs and history. mp4/webm/mkv/mov/avi and mp3/wav/flac/ogg/m4a open in the lightbox with a GStreamer
+  player (controls, looping). The media browser lists them as icon tiles and plays them on double-click.
+- **Animated gif / webp / apng** play in the lightbox instead of showing the first frame.
+- **Image tools in the lightbox**: *Compare* (before/after slider against the next picture), *Crop*
+  (drag a rectangle) and *Paint* (freehand, colour + size, undo). Crop and Paint can *Save As…* or *Use in
+  Workflow* (uploads the result and adds a Load Image node).
+
 ## [0.2.0-beta.6] — 2026-11-16
 
 ### Added

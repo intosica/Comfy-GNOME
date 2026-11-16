@@ -598,11 +598,12 @@ impl Media {
         holder.set_valign(gtk::Align::Start);
         let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         let is_dir = path.is_dir();
+        let av = !is_dir && is_av(path);
         let mut thumb_widget: Option<gtk::Image> = None;
-        if is_dir {
+        if is_dir || av {
             let ov = gtk::Overlay::new();
             ov.set_child(Some(&gtk::Box::new(gtk::Orientation::Vertical, 0)));
-            let icon = gtk::Image::builder().icon_name("cg-folder-symbolic").pixel_size(px / 2).halign(gtk::Align::Center).valign(gtk::Align::Center).css_classes(["dim-label"]).build();
+            let icon = gtk::Image::builder().icon_name(if !av { "cg-folder-symbolic" } else if api::media_kind(&name) == api::Kind::Video { "video-x-generic-symbolic" } else { "audio-x-generic-symbolic" }).pixel_size(px / 2).halign(gtk::Align::Center).valign(gtk::Align::Center).css_classes(["dim-label"]).build();
             ov.add_overlay(&icon);
             ov.set_size_request(px, px);
             holder.append(&ov);
@@ -647,7 +648,7 @@ impl Media {
             });
         }
         holder.add_controller(click);
-        if !is_dir {
+        if !is_dir && !av {
             // Drag onto a canvas. The payload is the same in-app JSON the queue rows use (a plain
             // string travels through the platform drag unchanged, unlike a GdkFileList which the
             // X11 backend advertises as text/uri-list and the canvas would not match); the drop
@@ -736,6 +737,11 @@ impl Media {
     }
 
     fn preview(&self, path: &Path) {
+        // Video, audio and animations play in the lightbox; stills use the bottom panel.
+        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        if api::media_kind(&name) != api::Kind::Image {
+            return self.ws.show_lightbox(&[(name, format!("file:{}", path.display()))], 0);
+        }
         if let Ok(bytes) = std::fs::read(path) {
             if let Ok(t) = gtk::gdk::Texture::from_bytes(&gtk::glib::Bytes::from_owned(bytes)) {
                 self.ws.preview.set_paintable(Some(&t));
@@ -828,7 +834,12 @@ fn is_image(p: &Path) -> bool {
     matches!(
         p.extension().and_then(|e| e.to_str()).map(str::to_lowercase).as_deref(),
         Some("png" | "jpg" | "jpeg" | "webp" | "gif" | "bmp" | "tif" | "tiff" | "avif")
-    )
+    ) || is_av(p)
+}
+
+/// Video and audio files: shown as an icon tile, played in the lightbox.
+fn is_av(p: &Path) -> bool {
+    p.file_name().is_some_and(|n| matches!(api::media_kind(&n.to_string_lossy()), api::Kind::Video | api::Kind::Audio))
 }
 
 /// Move the files to the Trash after an explicit confirmation.

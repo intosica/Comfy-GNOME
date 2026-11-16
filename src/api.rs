@@ -62,6 +62,40 @@ impl OutputImage {
     }
 }
 
+/// What a `/view` file is, by extension — decides the viewer (texture, animation, `gtk::Video`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Kind {
+    Image,
+    /// gif / webp: played frame by frame when the file really is animated.
+    Anim,
+    Video,
+    Audio,
+}
+
+pub fn media_kind(name: &str) -> Kind {
+    match name.rsplit_once('.').map(|(_, e)| e.to_lowercase()).as_deref() {
+        Some("gif" | "webp" | "apng") => Kind::Anim,
+        Some("mp4" | "webm" | "mkv" | "mov" | "avi" | "m4v" | "ogv") => Kind::Video,
+        Some("mp3" | "wav" | "flac" | "ogg" | "oga" | "opus" | "m4a" | "aac") => Kind::Audio,
+        _ => Kind::Image,
+    }
+}
+
+/// Every file a node reports: `images` (SaveImage, SaveVideo), `gifs` (VHS), `video`, `audio`.
+pub fn outputs(out: &Value) -> Vec<OutputImage> {
+    ["images", "gifs", "video", "audio"]
+        .iter()
+        .flat_map(|k| out[*k].as_array().into_iter().flatten())
+        .filter_map(|i| {
+            Some(OutputImage {
+                filename: i["filename"].as_str()?.to_owned(),
+                subfolder: i["subfolder"].as_str().unwrap_or_default().to_owned(),
+                kind: i["type"].as_str().unwrap_or("output").to_owned(),
+            })
+        })
+        .collect()
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct Queue {
     pub running: Vec<QueueItem>,
@@ -88,17 +122,7 @@ impl HistoryEntry {
     /// The `execution_start`/`execution_success` timestamps exist in `status.messages`
     /// (`[[kind, {prompt_id, timestamp}], …]`); outputs are one `images` array per node.
     pub fn parse(prompt_id: &str, v: &Value) -> Self {
-        let images = v["outputs"]
-            .as_object()
-            .into_iter()
-            .flatten()
-            .flat_map(|(_, out)| out["images"].as_array().into_iter().flatten())
-            .map(|img| OutputImage {
-                filename: img["filename"].as_str().unwrap_or_default().to_string(),
-                subfolder: img["subfolder"].as_str().unwrap_or_default().to_string(),
-                kind: img["type"].as_str().unwrap_or("output").to_string(),
-            })
-            .collect();
+        let images = v["outputs"].as_object().into_iter().flatten().flat_map(|(_, out)| outputs(out)).collect();
         let stamp = |kind: &str| {
             v["status"]["messages"]
                 .as_array()
@@ -564,16 +588,7 @@ pub fn parse_text(t: &str) -> Option<WsEvent> {
         "executing" => WsEvent::Executing { node: s("node"), prompt_id: s("prompt_id") },
         "executed" => WsEvent::Executed {
             node: s("node"),
-            images: d["output"]["images"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .map(|i| OutputImage {
-                    filename: i["filename"].as_str().unwrap_or_default().to_owned(),
-                    subfolder: i["subfolder"].as_str().unwrap_or_default().to_owned(),
-                    kind: i["type"].as_str().unwrap_or("output").to_owned(),
-                })
-                .collect(),
+            images: outputs(&d["output"]),
         },
         "execution_start" => WsEvent::ExecutionStart { prompt_id: s("prompt_id").unwrap_or_default() },
         "execution_error" => WsEvent::ExecutionError {
@@ -614,6 +629,15 @@ pub fn parse_binary(b: &[u8]) -> Option<WsEvent> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn outputs_cover_video_and_audio_keys() {
+        let v: Value = serde_json::json!({"images":[{"filename":"a.png"}],"gifs":[{"filename":"b.mp4","subfolder":"v","type":"output"}],"audio":[{"filename":"c.flac"}]});
+        let o = outputs(&v);
+        assert_eq!(o.len(), 3);
+        assert_eq!(o[1].query(), "filename=b.mp4&subfolder=v&type=output");
+        assert_eq!([media_kind("a.png"), media_kind("b.MP4"), media_kind("c.flac"), media_kind("d.gif")], [Kind::Image, Kind::Video, Kind::Audio, Kind::Anim]);
+    }
+
     use super::*;
 
     #[test]

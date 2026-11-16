@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 //! Main workspace shell: header bar, sidebar (workflows/queue), canvas, log panel.
 
-use crate::{api, backend, canvas, graph_view, prompt, registry, workflow};
+use crate::{api, backend, canvas, graph_view, imgtools, prompt, registry, workflow};
 use adw::{gio, glib, gtk, prelude::*};
 use serde_json::Value;
 use std::cell::{Cell, RefCell};
@@ -1592,7 +1592,12 @@ impl Workspace {
             let q = first.map(api::OutputImage::query).unwrap_or_default();
             thumb.set_pixel_size(44);
             thumb.set_css_classes(&["card", "queue-thumb"]);
-            if first.is_none() {
+            let av = first.map(|f| api::media_kind(&f.filename)).filter(|k| matches!(k, api::Kind::Video | api::Kind::Audio));
+            if let Some(k) = av {
+                thumb.set_icon_name(Some(if k == api::Kind::Video { "video-x-generic-symbolic" } else { "audio-x-generic-symbolic" }));
+                thumb.set_pixel_size(24);
+                thumb.set_size_request(44, 44);
+            } else if first.is_none() {
                 thumb.set_icon_name(Some("cg-document-open-symbolic"));
                 thumb.set_pixel_size(20);
                 thumb.set_size_request(44, 44);
@@ -1844,7 +1849,7 @@ impl Workspace {
     /// floats on a scrim added to the window's overlay; a click anywhere off the picture and its
     /// buttons closes it. The file name sits outside the picture (`ComfyGNOME.PreviewCaption`).
     fn show_lightbox(&self, items: &[(String, String)], start: usize) {
-        let Some(client) = self.client.borrow().clone() else { return };
+        let client = self.client.borrow().clone();
         let Some(host) = self.root.ancestor(gtk::Overlay::static_type()).and_downcast::<gtk::Overlay>() else { return };
         if items.is_empty() {
             return;
@@ -1861,6 +1866,14 @@ impl Workspace {
         let items = Rc::new(items.to_vec());
         let at = Rc::new(std::cell::Cell::new(start.min(items.len() - 1)));
         let pic = gtk::Picture::builder().content_fit(gtk::ContentFit::Contain).can_shrink(true).hexpand(true).vexpand(true).build();
+        let video = gtk::Video::builder().autoplay(true).hexpand(true).vexpand(true).build();
+        video.set_loop(true);
+        let stack = gtk::Stack::new();
+        stack.add_named(&pic, Some("pic"));
+        stack.add_named(&video, Some("video"));
+        // Bytes of the picture on show: what compare / crop / paint work from.
+        let cur: Rc<RefCell<Option<Vec<u8>>>> = Rc::default();
+        let tools = gtk::Box::builder().halign(gtk::Align::Center).spacing(6).css_classes(["linked"]).build();
         let caption = gtk::Label::builder().halign(gtk::Align::Center).css_classes(["cg-cap"]).ellipsize(gtk::pango::EllipsizeMode::Middle).build();
 
         // `gen` drops a decode that finished after the user already flipped to the next image.
@@ -1868,6 +1881,7 @@ impl Workspace {
         let load: Rc<dyn Fn()> = {
             let (client, pic, caption, gen, items, at) =
                 (client.clone(), pic.clone(), caption.clone(), gen.clone(), items.clone(), at.clone());
+            let (video, stack, cur, tools) = (video.clone(), stack.clone(), cur.clone(), tools.clone());
             Rc::new(move || {
                 let n = gen.get().wrapping_add(1);
                 gen.set(n);
@@ -1875,16 +1889,36 @@ impl Workspace {
                 let (name, query) = items[i].clone();
                 caption.set_text(&format!("{name} - {}/{}", i + 1, items.len()));
                 let (client, pic, caption, gen) = (client.clone(), pic.clone(), caption.clone(), gen.clone());
+                let (video, stack, cur, tools) = (video.clone(), stack.clone(), cur.clone(), tools.clone());
+                video.set_file(None::<&gio::File>);
                 glib::spawn_future_local(async move {
-                    match gio::spawn_blocking(move || client.view_query(&query)).await {
+                    match gio::spawn_blocking(move || fetch_media(client.as_ref(), &query)).await {
                         Ok(Ok(bytes)) => {
                             if gen.get() != n {
                                 return;
                             }
-                            match gtk::gdk::Texture::from_bytes(&glib::Bytes::from_owned(bytes)) {
-                                Ok(tex) => pic.set_paintable(Some(&tex)),
-                                Err(e) => caption.set_text(&format!("{name}: {e}")),
+                            if matches!(api::media_kind(&name), api::Kind::Video | api::Kind::Audio) {
+                                // GStreamer wants a seekable file; keep it in the cache dir.
+                                let dir = glib::user_cache_dir().join("comfy-gnome").join("view");
+                                let path = dir.join(name.replace('/', "_"));
+                                if let Err(e) = std::fs::create_dir_all(&dir).and_then(|_| std::fs::write(&path, &bytes)) {
+                                    return caption.set_text(&format!("{name}: {e}"));
+                                }
+                                *cur.borrow_mut() = None;
+                                tools.set_visible(false);
+                                stack.set_visible_child_name("video");
+                                video.set_file(Some(&gio::File::for_path(path)));
+                                return;
                             }
+                            stack.set_visible_child_name("pic");
+                            tools.set_visible(true);
+                            if !play_anim(&pic, &bytes, &gen, n) {
+                                match gtk::gdk::Texture::from_bytes(&glib::Bytes::from(&bytes[..])) {
+                                    Ok(tex) => pic.set_paintable(Some(&tex)),
+                                    Err(e) => caption.set_text(&format!("{name}: {e}")),
+                                }
+                            }
+                            *cur.borrow_mut() = Some(bytes);
                         }
                         Ok(Err(e)) => {
                             if gen.get() == n {
@@ -1906,7 +1940,7 @@ impl Workspace {
             })
         };
 
-        let overlay = gtk::Overlay::builder().child(&pic).vexpand(true).build();
+        let overlay = gtk::Overlay::builder().child(&stack).vexpand(true).build();
         let nav = |icon: &str, halign: gtk::Align, d: i32, tip: &str| {
             let b = gtk::Button::builder()
                 .icon_name(icon)
@@ -1936,6 +1970,7 @@ impl Workspace {
             col.append(&caption);
         }
         col.append(&overlay);
+        col.append(&tools);
         if !above {
             col.append(&caption);
         }
@@ -1944,15 +1979,81 @@ impl Workspace {
         col.set_hexpand(true);
 
         let close: Rc<dyn Fn()> = {
-            let (host, scrim) = (host.clone(), scrim.clone());
-            Rc::new(move || host.remove_overlay(&scrim))
+            let (host, scrim, gen, video) = (host.clone(), scrim.clone(), gen.clone(), video.clone());
+            Rc::new(move || {
+                gen.set(gen.get().wrapping_add(1)); // stops a running animation
+                video.set_file(None::<&gio::File>);
+                host.remove_overlay(&scrim)
+            })
         };
+
+        // Compare / Crop / Paint work on the picture on show.
+        let win = self.root.root().and_downcast::<gtk::Window>();
+        let tool = |label: &str, tip: &str| {
+            let b = gtk::Button::builder().label(label).tooltip_text(tip).css_classes(["osd"]).build();
+            tools.append(&b);
+            b
+        };
+        let (bc, bx, bp) = (
+            tool("Compare", "Slide between this picture and the next one"),
+            tool("Crop", "Cut a rectangle out of this picture"),
+            tool("Paint", "Draw on this picture"),
+        );
+        bc.set_sensitive(items.len() > 1);
+        {
+            let (items, at, cur, client, win) = (items.clone(), at.clone(), cur.clone(), client.clone(), win.clone());
+            bc.connect_clicked(move |_| {
+                let (Some(a), n) = (cur.borrow().clone(), items.len()) else { return };
+                let (an, bn) = (items[at.get()].0.clone(), items[(at.get() + 1) % n].0.clone());
+                let q = items[(at.get() + 1) % n].1.clone();
+                let (client, win) = (client.clone(), win.clone());
+                glib::spawn_future_local(async move {
+                    if let Ok(Ok(b)) = gio::spawn_blocking(move || fetch_media(client.as_ref(), &q)).await {
+                        if let Err(e) = imgtools::compare(win.as_ref(), (&an, &a), (&bn, &b)) {
+                            eprintln!("[compare] {e}");
+                        }
+                    }
+                });
+            });
+        }
+        // "Use in Workflow": the result becomes a Load Image node on the active tab.
+        let place = {
+            let me = self.clone();
+            move |name: String, bytes: Vec<u8>| match me.active_doc() {
+                Some(d) => me.place_image(&d, name, bytes),
+                None => me.append_log("[image] open a workflow tab first"),
+            }
+        };
+        let place = Rc::new(place);
+        {
+            let (items, at, cur, win, place, me) = (items.clone(), at.clone(), cur.clone(), win.clone(), place.clone(), self.clone());
+            bx.connect_clicked(move |_| {
+                let Some(b) = cur.borrow().clone() else { return };
+                let place = place.clone();
+                if let Err(e) = imgtools::crop(win.as_ref(), &items[at.get()].0, &b, move |n, b| place(n, b)) {
+                    me.append_log(&format!("[crop] {e}"));
+                }
+            });
+        }
+        {
+            let (items, at, cur, win, place, me) = (items.clone(), at.clone(), cur.clone(), win.clone(), place.clone(), self.clone());
+            bp.connect_clicked(move |_| {
+                let Some(b) = cur.borrow().clone() else { return };
+                let place = place.clone();
+                if let Err(e) = imgtools::paint(win.as_ref(), &items[at.get()].0, &b, move |n, b| place(n, b)) {
+                    me.append_log(&format!("[paint] {e}"));
+                }
+            });
+        }
 
         let click = gtk::GestureClick::new();
         {
-            let (pic, scrim, close) = (pic.clone(), scrim.clone(), close.clone());
+            let (pic, scrim, close, stack) = (pic.clone(), scrim.clone(), close.clone(), stack.clone());
             click.connect_pressed(move |_, _, x, y| {
                 // Inside the drawn picture (Contain letterboxes the widget) = keep open.
+                if stack.visible_child_name().as_deref() == Some("video") {
+                    return; // clicks belong to the player's controls; Esc closes
+                }
                 let inside = pic.paintable().zip(scrim.compute_point(&pic, &gtk::graphene::Point::new(x as f32, y as f32))).is_some_and(|(p, pt)| {
                     let (px, py) = (pt.x() as f64, pt.y() as f64);
                     let (iw, ih) = (p.intrinsic_width() as f64, p.intrinsic_height() as f64);
@@ -3725,7 +3826,7 @@ impl Workspace {
                 self.show_outputs(node.as_deref(), &images);
                 *self.preview_items.borrow_mut() =
                     images.iter().map(|i| (i.filename.clone(), i.query())).collect();
-                if let Some(img) = images.into_iter().next() {
+                if let Some(img) = images.into_iter().next().filter(|i| matches!(api::media_kind(&i.filename), api::Kind::Image | api::Kind::Anim)) {
                     let Some(client) = self.client.borrow().clone() else { return };
                     let me = self.clone();
                     let caption = format!("{}{}", img.subfolder, img.filename);
@@ -3751,6 +3852,40 @@ impl Workspace {
             }
         }
     }
+}
+
+/// Bytes for a lightbox item: `file:<path>` is read from disk (media browser), anything else
+/// is a `/view` query on the backend.
+fn fetch_media(client: Option<&api::Client>, q: &str) -> Result<Vec<u8>, String> {
+    match (q.strip_prefix("file:"), client) {
+        (Some(p), _) => std::fs::read(p).map_err(|e| e.to_string()),
+        (None, Some(c)) => c.view_query(q),
+        (None, None) => Err("not connected".into()),
+    }
+}
+
+/// Play a multi-frame gif/webp/apng on `pic`; false when it is a still (or undecodable) and
+/// the caller should show it as a plain texture. `gen` stops the loop once the lightbox moves on.
+fn play_anim(pic: &gtk::Picture, bytes: &[u8], gen: &Rc<std::cell::Cell<u32>>, n: u32) -> bool {
+    use gtk::gdk::gdk_pixbuf::{prelude::*, PixbufAnimation};
+    let stream = gio::MemoryInputStream::from_bytes(&glib::Bytes::from(bytes));
+    let Ok(anim) = PixbufAnimation::from_stream(&stream, gio::Cancellable::NONE) else { return false };
+    if anim.is_static_image() {
+        return false;
+    }
+    fn tick(pic: gtk::Picture, iter: gtk::gdk::gdk_pixbuf::PixbufAnimationIter, gen: Rc<std::cell::Cell<u32>>, n: u32) {
+        #[allow(deprecated)]
+        pic.set_paintable(Some(&gtk::gdk::Texture::for_pixbuf(&iter.pixbuf())));
+        let Some(d) = iter.delay_time() else { return };
+        glib::timeout_add_local_once(d.max(std::time::Duration::from_millis(20)), move || {
+            if gen.get() == n {
+                iter.advance(std::time::SystemTime::now());
+                tick(pic, iter, gen, n);
+            }
+        });
+    }
+    tick(pic.clone(), anim.iter(None), gen.clone(), n);
+    true
 }
 
 /// "Today" / "Yesterday" / "7 Nov 2026" for an epoch-millisecond timestamp.

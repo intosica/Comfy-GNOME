@@ -6,7 +6,7 @@
 
 <p align="center">A native GTK4 / libadwaita frontend for <a href="https://github.com/comfyanonymous/ComfyUI">ComfyUI</a>, written in Rust.</p>
 
-<p align="center"><b>0.2.0-beta.6</b> — beta: fixes and features land fast, saved workflows stay compatible.
+<p align="center"><b>0.2.0-beta.7</b> — beta: fixes and features land fast, saved workflows stay compatible.
 See <a href="CHANGELOG.md">CHANGELOG.md</a>.</p>
 
 <p align="center"><img src="docs/screenshots/graph.png" alt="Comfy-GNOME editing a workflow"></p>
@@ -48,6 +48,7 @@ the backend's `userdata` folder.
   right-click to show the file in your file manager or move the selection to the Trash.
 - **Queue** — day-grouped finished runs with durations and thumbnails, All/Completed filter, clear queue, and any
   pending, running or finished job opens its workflow in a new tab.
+- **Video, audio and animations** — mp4/webm/mkv/mp3/wav/flac… outputs play in the lightbox (GStreamer) and the media browser; gif/webp animate. Lightbox buttons: **Compare** (before/after slider), **Crop**, **Paint** (save, or send to the workflow as a Load Image).
 - **Images** — previews on nodes and in the log pane, full-size lightbox with ←/→ stepping over a job's images,
   and a LoRA Manager window in the host browser's app mode.
 - **Live previews + progress** — TAESD, Latent2RGB and auto follow the server's Preview method setting. Frames
