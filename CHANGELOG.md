@@ -8,6 +8,18 @@ version that promises stability.
 
 ## [Unreleased]
 
+## [0.2.0-beta.4] — 2026-11-16
+
+Runs natively on Wayland (COSMIC); the Flatpak launches again.
+
+### Fixed
+
+- Clicks landed in the wrong place and the window did not fit the screen on Wayland desktops with fractional
+  scaling (Pop!_OS COSMIC): the launchers forced `GDK_BACKEND=x11`, i.e. XWayland. GTK now picks Wayland by
+  itself; `GDK_BACKEND=x11 ./launch-system.sh` still forces X11.
+- The Flatpak did not start ("Failed to open display"): the manifest forced X11 while only the Wayland socket
+  was available. The `--env=GDK_BACKEND=x11` finish-arg is gone.
+
 ## [0.2.0-beta.3] — 2026-11-09
 
 Context menus, quick-search dismissal, group snapping, workflow folders and a narrower sidebar.

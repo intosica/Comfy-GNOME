@@ -7,7 +7,8 @@
 set -euo pipefail
 cd "$(dirname "$(readlink -f "$0")")"
 APP_ID=io.github.comfygnome.ComfyGnome
-export GDK_BACKEND="${GDK_BACKEND:-x11}"
+# GTK picks Wayland when available, X11 otherwise. Forcing X11 (XWayland) mis-scales and
+# offsets clicks on fractional-scale Wayland sessions (COSMIC); override with GDK_BACKEND=x11 if needed.
 LOG="${XDG_RUNTIME_DIR:-/tmp}/comfy-gnome-flatpak-build.log"
 # Timestamp of the last successful build: the installed binary carries flatpak's zeroed
 # mtimes, so sources can only be compared against a stamp of our own.
@@ -28,4 +29,4 @@ if [ "${1:-}" = --rebuild ] || ! flatpak info --user "$APP_ID" >/dev/null 2>&1 |
   fi
   mkdir -p "$(dirname "$STAMP")" && touch "$STAMP"
 fi
-exec flatpak run --env=GDK_BACKEND="$GDK_BACKEND" "$APP_ID" "$@"
+exec flatpak run ${GDK_BACKEND:+--env=GDK_BACKEND="$GDK_BACKEND"} "$APP_ID" "$@"

@@ -6,7 +6,7 @@
 
 <p align="center">A native GTK4 / libadwaita frontend for <a href="https://github.com/comfyanonymous/ComfyUI">ComfyUI</a>, written in Rust.</p>
 
-<p align="center"><b>0.2.0-beta.3</b> — beta: fixes and features land fast, saved workflows stay compatible.
+<p align="center"><b>0.2.0-beta.4</b> — beta: fixes and features land fast, saved workflows stay compatible.
 See <a href="CHANGELOG.md">CHANGELOG.md</a>.</p>
 
 <p align="center"><img src="docs/screenshots/graph.png" alt="Comfy-GNOME editing a workflow"></p>
@@ -68,7 +68,7 @@ the backend's `userdata` folder.
 
 ## Requirements
 
-- Linux with X11 (Wayland works through XWayland)
+- Linux, Wayland or X11 (GTK picks the native backend; `GDK_BACKEND=x11` forces XWayland)
 - GTK ≥ 4.14 and libadwaita ≥ 1.5 development packages
 - Rust (stable) and `cargo`
 - A ComfyUI checkout (the app starts it for you)
