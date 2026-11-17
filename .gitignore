@@ -8,3 +8,4 @@
 .shots/
 __pycache__/
 *.pyc
+/for video/

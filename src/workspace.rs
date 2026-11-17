@@ -2245,36 +2245,32 @@ impl Workspace {
         if let Some(c) = self.client.borrow().as_ref() {
             canvas.set_api_base(c.base_url());
         }
-        // Drop an image or workflow file straight onto the canvas at the pointer.
-        let drop = gtk::DropTarget::new(gtk::gdk::FileList::static_type(), gtk::gdk::DragAction::COPY);
+        // One target for both payloads: a file from the file manager (GdkFileList) or a picture
+        // dragged inside the app (see [`image_drag_payload`]). Two separate targets let the
+        // String one swallow the drop before the FileList one saw it.
+        let drop = gtk::DropTarget::new(glib::Type::INVALID, gtk::gdk::DragAction::COPY);
+        drop.set_types(&[gtk::gdk::FileList::static_type(), String::static_type()]);
         let (me2, c2) = (self.clone(), canvas.clone());
         drop.connect_drop(move |_, v, x, y| {
-            let Ok(list) = v.get::<gtk::gdk::FileList>() else { return false };
             let (zoom, off) = c2.view();
             let pos = ((x - off.0) / zoom, (y - off.1) / zoom);
-            for f in list.files() {
-                me2.open_dropped_at(&f, pos);
+            if let Ok(list) = v.get::<gtk::gdk::FileList>() {
+                for f in list.files() {
+                    me2.open_dropped_at(&f, pos);
+                }
+                return true;
+            }
+            let Ok(text) = v.get::<String>() else { return false };
+            let Some(drag) = parse_image_drag(&text) else { return false };
+            if let Some(query) = drag.query {
+                me2.drop_backend_image(drag.name.clone(), query, pos);
+            }
+            for path in drag.paths {
+                me2.drop_local_image(path, pos);
             }
             true
         });
         canvas.area.add_controller(drop);
-        // Pictures dragged inside the app (queue row, MTB tile): see [`image_drag_payload`].
-        let img_drop = gtk::DropTarget::new(String::static_type(), gtk::gdk::DragAction::COPY);
-        let (me3, c3) = (self.clone(), canvas.clone());
-        img_drop.connect_drop(move |_, v, x, y| {
-            let Ok(text) = v.get::<String>() else { return false };
-            let Some(drag) = parse_image_drag(&text) else { return false };
-            let (zoom, off) = c3.view();
-            let pos = ((x - off.0) / zoom, (y - off.1) / zoom);
-            if let Some(query) = drag.query {
-                me3.drop_backend_image(drag.name.clone(), query, pos);
-            }
-            for path in drag.paths {
-                me3.drop_local_image(path, pos);
-            }
-            true
-        });
-        canvas.area.add_controller(img_drop);
         // The floating selection toolbox sits over the canvas, so the page is an overlay.
         let overlay = gtk::Overlay::new();
         overlay.set_child(Some(&canvas.area));
