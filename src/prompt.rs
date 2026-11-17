@@ -640,3 +640,102 @@ mod golden {
         eprintln!("exact {exact}/{}  nodes {nodes_ok}/{nodes_total}", files.len());
     }
 }
+
+/// Rebuild a UI workflow (litegraph JSON) from an API-format prompt — what ComfyUI embeds in
+/// videos that carry no `workflow` tag. Layout is a simple dependency-depth grid.
+pub fn api_to_workflow(api: &Value, reg: &Registry) -> Result<Value, String> {
+    let api = api.as_object().filter(|m| !m.is_empty() && m.values().all(|n| n["class_type"].is_string())).ok_or("not an API prompt")?;
+    let ids: HashMap<&String, i64> = api.keys().enumerate().map(|(n, k)| (k, k.parse().unwrap_or(n as i64 + 1_000_000))).collect();
+    fn depth(k: &str, api: &Map<String, Value>, memo: &mut HashMap<String, usize>) -> usize {
+        if let Some(&d) = memo.get(k) {
+            return d;
+        }
+        memo.insert(k.to_owned(), 0);
+        let d = api[k]["inputs"].as_object().into_iter().flatten().filter_map(|(_, v)| v.get(0).and_then(Value::as_str).filter(|s| api.contains_key(*s)).map(|s| depth(s, api, memo) + 1)).max().unwrap_or(0);
+        memo.insert(k.to_owned(), d);
+        d
+    }
+    let (mut memo, mut rows) = (HashMap::new(), HashMap::<usize, usize>::new());
+    let (mut nodes, mut links, mut lid) = (Vec::new(), Vec::new(), 0i64);
+    let mut by: HashMap<String, usize> = HashMap::new();
+    let islink = |v: &Value, api: &Map<String, Value>| v.as_array().is_some_and(|a| a.len() == 2 && a[0].as_str().is_some_and(|s| api.contains_key(s)) && a[1].is_u64());
+    for (k, n) in api {
+        let ins = n["inputs"].as_object().cloned().unwrap_or_default();
+        let ty = n["class_type"].as_str().unwrap_or_default();
+        let (mut slots, mut wv) = (Vec::<Value>::new(), Vec::<Value>::new());
+        let outs: Vec<Value> = match reg.get(ty) {
+            Some(def) => {
+                fn walk(inputs: &[Input], prefix: &str, ins: &Map<String, Value>, api: &Map<String, Value>, slots: &mut Vec<Value>, wv: &mut Vec<Value>, islink: &dyn Fn(&Value, &Map<String, Value>) -> bool) {
+                    for i in inputs {
+                        let name = format!("{prefix}{}", i.name);
+                        let linked = ins.get(&name).is_some_and(|v| islink(v, api));
+                        if prefix.is_empty() {
+                            let mut s = json!({"name": i.name, "type": i.type_name(), "link": null});
+                            if i.is_widget() {
+                                s["widget"] = json!({"name": i.name});
+                            }
+                            slots.push(s);
+                        }
+                        if !i.is_widget() {
+                            continue;
+                        }
+                        wv.push(match ins.get(&name) {
+                            Some(v) if !linked => v.clone(),
+                            _ => default_of(i),
+                        });
+                        if prefix.is_empty() {
+                            let (c, u) = extra_kinds(i);
+                            if c {
+                                wv.push(Value::from("fixed"));
+                            }
+                            if u {
+                                wv.push(Value::from("image"));
+                            }
+                        }
+                        if let Kind::DynCombo(opts) = &i.kind {
+                            let cur = wv.last().and_then(Value::as_str).map(str::to_owned).or_else(|| ins.get(&name).and_then(Value::as_str).map(str::to_owned));
+                            if let Some((_, ch)) = opts.iter().find(|o| Some(&o.0) == cur.as_ref()) {
+                                walk(ch, &format!("{name}."), ins, api, slots, wv, islink);
+                            }
+                        }
+                    }
+                }
+                walk(&def.inputs, "", &ins, api, &mut slots, &mut wv, &islink);
+                def.outputs.iter().enumerate().map(|(s, (t, nm))| json!({"name": nm, "type": t, "links": [], "slot_index": s})).collect()
+            }
+            None => {
+                for (nm, v) in &ins {
+                    if islink(v, api) {
+                        slots.push(json!({"name": nm, "type": "*", "link": null}));
+                    }
+                }
+                let top = api.iter().flat_map(|(_, m)| m["inputs"].as_object().into_iter().flatten()).filter_map(|(_, v)| (v[0] == json!(k)).then(|| v[1].as_u64().unwrap_or(0) as usize + 1)).max().unwrap_or(1);
+                (0..top).map(|s| json!({"name": format!("out{s}"), "type": "*", "links": [], "slot_index": s})).collect()
+            }
+        };
+        let c = depth(k, api, &mut memo);
+        let r = rows.entry(c).or_default();
+        let (x, y) = (60.0 + c as f64 * 380.0, 60.0 + *r as f64 * 330.0);
+        *r += 1;
+        let h = 60.0 + 26.0 * slots.len().max(wv.len()).max(outs.len()).max(2) as f64;
+        by.insert(k.clone(), nodes.len());
+        nodes.push(json!({"id": ids[k], "type": ty, "pos": [x, y], "size": [340, h], "flags": {}, "order": c, "mode": 0,
+            "inputs": slots, "outputs": outs, "properties": {"Node name for S&R": ty}, "widgets_values": wv}));
+    }
+    for (k, n) in api {
+        for (name, v) in n["inputs"].as_object().into_iter().flatten().filter(|(_, v)| islink(v, api)) {
+            let (src, so) = (by[v[0].as_str().unwrap_or_default()], v[1].as_u64().unwrap_or(0) as usize);
+            let tgt = by[k.as_str()];
+            let Some(slot) = nodes[tgt]["inputs"].as_array().and_then(|a| a.iter().position(|s| s["name"] == json!(name))) else { continue };
+            lid += 1;
+            let ty = nodes[src]["outputs"][so]["type"].clone();
+            links.push(json!([lid, nodes[src]["id"], so, nodes[tgt]["id"], slot, ty]));
+            nodes[tgt]["inputs"][slot]["link"] = json!(lid);
+            if let Some(a) = nodes[src]["outputs"][so]["links"].as_array_mut() {
+                a.push(json!(lid));
+            }
+        }
+    }
+    Ok(json!({"id": "00000000-0000-4000-8000-000000000000", "revision": 0, "last_node_id": nodes.iter().filter_map(|n| n["id"].as_i64()).max().unwrap_or(0), "last_link_id": lid,
+        "nodes": nodes, "links": links, "groups": [], "config": {}, "extra": {}, "version": 0.4}))
+}

@@ -87,6 +87,9 @@ pub struct Workspace {
     /// Right-hand properties panel and the split that holds it.
     panel: panel::Panel,
     panel_split: adw::OverlaySplitView,
+    /// Setting "pin sidebar toggle": float the toggle in the window's top-left corner.
+    pin_toggle: Rc<dyn Fn(bool)>,
+    pinned: Rc<std::cell::Cell<bool>>,
 }
 
 mod addnode;
@@ -379,6 +382,10 @@ impl Workspace {
         self.root.has_css_class("cg-side-themed")
     }
 
+    pub(crate) fn pin_toggle_on(&self) -> bool {
+        self.pinned.get()
+    }
+
     pub fn new() -> Self {
         load_css();
         // Sidebar ----------------------------------------------------------------
@@ -443,7 +450,17 @@ impl Workspace {
         interrupt.add_css_class("destructive-action");
         interrupt.set_tooltip_text(Some("Stop the prompt that is running now"));
         let q_clear = gtk::Button::builder().label("Clear queue").tooltip_text("Remove every pending prompt").sensitive(false).build();
-        q_clear.add_css_class("flat");
+        q_clear.add_css_class("cg-soft-red");
+        {
+            static CSS: std::sync::Once = std::sync::Once::new();
+            CSS.call_once(|| {
+                let css = gtk::CssProvider::new();
+                css.load_from_string("button.cg-soft-red { background: alpha(#e5484d, 0.22); } button.cg-soft-red:hover { background: alpha(#e5484d, 0.34); } button.cg-soft-red:disabled { background: alpha(#e5484d, 0.10); }");
+                if let Some(d) = gtk::gdk::Display::default() {
+                    gtk::style_context_add_provider_for_display(&d, &css, gtk::STYLE_PROVIDER_PRIORITY_APPLICATION);
+                }
+            });
+        }
         let q_reload = gtk::Button::builder().icon_name("cg-view-refresh-symbolic").tooltip_text("Reload queue").build();
         q_reload.add_css_class("flat");
         let q_bar = gtk::Box::new(gtk::Orientation::Horizontal, 6);
@@ -496,7 +513,8 @@ impl Workspace {
             switcher.append(&b);
         }
         let side_tb = adw::ToolbarView::new();
-        side_tb.add_top_bar(&adw::HeaderBar::builder().title_widget(&switcher).show_end_title_buttons(false).build());
+        let side_head = adw::HeaderBar::builder().title_widget(&switcher).show_end_title_buttons(false).build();
+        side_tb.add_top_bar(&side_head);
         // Pages differ in minimum width; External keeps the widest from propping the sidebar open.
         side_tb.set_content(Some(&gtk::ScrolledWindow::builder().child(&side_stack).hscrollbar_policy(gtk::PolicyType::External).vscrollbar_policy(gtk::PolicyType::Never).build()));
 
@@ -675,6 +693,10 @@ impl Workspace {
         count.set_tooltip_text(Some("Batch count — copies of this prompt queued per Run"));
         let lora = gtk::Button::builder().icon_name("cg-application-x-addon-symbolic").tooltip_text("LoRA Manager").build();
         header.pack_start(&toggle);
+        let head_gap = gtk::Box::builder().width_request(40).visible(false).build();
+        header.pack_start(&head_gap);
+        let open_wf = gtk::Button::builder().icon_name("cg-document-open-symbolic").tooltip_text("Open Workflow (Ctrl+O)").build();
+        header.pack_start(&open_wf);
         let back = gtk::Button::builder().icon_name("cg-go-previous-symbolic").tooltip_text("Leave subgraph").visible(false).build();
         let crumbs = gtk::Box::new(gtk::Orientation::Horizontal, 0);
         let tmpl = gtk::Button::builder().icon_name("cg-folder-templates-symbolic").tooltip_text("Templates").build();
@@ -759,8 +781,43 @@ impl Workspace {
             .sidebar_width_fraction(0.34)
             .build();
         toggle.bind_property("active", &split, "show-sidebar").bidirectional().sync_create().build();
+        // Pinned toggle: a floating copy slot in the corner; spacers keep the bars' content clear of it.
+        let pin_overlay = gtk::Overlay::new();
+        pin_overlay.set_child(Some(&split));
+        let side_gap = gtk::Box::builder().width_request(40).visible(false).build();
+        side_head.pack_start(&side_gap);
+        let corner = gtk::ToggleButton::builder()
+            .icon_name("cg-sidebar-show-symbolic")
+            .tooltip_text("Toggle Sidebar")
+            .halign(gtk::Align::Start)
+            .valign(gtk::Align::Start)
+            .margin_start(8)
+            .margin_top(7)
+            .visible(false)
+            .css_classes(["circular", "osd"])
+            .build();
+        toggle.bind_property("active", &corner, "active").bidirectional().sync_create().build();
+        pin_overlay.add_overlay(&corner);
+        let pinned: Rc<std::cell::Cell<bool>> = Rc::default();
+        let gaps = {
+            let (hg, sg, sp, pn) = (head_gap.clone(), side_gap.clone(), split.clone(), pinned.clone());
+            Rc::new(move || {
+                sg.set_visible(pn.get());
+                hg.set_visible(pn.get() && !sp.shows_sidebar());
+            })
+        };
+        let pin_toggle: Rc<dyn Fn(bool)> = {
+            let (tg, c, pn, g) = (toggle.clone(), corner.clone(), pinned.clone(), gaps.clone());
+            Rc::new(move |on| {
+                pn.set(on);
+                tg.set_visible(!on);
+                c.set_visible(on);
+                g();
+            })
+        };
+        split.connect_show_sidebar_notify(move |_| gaps());
         let panel_split = adw::OverlaySplitView::builder()
-            .content(&split)
+            .content(&pin_overlay)
             .sidebar(&panel.root)
             .sidebar_position(gtk::PackType::End)
             .min_sidebar_width(300.0)
@@ -880,6 +937,8 @@ impl Workspace {
             session_queued: Rc::default(),
             panel,
             panel_split,
+            pin_toggle,
+            pinned,
         };
         {
             let me = ws.clone();
@@ -897,6 +956,8 @@ impl Workspace {
             run.connect_clicked(move |_| me.queue_prompt(tabmenu::shift_down()));
             let me = ws.clone();
             save.connect_clicked(move |_| me.save_active());
+            let me = ws.clone();
+            open_wf.connect_clicked(move |_| me.open_file_dialog());
             let me = ws.clone();
             tmpl.connect_clicked(move |_| me.open_templates());
             let me = ws.clone();
@@ -1044,6 +1105,14 @@ impl Workspace {
             ));
             let me = ws.clone();
             keys.add_shortcut(gtk::Shortcut::new(
+                gtk::ShortcutTrigger::parse_string("<Control>o"),
+                Some(gtk::CallbackAction::new(move |_, _| {
+                    me.open_file_dialog();
+                    gtk::glib::Propagation::Stop
+                })),
+            ));
+            let me = ws.clone();
+            keys.add_shortcut(gtk::Shortcut::new(
                 gtk::ShortcutTrigger::parse_string("<Control>w"),
                 Some(gtk::CallbackAction::new(move |_, _| {
                     me.close_active();
@@ -1132,6 +1201,9 @@ impl Workspace {
                 keys.add_shortcut(gtk::Shortcut::new(
                     gtk::ShortcutTrigger::parse_string(trigger),
                     Some(gtk::CallbackAction::new(move |_, _| {
+                        if me.typing() {
+                            return gtk::glib::Propagation::Proceed;
+                        }
                         me.undo(redo);
                         gtk::glib::Propagation::Stop
                     })),
@@ -2048,13 +2120,13 @@ impl Workspace {
 
         let click = gtk::GestureClick::new();
         {
-            let (pic, scrim, close, stack) = (pic.clone(), scrim.clone(), close.clone(), stack.clone());
+            let (pic, scrim, close, stack, vid) = (pic.clone(), scrim.clone(), close.clone(), stack.clone(), video.clone());
             click.connect_pressed(move |_, _, x, y| {
                 // Inside the drawn picture (Contain letterboxes the widget) = keep open.
-                if stack.visible_child_name().as_deref() == Some("video") {
-                    return; // clicks belong to the player's controls; Esc closes
-                }
-                let inside = pic.paintable().zip(scrim.compute_point(&pic, &gtk::graphene::Point::new(x as f32, y as f32))).is_some_and(|(p, pt)| {
+                let video = stack.visible_child_name().as_deref() == Some("video");
+                let (pic, paint) = if video { (stack.visible_child().unwrap(), vid.media_stream().map(|m| m.upcast::<gtk::gdk::Paintable>())) } else { (pic.clone().upcast(), pic.paintable()) };
+                // Video: the whole widget counts (its transport controls sit in the letterbox).
+                let inside = (video && scrim.compute_point(&pic, &gtk::graphene::Point::new(x as f32, y as f32)).is_some_and(|pt| pt.x() >= 0.0 && pt.y() >= 0.0 && pt.x() <= pic.width() as f32 && pt.y() <= pic.height() as f32)) || paint.zip(scrim.compute_point(&pic, &gtk::graphene::Point::new(x as f32, y as f32))).is_some_and(|(p, pt)| {
                     let (px, py) = (pt.x() as f64, pt.y() as f64);
                     let (iw, ih) = (p.intrinsic_width() as f64, p.intrinsic_height() as f64);
                     let (aw, ah) = (pic.width() as f64, pic.height() as f64);
@@ -2189,6 +2261,12 @@ impl Workspace {
                 }
                 row.set_tooltip_text(Some(p));
                 row.set_widget_name(p);
+            }
+            if !*dir {
+                let (me, r) = (self.clone(), row.clone());
+                let click = gtk::GestureClick::builder().button(3).build();
+                click.connect_pressed(move |_, _, x, y| me.row_menu(r.upcast_ref(), x, y));
+                row.add_controller(click);
             }
             self.wf_list.append(&row);
         }
@@ -2458,6 +2536,22 @@ impl Workspace {
     /// as a preloaded native `LoadImage` node at the drop point (what the web UI does).
     pub(super) fn open_image_bytes(&self, name: &str, bytes: Vec<u8>, pos: (f64, f64)) {
         let stem = name.rsplit_once('.').map(|(s, _)| s.to_owned()).unwrap_or_else(|| name.to_owned());
+        // Dropped onto an existing Load Image node → fill that node instead of spawning another.
+        if let Some(doc) = self.active_doc() {
+            let hit = {
+                let d = doc.borrow();
+                d.canvas.node_at(pos).filter(|id| {
+                    let g = match d.path.last().and_then(|p| d.wf.subgraphs.get(p)) {
+                        Some(sg) => &sg.graph,
+                        None => &d.wf.root,
+                    };
+                    g.node(id).is_some_and(|n| n.ty == "LoadImage")
+                })
+            };
+            if let Some(id) = hit {
+                return self.load_into_node(&doc, id, name.to_owned(), bytes);
+            }
+        }
         if crate::pngmeta::is_png(&bytes) {
             let text = crate::pngmeta::workflow(&bytes);
             match text {
@@ -2476,6 +2570,22 @@ impl Workspace {
         }
         let Some(doc) = self.doc_or_blank("dropped") else { return };
         self.place_image_at(&doc, name.to_owned(), bytes, pos);
+    }
+
+    /// Upload `bytes` and set them as the image of the existing Load Image node `id`.
+    fn load_into_node(&self, doc: &DocRef, id: String, name: String, bytes: Vec<u8>) {
+        let Some(client) = self.client.borrow().clone() else { return self.append_log("[image] not connected") };
+        let (me, doc) = (self.clone(), doc.clone());
+        glib::spawn_future_local(async move {
+            match gio::spawn_blocking(move || client.upload_image(&name, &bytes)).await {
+                Ok(Ok(stored)) => {
+                    me.append_log(&format!("[image] uploaded {stored} → Load Image {id}"));
+                    me.on_widget(&doc, &id, "0", Value::from(stored), true);
+                }
+                Ok(Err(e)) => me.append_log(&format!("[image] {e}")),
+                Err(_) => me.append_log("[image] upload worker panicked"),
+            }
+        });
     }
 
     /// A picture dragged out of the queue (its bytes live on the backend, not on disk).
@@ -2599,7 +2709,14 @@ impl Workspace {
             let (client, canvas) = (client.clone(), canvas.clone());
             glib::spawn_future_local(async move {
                 let q = key.clone();
-                if let Ok(Ok(bytes)) = gio::spawn_blocking(move || client.view_query(&q)).await {
+                let got = gio::spawn_blocking(move || {
+                    let b = client.view_query(&q)?;
+                    // Videos have no texture decoder: the node shows the clip's first frame.
+                    let video = q.split('&').find_map(|p| p.strip_prefix("filename=")).is_some_and(|f| api::media_kind(f) == api::Kind::Video);
+                    if video { video_frame(&b).ok_or_else(|| "no ffmpeg / undecodable video".to_owned()) } else { Ok(b) }
+                })
+                .await;
+                if let Ok(Ok(bytes)) = got {
                     canvas.put_image(&key, &bytes);
                 }
             });
@@ -3671,6 +3788,7 @@ impl Workspace {
             crate::canvas::widgets::set_inline_text(v.get(settings::TEXT_EDITOR).and_then(Value::as_str) == Some("inline"));
             settings::set_caption_above(v.get(settings::CAPTION).and_then(Value::as_str) == Some("above"));
             me.set_side_themed(v.get(settings::SIDE_THEME).and_then(Value::as_bool).unwrap_or(false));
+            (me.pin_toggle)(v.get(settings::PIN_TOGGLE).and_then(Value::as_bool).unwrap_or(false));
             crate::theme::set_server_palettes(v.get("Comfy.CustomColorPalettes"));
             crate::theme::set(v.get(settings::PALETTE).and_then(Value::as_str).unwrap_or("dark"));
             me.redraw_canvases();
@@ -3848,6 +3966,19 @@ impl Workspace {
             }
         }
     }
+}
+
+/// First frame of a video as PNG via the system `ffmpeg` (None when missing / not decodable).
+fn video_frame(video: &[u8]) -> Option<Vec<u8>> {
+    let tmp = std::env::temp_dir().join(format!("cg-frame-{}-{}.bin", std::process::id(), video.len()));
+    std::fs::write(&tmp, video).ok()?;
+    let out = std::process::Command::new("ffmpeg")
+        .args(["-v", "error", "-i"])
+        .arg(&tmp)
+        .args(["-frames:v", "1", "-f", "image2pipe", "-c:v", "png", "pipe:1"])
+        .output();
+    std::fs::remove_file(&tmp).ok();
+    out.ok().filter(|o| o.status.success() && !o.stdout.is_empty()).map(|o| o.stdout)
 }
 
 /// Bytes for a lightbox item: `file:<path>` is read from disk (media browser), anything else

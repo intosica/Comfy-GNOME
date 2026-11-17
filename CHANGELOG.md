@@ -6,10 +6,15 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 The project is in **beta**: the `0.x` versions may change saved behaviour between releases, `1.0.0` is the first
 version that promises stability.
 
-## [Unreleased]
+## [0.2.0-beta.8] — 2026-11-17
+
+### Changed
+
+- The **Clear queue** button now has a soft red backing.
 
 ### Fixed
 
+- Clicking pause (or any transport control) on the video preview no longer closes it.
 - Dropping a file from the file manager onto an open canvas now works (one drop target for files and in-app images).
 - The pencil icon on the launch screen no longer shows a broken placeholder under the `gnome` icon theme.
 

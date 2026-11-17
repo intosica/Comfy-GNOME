@@ -74,6 +74,27 @@ impl Workspace {
         self.tabs.add_controller(drop);
     }
 
+    /// Plain "Open Workflow": a file chooser for workflow JSON, or media carrying one.
+    pub(super) fn open_file_dialog(&self) {
+        let f = gtk::FileFilter::new();
+        f.set_name(Some("Workflows (json, png, webp, mp4, webm, mkv)"));
+        for e in ["json", "png", "webp", "mp4", "webm", "mkv", "mov", "gif"] {
+            f.add_suffix(e);
+        }
+        let filters = gio::ListStore::new::<gtk::FileFilter>();
+        filters.append(&f);
+        let me = self.clone();
+        gtk::FileDialog::builder().title("Open Workflow").filters(&filters).build().open(
+            self.root.root().and_downcast_ref::<gtk::Window>(),
+            gio::Cancellable::NONE,
+            move |r| {
+                if let Ok(f) = r {
+                    me.open_dropped(&f);
+                }
+            },
+        );
+    }
+
     fn open_dropped(&self, f: &gio::File) {
         self.open_dropped_at(f, self.viewport_centre())
     }
@@ -91,6 +112,9 @@ impl Workspace {
     pub(super) fn open_dropped_at(&self, f: &gio::File, pos: (f64, f64)) {
         let Some(path) = f.path() else { return };
         let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "dropped".into());
+        if matches!(path.extension().and_then(|e| e.to_str()).map(str::to_lowercase).as_deref(), Some("mp4" | "webm" | "mkv" | "mov" | "webp" | "gif")) {
+            return self.open_media_workflow(&path, &name);
+        }
         let Ok(bytes) = std::fs::read(&path) else { return self.append_log(&format!("[drop] cannot read {}", path.display())) };
         if crate::pngmeta::is_png(&bytes) {
             // Same rule as a queue/MTB picture: metadata → that workflow, else a Load Image node.
@@ -101,6 +125,24 @@ impl Workspace {
             Ok(wf) => self.open_temp(&name, wf),
             Err(e) => self.append_log(&format!("[drop] {name}: {e}")),
         }
+    }
+
+    /// Video/animation dropped: use its embedded `workflow`, else rebuild one from the API `prompt`.
+    fn open_media_workflow(&self, path: &std::path::Path, name: &str) {
+        let (stem, path) = (stem_of(name), path.to_owned());
+        let me = self.clone();
+        glib::spawn_future_local(async move {
+            let Ok((wf, api)) = gio::spawn_blocking(move || crate::pngmeta::video_meta(&path)).await else { return };
+            let json = match (wf, api) {
+                (Some(w), _) if w["nodes"].is_array() => Ok(w),
+                (_, Some(a)) => crate::prompt::api_to_workflow(&a, &me.registry.borrow()),
+                _ => Err("no workflow metadata".to_owned()),
+            };
+            match json.and_then(workflow::Workflow::from_json) {
+                Ok(wf) => me.open_temp(&stem, wf),
+                Err(e) => me.append_log(&format!("[drop] {stem}: {e}")),
+            }
+        });
     }
 
     /// Open `wf` in an unsaved, never-persisted tab.
@@ -201,8 +243,12 @@ impl Workspace {
     }
 
     fn rename_dialog(&self, doc: &DocRef) {
-        let old = doc.borrow().file.clone();
-        let (me, d) = (self.clone(), doc.clone());
+        self.rename_file(doc.borrow().file.clone());
+    }
+
+    /// Rename a stored workflow (tab menu and sidebar row menu); open tabs follow.
+    pub(super) fn rename_file(&self, old: String) {
+        let me = self.clone();
         self.name_dialog("Rename Workflow", "Rename", &stem(&old), move |name| {
             let dir = old.rsplit_once('/').map(|(d, _)| format!("{d}/")).unwrap_or_default();
             let new = format!("{dir}{}", with_ext(&name));
@@ -210,7 +256,7 @@ impl Workspace {
                 return;
             }
             let Some(client) = me.client.borrow().clone() else { return me.append_log("[rename] not connected") };
-            let (me, d, old) = (me.clone(), d.clone(), old.clone());
+            let (me, old) = (me.clone(), old.clone());
             glib::spawn_future_local(async move {
                 let (o, n) = (old.clone(), new.clone());
                 match gio::spawn_blocking(move || client.move_workflow(&o, &n)).await {
@@ -221,8 +267,10 @@ impl Workspace {
                                 bm.insert(new.clone());
                             }
                         }
-                        d.borrow_mut().file = new.clone();
-                        retitle(&d.borrow());
+                        for d in me.docs.borrow().iter().filter(|d| d.borrow().file == old) {
+                            d.borrow_mut().file = new.clone();
+                            retitle(&d.borrow());
+                        }
                         me.append_log(&format!("[rename] {old} → {new}"));
                         me.refresh_workflows();
                     }
@@ -234,7 +282,10 @@ impl Workspace {
     }
 
     fn toggle_bookmark(&self, doc: &DocRef) {
-        let file = doc.borrow().file.clone();
+        self.toggle_bookmark_file(doc.borrow().file.clone());
+    }
+
+    pub(super) fn toggle_bookmark_file(&self, file: String) {
         {
             let mut bm = self.bookmarks.borrow_mut();
             if !bm.remove(&file) {
@@ -427,4 +478,73 @@ fn page_at(bar: &adw::TabBar, x: f64, y: f64) -> Option<adw::TabPage> {
         w = cur.parent();
     }
     None
+}
+
+fn stem_of(name: &str) -> String {
+    name.rsplit_once('.').map_or(name, |(s, _)| s).to_owned()
+}
+
+impl Workspace {
+    /// Right-click menu of a sidebar workflow row (the frontend's workflow-browser menu).
+    pub(super) fn row_menu(&self, row: &gtk::ListBoxRow, x: f64, y: f64) {
+        let name = row.widget_name().to_string();
+        if name.is_empty() || name.starts_with("dir:") {
+            return;
+        }
+        let marked = self.bookmarks.borrow().contains(&name);
+        let f = |g: fn(&Workspace, String)| {
+            let (w, n) = (self.clone(), name.clone());
+            move || g(&w, n.clone())
+        };
+        let entries = vec![
+            item_i("cg-document-open-symbolic", "Open", true, f(Workspace::load_workflow)),
+            Entry::Line,
+            item_i("cg-document-edit-symbolic", "Rename", true, f(Workspace::rename_file)),
+            item_i("cg-edit-copy-symbolic", "Duplicate", true, f(Workspace::duplicate_file)),
+            item_i("cg-user-bookmarks-symbolic", if marked { "Remove from Bookmarks" } else { "Add to Bookmarks" }, true, f(Workspace::toggle_bookmark_file)),
+            Entry::Line,
+            item_i("cg-user-trash-symbolic", "Delete", true, f(Workspace::delete_file)),
+        ];
+        self.show_menu(row, x, y, entries);
+    }
+
+    fn duplicate_file(&self, file: String) {
+        let Some(client) = self.client.borrow().clone() else { return };
+        let me = self.clone();
+        glib::spawn_future_local(async move {
+            let f = file.clone();
+            let r = gio::spawn_blocking(move || client.workflow_json(&f)).await;
+            match r.map_err(|_| "worker panicked".to_owned()).and_then(|r| r).and_then(|t| serde_json::from_str(&t).map_err(|e| e.to_string())).and_then(|v| workflow::Workflow::from_json(v).map_err(|e| e.to_string())) {
+                Ok(wf) => me.open_temp(&format!("{} (Copy)", stem(&file)), wf),
+                Err(e) => me.append_log(&format!("[duplicate] {e}")),
+            }
+        });
+    }
+
+    fn delete_file(&self, file: String) {
+        let dlg = adw::AlertDialog::builder().heading("Delete workflow?").body(format!("“{}” will be permanently deleted.", stem(&file))).build();
+        dlg.add_responses(&[("cancel", "Cancel"), ("delete", "Delete")]);
+        dlg.set_response_appearance("delete", adw::ResponseAppearance::Destructive);
+        dlg.set_close_response("cancel");
+        let me = self.clone();
+        dlg.connect_response(None, move |_, r| {
+            let (Some(client), "delete") = (me.client.borrow().clone(), r) else { return };
+            let (me, file) = (me.clone(), file.clone());
+            glib::spawn_future_local(async move {
+                let f = file.clone();
+                match gio::spawn_blocking(move || client.delete_workflow(&f)).await {
+                    Ok(Ok(())) => {
+                        if me.bookmarks.borrow_mut().remove(&file) {
+                            me.store_bookmarks();
+                        }
+                        me.append_log(&format!("[delete] {file}"));
+                        me.refresh_workflows();
+                    }
+                    Ok(Err(e)) => me.append_log(&format!("[delete] {e}")),
+                    Err(_) => me.append_log("[delete] worker panicked"),
+                }
+            });
+        });
+        dlg.present(Some(&self.root));
+    }
 }

@@ -868,6 +868,12 @@ impl Canvas {
         Some((x, y, g.rect[2] * s.view.zoom, g.color))
     }
 
+    /// Id of the topmost node under canvas point `p`.
+    pub fn node_at(&self, p: (f64, f64)) -> Option<String> {
+        let s = self.state.borrow();
+        s.hit_node(p).map(|i| s.nodes[i].id.clone())
+    }
+
     /// Canvas point under the pointer (paste target).
     pub fn pointer(&self) -> (f64, f64) {
         let s = self.state.borrow();

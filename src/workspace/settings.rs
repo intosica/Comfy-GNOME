@@ -358,6 +358,14 @@ fn show(d: &Rc<Dlg>, page: &Page) {
             caption_row(d, &g);
             let g = group(d, "Sidebar");
             side_theme_row(d, &g);
+            let r = adw::SwitchRow::builder()
+                .title("Pin sidebar toggle")
+                .subtitle("Keep the toggle in the top-left corner instead of moving with the sidebar")
+                .active(d.ws.pin_toggle_on())
+                .build();
+            let dd = d.clone();
+            r.connect_active_notify(move |r| commit(&dd, PIN_TOGGLE, Value::Bool(r.is_active())));
+            g.add(&r);
         }
         Page::Extension => match cat {
             Some(cat) => extensions(d, &cat),
@@ -517,6 +525,9 @@ fn commit(d: &Rc<Dlg>, key: &str, v: Value) {
     if key == CAPTION {
         set_caption_above(v.as_str() == Some("above"));
     }
+    if key == PIN_TOGGLE {
+        (d.ws.pin_toggle)(v.as_bool().unwrap_or(false));
+    }
     if key == SIDE_THEME {
         d.ws.set_side_themed(v.as_bool().unwrap_or(false));
     }
@@ -638,6 +649,7 @@ pub const TEXT_EDITOR: &str = "ComfyGNOME.TextEditor";
 pub const CAPTION: &str = "ComfyGNOME.PreviewCaption";
 
 /// Server setting: `true` paints the left sidebar in the palette's menu colours.
+pub const PIN_TOGGLE: &str = "ComfyGNOME.PinSidebarToggle";
 pub const SIDE_THEME: &str = "ComfyGNOME.SidebarTheme";
 
 thread_local!(static CAPTION_ABOVE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) });

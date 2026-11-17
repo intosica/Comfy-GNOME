@@ -1281,7 +1281,7 @@ pub fn edit_text_inline(area: &gtk::DrawingArea, place: PlaceFn, text: &str, com
     let block = gtk::EventControllerKey::new();
     block.connect_key_pressed(|_, key, _, mods| {
         let ctrl = mods.contains(gdk::ModifierType::CONTROL_MASK);
-        if ctrl && !matches!(key, gdk::Key::s | gdk::Key::w | gdk::Key::comma) {
+        if ctrl && !matches!(key, gdk::Key::s | gdk::Key::w | gdk::Key::comma | gdk::Key::c | gdk::Key::v | gdk::Key::x | gdk::Key::a | gdk::Key::z | gdk::Key::y | gdk::Key::Z) {
             return gtk::glib::Propagation::Stop;
         }
         gtk::glib::Propagation::Proceed

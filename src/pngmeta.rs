@@ -52,6 +52,32 @@ pub fn workflow(b: &[u8]) -> Option<String> {
     text_chunks(b).into_iter().find(|(k, _)| k == "workflow").map(|(_, v)| v)
 }
 
+/// `(workflow, prompt)` JSON that ComfyUI stores as container tags in MP4/WebM/MKV/GIF-like
+/// files. Scans the head and tail of the file for the key followed by a JSON object.
+pub fn video_meta(path: &std::path::Path) -> (Option<serde_json::Value>, Option<serde_json::Value>) {
+    use std::io::{Read, Seek, SeekFrom};
+    const CHUNK: u64 = 16 << 20;
+    let Ok(mut f) = std::fs::File::open(path) else { return (None, None) };
+    let len = f.metadata().map_or(0, |m| m.len());
+    let mut parts = Vec::new();
+    for (start, n) in if len <= 2 * CHUNK { vec![(0, len)] } else { vec![(0, CHUNK), (len - CHUNK, CHUNK)] } {
+        let mut b = vec![0; n as usize];
+        if f.seek(SeekFrom::Start(start)).and_then(|_| f.read_exact(&mut b)).is_ok() {
+            parts.push(b);
+        }
+    }
+    let find = |key: &[u8]| {
+        parts.iter().find_map(|b| {
+            b.windows(key.len()).enumerate().filter(|(_, w)| *w == key).find_map(|(i, _)| {
+                let rest = &b[i + key.len()..];
+                let at = rest.iter().take(48).position(|&c| c == b'{')?;
+                serde_json::Deserializer::from_slice(&rest[at..]).into_iter::<serde_json::Value>().next()?.ok().filter(|v| v.is_object())
+            })
+        })
+    };
+    (find(b"workflow"), find(b"prompt"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -275,6 +275,11 @@ impl Client {
             .map_err(err)
     }
 
+    pub fn delete_workflow(&self, file: &str) -> Result<(), String> {
+        let url = format!("{}/api/userdata/{}", self.base, percent_encode(&format!("workflows/{file}")));
+        self.agent.delete(&url).call().map(drop).map_err(err)
+    }
+
     /// `POST /api/userdata/workflows%2F<src>/move/workflows%2F<dst>` (fails if `dst` exists).
     pub fn move_workflow(&self, src: &str, dst: &str) -> Result<(), String> {
         let url = format!(
