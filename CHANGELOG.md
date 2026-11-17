@@ -8,6 +8,11 @@ version that promises stability.
 
 ## [Unreleased]
 
+### Fixed
+
+- Dropping a file from the file manager onto an open canvas now works (one drop target for files and in-app images).
+- The pencil icon on the launch screen no longer shows a broken placeholder under the `gnome` icon theme.
+
 ## [0.2.0-beta.7] — 2026-11-16
 
 ### Added

@@ -62,6 +62,12 @@ the backend's `userdata` folder.
   (INPUTS / ADVANCED INPUTS, per-row Rename, Show input, Reset to default), Info (description and Inputs / Outputs
   tables) and Settings (Normal / Bypass / Mute, the ten node colours, Pinned). Subgraph instances get the editor
   instead: visible inputs with an eye each, and the hidden parameters of every inner node behind "Show all".
+- **Find in workflow** — Ctrl+F searches titles, widget values, prompts, notes, groups and subgraphs.
+- **Errors and tooltips** — a failed run outlines the node with a red `!` badge and lists errors in a banner;
+  hovering a node or widget shows its description.
+- **Reroutes and minimap** — reroute points on wires and a minimap for big graphs.
+- **Drag and drop** — drop a workflow `.json` or image from your file manager onto the canvas or tab bar
+  (PNG metadata opens the embedded workflow). MP4/WebM metadata is not read yet.
 - **Faithful saving** — writes back to `userdata` preserving everything the editor does not model: an untouched
   open → save leaves the file byte-identical.
 
@@ -119,6 +125,8 @@ src/main.rs            resources, adw::Application, window, Stack(splash → wor
 src/splash.rs          launch configuration page
 src/backend.rs         launch config, ComfyUI discovery/probe/spawn
 src/workspace.rs       OverlaySplitView: sidebar | header + Paned(canvas / log)
+src/workspace/         sidebar pages and dialogs (media, library, settings, find, templates, tab menu…)
+src/pngmeta.rs         PNG metadata reader (embedded workflow / prompt)
 src/canvas/mod.rs      the immediate-mode canvas
 src/workflow.rs        workflow JSON parse/serialize, subgraph handling
 src/settings_defs.rs   reads the backend's setting definitions
