@@ -26,6 +26,8 @@ use widgets::{WKind, Widget, Zone};
 
 const TITLE_H: f64 = 30.0;
 const SLOT_H: f64 = 20.0;
+/// Resize triangle leg, screen px (node and group corners).
+const GRIP: f64 = 16.0;
 const GRID: f64 = 20.0;
 
 /// A node socket: label text plus the socket type (drives colour and link validity).
@@ -33,6 +35,8 @@ const GRID: f64 = 20.0;
 pub struct Slot {
     pub label: String,
     pub ty: String,
+    /// Optional input: drawn with a hollow centre like litegraph's HollowCircle.
+    pub opt: bool,
 }
 
 #[derive(Default, Clone)]
@@ -70,6 +74,19 @@ pub struct Node {
     pub tip: String,
     /// Reroute: drawn as a bare pill with a socket at each end.
     pub reroute: bool,
+    /// rgthree "Label" node: only its title, as free text.
+    pub label: Option<Label>,
+}
+
+/// rgthree Label properties: `fontSize`, `fontColor`, `backgroundColor`, `textAlign`, `padding`.
+#[derive(Clone)]
+pub struct Label {
+    pub size: f64,
+    pub color: u32,
+    pub bg: Option<u32>,
+    /// 0 left, 0.5 center, 1 right.
+    pub align: f64,
+    pub pad: f64,
 }
 
 /// Region boxes (normalised to the picture) and a painted mask over a node's preview.
@@ -133,10 +150,13 @@ impl Node {
             .collect();
         self.outs_y = (0..self.outputs.len()).map(|j| (j as f64 + 0.7) * SLOT_H).collect();
         let y0 = k.max(self.outputs.len() as f64) * SLOT_H + if self.widgets.is_empty() { 0.0 } else { widgets::GAP };
-        let flex = self.widgets.iter().filter(|w| w.multiline()).count();
+        // Text boxes and DOM widgets share the node's spare height (litegraph does the same
+        // for DOM widgets: min height + an equal share of what's left).
+        let grows = |w: &Widget| w.multiline() || matches!(w.kind, WKind::Dom(_));
+        let flex = self.widgets.iter().filter(|w| grows(w)).count();
         let rw = self.size.0 - 20.0;
-        let hs: Vec<f64> = self.widgets.iter().map(|w| widgets::row_height(w, rw)).collect();
-        let fixed: f64 = self.widgets.iter().zip(&hs).map(|(w, h)| if w.multiline() { widgets::MULTI_MIN } else { *h } + widgets::GAP).sum();
+        let hs: Vec<f64> = self.widgets.iter().map(|w| if w.multiline() { widgets::MULTI_MIN } else { widgets::row_height(w, rw) }).collect();
+        let fixed: f64 = hs.iter().map(|h| h + widgets::GAP).sum();
         let img = if !self.images.is_empty() { 80.0 } else { 0.0 };
         let min_h = y0 + fixed + img + if self.widgets.is_empty() && img == 0.0 { 8.0 } else { 2.0 };
         self.size.1 = self.size.1.max(min_h);
@@ -144,7 +164,7 @@ impl Node {
         self.rows.clear();
         let mut cur = y0;
         for (w, hh) in self.widgets.iter().zip(&hs) {
-            let h = if w.multiline() { widgets::MULTI_MIN + extra } else { *hh };
+            let h = if grows(w) { hh + extra } else { *hh };
             self.rows.push([10.0, cur, self.size.0 - 20.0, h]);
             if let Some(y) = w.input.and_then(|i| self.ins_y.get_mut(i)) {
                 *y = cur + widgets::ROW_H / 2.0;
@@ -165,7 +185,7 @@ impl Node {
             return None;
         }
         self.widgets.iter().enumerate().find_map(|(i, w)| {
-            if matches!(w.kind, WKind::Label | WKind::ReadOnly) || i >= self.rows.len() {
+            if matches!(w.kind, WKind::Label | WKind::ReadOnly | WKind::Dom(_)) || i >= self.rows.len() {
                 return None;
             }
             let r = self.row(i);
@@ -268,20 +288,25 @@ struct State {
 
 impl State {
     /// Wheel over a multiline text widget scrolls its text instead of zooming the
-    /// canvas. Returns whether the wheel was consumed.
-    fn scroll_text(&mut self, dy: f64) -> bool {
+    /// canvas; with Ctrl it resizes the text instead. Returns whether the wheel was consumed.
+    fn scroll_text(&mut self, dy: f64, ctrl: bool) -> bool {
         let c = self.view.to_canvas(self.pointer);
         let Some(&i) = self.order.iter().rev().find(|&&i| self.nodes[i].contains(c)) else { return false };
         let n = &self.nodes[i];
         let Some((wi, _)) = n.widget_at(c) else { return false };
         let Some(w) = n.widgets.get(wi).filter(|w| w.multiline()) else { return false };
+        if ctrl {
+            // Huge smooth-scroll deltas step once per notch, so the size never jumps.
+            widgets::bump_text_scale((-dy).clamp(-1.0, 1.0));
+            return true;
+        }
         let r = n.row(wi);
         let max = widgets::text_content_h(w.value.as_str().unwrap_or(""), r[2]) - r[3];
         if max <= 0.5 {
             return false;
         }
         let off = self.text_scroll.entry(n.id.clone()).or_default().entry(w.key.clone()).or_insert(0.0);
-        let next = (*off + dy * 3.0 * widgets::LINE_H).clamp(0.0, max);
+        let next = (*off + dy * 3.0 * widgets::line_h()).clamp(0.0, max);
         // At either end the wheel goes back to zooming instead of being swallowed.
         if (next - *off).abs() < 0.5 {
             return false;
@@ -322,6 +347,17 @@ impl State {
             }
         }
         None
+    }
+
+    /// Topmost node whose resize triangle (16 screen px legs, inside the bottom corner) holds `p`.
+    fn grip_node(&self, p: (f64, f64)) -> Option<usize> {
+        let (g, left) = (GRIP / self.view.zoom, resize_left());
+        self.order.iter().rev().copied().find(|&i| {
+            let n = &self.nodes[i];
+            let cx = if left { n.pos.0 } else { n.pos.0 + n.size.0 };
+            let (u, v) = (if left { p.0 - cx } else { cx - p.0 }, n.pos.1 + n.body_h() - p.1);
+            !n.flat() && u >= -2.0 / self.view.zoom && v >= -2.0 / self.view.zoom && u + v <= g
+        })
     }
 
     /// Topmost node under canvas point `p`.
@@ -584,6 +620,11 @@ impl Canvas {
     /// Drop a cached preview so the next `missing_images` fetches it again (file overwritten).
     pub fn forget_image(&self, key: &str) {
         self.state.borrow_mut().images.remove(key);
+    }
+
+    /// First picture shown on node `id` (a `/view` query key).
+    pub fn node_image(&self, id: &str) -> Option<String> {
+        self.state.borrow().nodes.iter().find(|n| n.id == id)?.images.first().cloned()
     }
 
     /// Show `keys` on node `id`.
@@ -950,8 +991,10 @@ impl Canvas {
 
     fn setup_draw(&self) {
         let state = self.state.clone();
-        self.area.set_draw_func(move |_, cr, w, h| {
+        self.area.set_draw_func(move |a, cr, w, h| {
             let s = state.borrow();
+            // First: decides which rows the page covers this frame (`implant::covers`).
+            crate::implant::layout(a.upcast_ref(), dom_rows(&s, w as f64, h as f64), s.view.offset, s.view.zoom);
             draw(cr, &s, w as f64, h as f64);
         });
     }
@@ -982,9 +1025,10 @@ impl Canvas {
         // Scroll = zoom around pointer. Smooth (touchpad) deltas are fractional; powf handles both.
         let scroll = gtk::EventControllerScroll::new(gtk::EventControllerScrollFlags::VERTICAL);
         let (st, area) = (self.state.clone(), self.area.clone());
-        scroll.connect_scroll(move |_, _, dy| {
+        scroll.connect_scroll(move |c, _, dy| {
+            let ctrl = c.current_event_state().contains(gdk::ModifierType::CONTROL_MASK);
             let mut s = st.borrow_mut();
-            if s.scroll_text(dy) {
+            if s.scroll_text(dy, ctrl) {
                 drop(s);
                 area.queue_draw();
                 return gtk::glib::Propagation::Stop;
@@ -1063,6 +1107,17 @@ impl Canvas {
                 s.sel_group = None;
                 let c = s.view.to_canvas((x, y));
                 let r = 9.0 / s.view.zoom; // constant ~9 screen px, whatever the zoom
+                // Resize triangle first; a socket wins only when pressed within ~5 px of its centre.
+                if let Some(idx) = s.grip_node(c).filter(|_| s.hit_slot(c, 5.0 / s.view.zoom).is_none()) {
+                    let start = s.nodes[idx].size;
+                    let id = s.nodes[idx].id.clone();
+                    s.sel.clear();
+                    s.sel.insert(id);
+                    s.drag = Some(Drag::Resize { idx, start, snap: shift || s.snap_always });
+                    drop(s);
+                    area.queue_draw();
+                    return;
+                }
                 if let Some((idx, out, si)) = s.hit_slot(c, r) {
                     if out {
                         // Shift de-anchors the far end: the wire keeps hanging from the
@@ -1122,29 +1177,14 @@ impl Canvas {
                     area.queue_draw();
                     return;
                 }
-                // Bottom-right corner: resize grip (litegraph draws it at 12 screen px).
-                let hs = 12.0 / s.view.zoom;
-                let corner = s.order.iter().rev().copied().find(|&i| {
-                    let n = &s.nodes[i];
-                    let (cx, cy) = (n.pos.0 + n.size.0, n.pos.1 + n.body_h());
-                    c.0 >= cx - hs && c.0 <= cx + hs && c.1 >= cy - hs && c.1 <= cy + hs
-                });
-                if let Some(idx) = corner {
-                    let start = s.nodes[idx].size;
-                    let id = s.nodes[idx].id.clone();
-                    s.sel.clear();
-                    s.sel.insert(id);
-                    s.drag = Some(Drag::Resize { idx, start, snap: shift || s.snap_always });
-                    drop(s);
-                    area.queue_draw();
-                    return;
-                }
+                let hs = GRIP / s.view.zoom;
                 let hit = s.order.iter().rposition(|&i| s.nodes[i].contains(c));
                 // Group corner grip (litegraph `isInResize`): only when no node covers it.
                 let gcorner = if hit.is_some() { None } else {
                     s.groups.iter().rposition(|g| {
-                        let (rx, ry) = (g.rect[0] + g.rect[2], g.rect[1] + g.rect[3]);
-                        c.0 <= rx && c.1 <= ry && (c.0 - rx) + (c.1 - ry) > -2.0 * hs
+                        let (rx, ry) = (if resize_left() { g.rect[0] } else { g.rect[0] + g.rect[2] }, g.rect[1] + g.rect[3]);
+                        let u = if resize_left() { c.0 - rx } else { rx - c.0 };
+                        u >= 0.0 && c.1 <= ry && u + (ry - c.1) < hs
                     })
                 };
                 if let Some(idx) = gcorner {
@@ -1303,14 +1343,25 @@ impl Canvas {
                         let c = view.to_canvas((sx + dx, sy + dy));
                         let grid = if *snap { st.snap_grid } else { 0.0 };
                         let g = &mut st.groups[*idx].rect;
-                        g[2] = snap_to(c.0 - start[0], grid).max(140.0);
+                        if resize_left() {
+                            let right = start[0] + start[2];
+                            g[2] = snap_to(right - c.0, grid).max(140.0);
+                            g[0] = right - g[2];
+                        } else {
+                            g[2] = snap_to(c.0 - start[0], grid).max(140.0);
+                        }
                         g[3] = snap_to(c.1 - start[1], grid).max(80.0);
                     }
                     Some(Drag::Resize { idx, snap, .. }) => {
                         let c = view.to_canvas((sx + dx, sy + dy));
                         let grid = if *snap { st.snap_grid } else { 0.0 };
-                        let (w, h) = (c.0 - st.nodes[*idx].pos.0, c.1 - st.nodes[*idx].pos.1);
-                        st.nodes[*idx].size = (snap_to(w, grid).max(120.0), snap_to(h, grid).max(44.0));
+                        let n = &mut st.nodes[*idx];
+                        let (w, h) = (if resize_left() { n.pos.0 + n.size.0 - c.0 } else { c.0 - n.pos.0 }, c.1 - n.pos.1);
+                        let right = n.pos.0 + n.size.0;
+                        n.size = (snap_to(w, grid).max(120.0), snap_to(h, grid).max(44.0));
+                        if resize_left() {
+                            n.pos.0 = right - n.size.0;
+                        }
                         st.nodes[*idx].relayout();
                     }
                     Some(Drag::Band { end, .. }) => *end = view.to_canvas((sx + dx, sy + dy)),
@@ -1318,7 +1369,8 @@ impl Canvas {
                     Some(Drag::Link(d)) => d.to = view.to_canvas((sx + dx, sy + dy)),
                     Some(Drag::Widget { node, w, zone, base, moved }) => {
                         let wd = &mut st.nodes[*node].widgets[*w];
-                        if *zone != Zone::Main || !matches!(wd.kind, WKind::Int { .. } | WKind::Float { .. }) {
+                        let lora = *zone == Zone::Aux && matches!(wd.kind, WKind::Lora(_));
+                        if !lora && (*zone != Zone::Main || !matches!(wd.kind, WKind::Int { .. } | WKind::Float { .. })) {
                             return;
                         }
                         if dx.abs() > 4.0 {
@@ -1326,7 +1378,12 @@ impl Canvas {
                         }
                         if *moved {
                             let steps = (dx / 6.0).trunc();
-                            wd.value = widgets::num_value(&wd.kind, widgets::as_num(base) + steps * widgets::step_of(&wd.kind));
+                            if lora {
+                                let v = ((widgets::as_num(&base["strength"]) + steps * 0.05) * 100.0).round() / 100.0;
+                                wd.value = widgets::lora_with(base, "strength", Value::from(v));
+                            } else {
+                                wd.value = widgets::num_value(&wd.kind, widgets::as_num(base) + steps * widgets::step_of(&wd.kind));
+                            }
                         }
                     }
                     Some(Drag::Mini) | None => return,
@@ -1646,9 +1703,14 @@ fn draw(cr: &gtk::cairo::Context, s: &State, w: f64, h: f64) {
         cr.rectangle(x, y, gw, 34.0);
         cr.fill().ok();
         // Resize grip (litegraph draws a small triangle in the bottom-right corner).
-        cr.move_to(x + gw, y + gh);
-        cr.line_to(x + gw - 10.0, y + gh);
-        cr.line_to(x + gw, y + gh - 10.0);
+        let (gl, sx) = (GRIP / v.zoom, if resize_left() { -1.0 } else { 1.0 });
+        let cx = if resize_left() { x } else { x + gw };
+        let hot = s.view.to_canvas(s.pointer);
+        let on = (hot.0 - cx) * -sx >= 0.0 && (y + gh - hot.1) >= 0.0 && (hot.0 - cx) * -sx + (y + gh - hot.1) < gl;
+        rgba(cr, 0xffffff, if on { 0.9 } else { 0.45 });
+        cr.move_to(cx, y + gh);
+        cr.line_to(cx - sx * gl, y + gh);
+        cr.line_to(cx, y + gh - gl);
         cr.fill().ok();
         rgb(cr, 0xdddddd);
         cr.set_font_size(22.0);
@@ -1731,6 +1793,31 @@ fn draw(cr: &gtk::cairo::Context, s: &State, w: f64, h: f64) {
         let (x, y) = n.pos;
         let (nw, nh) = (n.size.0, n.body_h());
         if !visible(x, y - TITLE_H, nw, nh + TITLE_H) { continue; }
+        if let Some(l) = &n.label {
+            if let Some(bg) = l.bg {
+                rgb(cr, bg);
+                cr.rectangle(x, y, nw, nh);
+                cr.fill().ok();
+            }
+            if detail {
+                cr.save().ok();
+                cr.set_font_size(l.size);
+                rgb(cr, l.color);
+                for (k, line) in n.title.lines().enumerate() {
+                    let tw = text::width(cr, line);
+                    cr.move_to(x + l.pad + (nw - 2.0 * l.pad - tw) * l.align, y + l.pad + l.size * (k as f64 + 0.85));
+                    text::show(cr, line);
+                }
+                cr.restore().ok();
+            }
+            if s.sel.contains(&n.id) {
+                rgb(cr, pal.lg("NODE_BOX_OUTLINE_COLOR", 0xffffff));
+                cr.set_line_width(1.0);
+                cr.rectangle(x, y, nw, nh);
+                cr.stroke().ok();
+            }
+            continue;
+        }
         let alpha = if n.mode == 2 { 0.4 } else { 1.0 };
         // Cheap drop shadow: one offset translucent fill (no blur).
         shaped(cr, n.shape, x + 2.0, y - TITLE_H + 4.0, nw, nh + TITLE_H, 9.0);
@@ -1810,11 +1897,19 @@ fn draw(cr: &gtk::cairo::Context, s: &State, w: f64, h: f64) {
         }
         if n.flat() { continue; }
         // Resize grip, bottom-right (litegraph paints one in the corner too).
-        rgb(cr, if s.sel.contains(&n.id) { 0xffffff } else { 0x5a5a5a });
-        cr.set_line_width(2.0 / v.zoom);
-        cr.move_to(x + nw - 9.0, y + nh - 1.0);
-        cr.line_to(x + nw - 1.0, y + nh - 9.0);
-        cr.stroke().ok();
+        let (gl, sx) = (GRIP / v.zoom, if resize_left() { -1.0 } else { 1.0 });
+        let cx = if resize_left() { x } else { x + nw };
+        let hot = s.grip_node(s.view.to_canvas(s.pointer)) == Some(i);
+        // Same look as the group grip, clipped to the node's rounded body so it never pokes out.
+        cr.save().ok();
+        shaped(cr, n.shape, x, y, nw, nh, 8.0);
+        cr.clip();
+        rgba(cr, 0xffffff, if hot { 0.9 } else { 0.45 });
+        cr.move_to(cx, y + nh);
+        cr.line_to(cx - sx * gl, y + nh);
+        cr.line_to(cx, y + nh - gl);
+        cr.fill().ok();
+        cr.restore().ok();
         // "Add input" sockets are drawn after the clip so the ring stays whole.
         let mut add: Option<(f64, f64)> = None;
 
@@ -1840,7 +1935,22 @@ fn draw(cr: &gtk::cairo::Context, s: &State, w: f64, h: f64) {
                     cr.fill().ok();
                 } else {
                     cr.arc(px, py, 5.0, 0.0, 2.0 * PI);
+                    if slot.opt {
+                        cr.new_sub_path();
+                        cr.arc(px, py, 1.8, 0.0, 2.0 * PI);
+                        cr.set_fill_rule(gtk::cairo::FillRule::EvenOdd);
+                    }
                     cr.fill().ok();
+                    cr.set_fill_rule(gtk::cairo::FillRule::Winding);
+                }
+                if s.drag.is_none() && !bare {
+                    let hp = s.view.to_canvas(s.pointer);
+                    if (px - hp.0).hypot(py - hp.1) <= 5.0 / v.zoom {
+                        rgba(cr, 0xffffff, 0.8);
+                        cr.set_line_width(1.5);
+                        cr.arc(px, py, 7.5, 0.0, 2.0 * PI);
+                        cr.stroke().ok();
+                    }
                 }
                 // Ring the socket a dragged wire would land in (the free end's side).
                 if let Some(Drag::Link(d)) = &s.drag {
@@ -1865,7 +1975,14 @@ fn draw(cr: &gtk::cairo::Context, s: &State, w: f64, h: f64) {
         for (wi, w) in n.widgets.iter().enumerate() {
             let Some(r) = n.rows.get(wi) else { continue };
             let linked = w.input.is_some_and(|k| connected.contains(&(i, k)));
-            if matches!(w.kind, WKind::Cloud(..)) {
+            if matches!(w.kind, WKind::Dom(_)) {
+                if crate::implant::covers(&n.id, &w.label) {
+                    continue; // the page draws the real element here
+                }
+                // Under the page's element (and instead of it below zoom 0.5 / while it catches up
+                // with a pan or zoom): the saved value, never the bare widget name.
+                widgets::draw_dom_fallback(cr, w, [x + r[0], y + r[1], r[2], r[3]]);
+            } else if matches!(w.kind, WKind::Cloud(..)) {
                 widgets::draw_cloud(cr, w, [x + r[0], y + r[1], r[2], r[3]], &s.images);
             } else {
                 let scroll = s.text_scroll.get(&n.id).and_then(|m| m.get(&w.key)).copied().unwrap_or(0.0);
@@ -2011,6 +2128,53 @@ thread_local! {
     static MINIMAP: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
 }
 
+thread_local! {
+    static RESIZE_LEFT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// `ComfyGNOME.ResizeSide`: resize grips on the bottom-left instead of bottom-right.
+/// Screen rects of the visible DOM-widget rows, `(node id, widget name, x, y, w, h, zoom)`
+/// (x/y screen px, w/h canvas units), for the implant page to put the real elements on.
+/// A row under a node drawn later is left out: the page draws above the whole canvas.
+fn dom_rows(s: &State, w: f64, h: f64) -> Vec<(String, String, f64, f64, f64, f64)> {
+    let z = s.view.zoom;
+    if z < 0.5 {
+        return Vec::new(); // `hideOnZoom`, like the web UI
+    }
+    let mut out = Vec::new();
+    for (k, &i) in s.order.iter().enumerate() {
+        let n = &s.nodes[i];
+        if n.flat() {
+            continue;
+        }
+        for (wi, wd) in n.widgets.iter().enumerate() {
+            let WKind::Dom(_) = wd.kind else { continue };
+            let Some(&r) = n.rows.get(wi) else { continue };
+            let (x, y) = (n.pos.0 + r[0], n.pos.1 + r[1]);
+            let (sx, sy) = s.view.to_screen((x, y));
+            if sx > w || sy > h || sx + r[2] * z < 0.0 || sy + r[3] * z < 0.0 {
+                continue;
+            }
+            let covered = s.order[k + 1..].iter().any(|&j| {
+                let o = &s.nodes[j];
+                let (ox, oy, ow, oh) = (o.pos.0, o.pos.1 - TITLE_H, o.size.0, o.body_h() + TITLE_H);
+                ox < x + r[2] && x < ox + ow && oy < y + r[3] && y < oy + oh
+            });
+            if !covered {
+                out.push((n.id.clone(), wd.label.clone(), sx, sy, r[2], r[3]));
+            }
+        }
+    }
+    out
+}
+
+pub fn set_resize_left(on: bool) {
+    RESIZE_LEFT.with(|c| c.set(on));
+}
+fn resize_left() -> bool {
+    RESIZE_LEFT.with(std::cell::Cell::get)
+}
+
 /// `Comfy.Minimap.Visible`.
 pub fn set_minimap(on: bool) {
     MINIMAP.with(|c| c.set(on));
@@ -2064,14 +2228,14 @@ mod tests {
             widgets: vec![Widget::new("text", "0", WKind::Text { multiline: true }, Value::String(String::new()))],
             ..Default::default()
         };
-        a.inputs.push(Slot { label: "text".to_owned(), ty: "STRING".to_owned() });
+        a.inputs.push(Slot { label: "text".to_owned(), ty: "STRING".to_owned(), ..Default::default() });
         a.widgets[0].input = Some(0);
         a.relayout();
         let mut b = Node {
             id: "b".to_owned(),
             pos: (300.0, 0.0),
             size: (200.0, 100.0),
-            outputs: vec![Slot { label: "STRING".to_owned(), ty: "STRING".to_owned() }],
+            outputs: vec![Slot { label: "STRING".to_owned(), ty: "STRING".to_owned(), ..Default::default() }],
             ..Default::default()
         };
         b.relayout();

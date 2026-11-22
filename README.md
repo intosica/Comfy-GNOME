@@ -6,7 +6,7 @@
 
 <p align="center">A native GTK4 / libadwaita frontend for <a href="https://github.com/comfyanonymous/ComfyUI">ComfyUI</a>, written in Rust.</p>
 
-<p align="center"><b>0.2.0-beta.8</b> — beta: fixes and features land fast, saved workflows stay compatible.
+<p align="center"><b>0.2.0-beta.9</b> — beta: fixes and features land fast, saved workflows stay compatible.
 See <a href="CHANGELOG.md">CHANGELOG.md</a>.</p>
 
 <p align="center"><img src="docs/screenshots/graph.png" alt="Comfy-GNOME editing a workflow"></p>
@@ -50,7 +50,11 @@ the backend's `userdata` folder.
   pending, running or finished job opens its workflow in a new tab.
 - **Video, audio and animations** — mp4/webm/mkv/mp3/wav/flac… outputs play in the lightbox (GStreamer) and the media browser; gif/webp animate. Lightbox buttons: **Compare** (before/after slider), **Crop**, **Paint** (save, or send to the workflow as a Load Image).
 - **Images** — previews on nodes and in the log pane, full-size lightbox with ←/→ stepping over a job's images,
-  and a LoRA Manager window in the host browser's app mode.
+  and LoRA Manager in an in-app window (no host browser).
+- **Extension hooks (WebKitGTK)** — a hidden WebKitGTK page runs custom node packs' own `web/` JavaScript runs against a shim of the ComfyUI frontend, so
+  their Settings sections, dynamic inputs, runtime combo lists and hooks (LoRA Manager trigger words, Impact
+  wildcard databanks, `Switch (Any)`) behave as they do upstream. HTML/DOM widgets such as LoRA Manager's row editor are drawn by a transparent WebView laid over the cairo canvas, so GTK and web content share one graph (see `docs/WEBKITGTK.md`). Drop a file anywhere on the window, not just
+  over a canvas.
 - **Live previews + progress** — TAESD, Latent2RGB and auto follow the server's Preview method setting. Frames
   land on the node the backend names as the display node — KSampler, SamplerCustom, or a custom sampler inside a
   subgraph — and the log pane shows the same image. A thin progress strip under the workspace tabs tracks the

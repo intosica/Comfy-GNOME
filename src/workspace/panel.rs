@@ -991,7 +991,7 @@ fn editor(w: &Widget, commit: Rc<dyn Fn(Value)>) -> Option<gtk::Widget> {
         }
         // Composite rows (LoRA stacks, tag clouds, upload buttons) only have canvas editors.
         WKind::Button | WKind::Lora(_) | WKind::Cloud(_) => None,
-        WKind::Seed | WKind::ReadOnly | WKind::Label => Some(dim(&display(&w.value)).upcast()),
+        WKind::Seed | WKind::ReadOnly | WKind::Label | WKind::Dom(_) => Some(dim(&display(&w.value)).upcast()),
     }
 }
 
@@ -1086,7 +1086,7 @@ fn rename(ws: &Workspace, doc: &DocRef, t: &SlotRef, text: String) {
 
 /// Rows that get the ⋮ menu (display-only rows have nothing to act on).
 fn menu_worthy(w: &Widget) -> bool {
-    !matches!(w.kind, WKind::ReadOnly | WKind::Label)
+    !matches!(w.kind, WKind::ReadOnly | WKind::Label | WKind::Dom(_))
 }
 
 /// A freshly derived row for `key`, so menus decide on the current value/label.

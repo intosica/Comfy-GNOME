@@ -29,6 +29,8 @@ pub enum WsEvent {
     Executed { node: Option<String>, images: Vec<OutputImage> },
     /// Anything else (custom-node events, executed, progress_state, …): raw type + data.
     Other { kind: String, data: Value },
+    /// Every text frame verbatim, for the implant's `api` event listeners.
+    Js(String),
 }
 
 /// One `/queue` entry: `[number, prompt_id, prompt, extra_data, outputs]`.
@@ -549,7 +551,10 @@ fn ws_session(url: &str, tx: &async_channel::Sender<WsEvent>) -> Result<(), Stri
     tx.send_blocking(WsEvent::Connected).map_err(|e| e.to_string())?;
     loop {
         let ev = match ws.read().map_err(|e| e.to_string())? {
-            tungstenite::Message::Text(t) => parse_text(&t),
+            tungstenite::Message::Text(t) => {
+                tx.send_blocking(WsEvent::Js(t.to_string())).map_err(|e| e.to_string())?;
+                parse_text(&t)
+            }
             tungstenite::Message::Binary(b) => parse_binary(&b),
             tungstenite::Message::Close(_) => return Ok(()),
             _ => None,

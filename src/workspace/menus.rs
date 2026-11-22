@@ -45,6 +45,14 @@ fn sub(label: impl Into<String>, items: impl Fn() -> Vec<Entry> + 'static) -> En
     Entry::Sub { label: label.into(), icon: None, enabled: true, items: Rc::new(items) }
 }
 
+thread_local! {
+    static EXT_COMMANDS: RefCell<Vec<(String, String)>> = const { RefCell::new(Vec::new()) };
+}
+/// `(id, label)` of the commands custom-node extensions registered.
+pub fn set_extension_commands(c: Vec<(String, String)>) {
+    EXT_COMMANDS.set(c);
+}
+
 /// Copied nodes/groups (Ctrl+C, "Copy"), pasted with fresh ids at the pointer.
 #[derive(Clone, Default)]
 struct Clip {
@@ -112,6 +120,7 @@ fn kj_node(kind: &str, id: String, name: &str, ty: &str, pos: (f64, f64)) -> wor
         collapsed: false,
         pinned: false,
         shape: 0,
+        options: Default::default(),
     }
 }
 
@@ -330,15 +339,19 @@ impl Workspace {
         e.push(Entry::Line);
         let s = ids.clone();
         e.push(item("Bypass", self.act(doc, move |w, d| w.bypass(d, &s))));
-        if self.image_slot(doc, &id).is_some() {
+        // A preview/output picture (`filename=..&subfolder=..&type=..`) becomes `sub/name [type]`.
+        let shown = doc.borrow().canvas.node_image(&id).filter(|k| !k.starts_with("live:")).and_then(|k| {
+            let f = |n: &str| k.split('&').find_map(|p| p.strip_prefix(n)).map(|v| glib::Uri::unescape_string(v, None).map(|g| g.to_string()).unwrap_or_default());
+            let (name, sub, ty) = (f("filename=")?, f("subfolder=")?, f("type=")?);
+            Some(format!("{}{name} [{ty}]", if sub.is_empty() { String::new() } else { format!("{sub}/") }))
+        });
+        let slot = self.image_slot(doc, &id).map(|(_, v)| v);
+        if let Some(v) = slot.or(shown) {
+            e.push(item("Copy (Clipspace)", self.act(doc, move |_, _| CLIPSPACE.set(Some(v.clone())))));
+        }
+        if self.image_slot(doc, &id).is_some() && CLIPSPACE.with_borrow(Option::is_some) {
             let i = id.clone();
-            e.push(item("Copy (Clipspace)", self.act(doc, move |w, d| {
-                CLIPSPACE.set(w.image_slot(d, &i).map(|(_, v)| v));
-            })));
-            if CLIPSPACE.with_borrow(Option::is_some) {
-                let i = id.clone();
-                e.push(item("Paste (Clipspace)", self.act(doc, move |w, d| w.paste_clipspace(d, &i))));
-            }
+            e.push(item("Paste (Clipspace)", self.act(doc, move |w, d| w.paste_clipspace(d, &i))));
         }
         e.push(Entry::Line);
         let s = ids.clone();
@@ -785,6 +798,18 @@ impl Workspace {
             e.push(sub("Add Node", move || me.add_node_entries(&d, pos, String::new())));
         }
         e.push(item("Add Group", self.act(doc, move |w, d| w.add_group(d, &[], Some(pos)))));
+        if EXT_COMMANDS.with_borrow(|c| !c.is_empty()) {
+            e.push(sub("Extension commands", || {
+                EXT_COMMANDS.with_borrow(|c| c.iter().map(|(id, label)| {
+                    let id = id.clone();
+                    let label2 = label.clone();
+                    item(label.clone(), move || match id.strip_prefix("panel:") {
+                        Some(pid) => crate::implant::open_panel(None, pid, &label2),
+                        None => crate::implant::run_command(&id),
+                    })
+                }).collect())
+            }));
+        }
         let has_clip = CLIP.with_borrow(Option::is_some);
         e.push(item_i("", "Paste\tCtrl+V", has_clip, self.act(doc, move |w, d| w.paste(d, Some(pos)))));
         let outs = {

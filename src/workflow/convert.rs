@@ -85,6 +85,7 @@ impl Workflow {
             collapsed: false,
             pinned: false,
             shape: 0,
+            options: Default::default(),
         };
         let mut sg_inputs: Vec<SubgraphIo> = Vec::new();
         for (k, ((oid, oslot), links)) in group(&incoming).into_iter().enumerate() {

@@ -1,6 +1,6 @@
 [package]
 name = "comfy-gnome"
-version = "0.2.0-beta.8"
+version = "0.2.0-beta.9"
 edition = "2021"
 rust-version = "1.80"
 license = "GPL-3.0-only"
@@ -11,11 +11,12 @@ readme = "README.md"
 adw = { version = "0.8", package = "libadwaita", features = ["v1_5"] }
 async-channel = "2"
 gtk = { version = "0.10", package = "gtk4", features = ["v4_14"] }
+webkit = { version = "0.5", package = "webkit6", features = ["v2_42"] }
 libc = "0.2"
 regex = { version = "1", default-features = false, features = ["std", "unicode-perl", "unicode-case"] }
 serde_json = { version = "1.0.154", features = ["preserve_order", "float_roundtrip"] }
 tungstenite = { version = "0.24", default-features = false, features = ["handshake"] }
-ureq = { version = "2", default-features = false, features = ["json"] }
+ureq = { version = "2", default-features = false, features = ["json", "tls"] }
 
 [build-dependencies]
 glib-build-tools = "0.21"

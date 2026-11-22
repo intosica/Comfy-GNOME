@@ -65,6 +65,9 @@ pub struct Node {
     pub pinned: bool,
     /// litegraph `shape` (1 box, 2 round, 4 card); 0 = not set.
     pub shape: i64,
+    /// Combo choices the web UI computed at runtime for this node (`widget.options.values`,
+    /// e.g. Impact's wildcard databank). Never serialised: rebuilt from the implant's delta.
+    pub options: std::collections::BTreeMap<String, Vec<String>>,
 }
 
 #[derive(Debug, Clone)]
@@ -127,6 +130,7 @@ impl Node {
             collapsed: false,
             pinned: false,
             shape: 0,
+            options: Default::default(),
         }
     }
 }
@@ -526,6 +530,76 @@ fn write_graph(s: &mut Value, g: &Graph, object_links: bool) {
     );
 }
 
+/// The structure extension hooks see (`{nodes, links}`, workflow JSON shape): ids,
+/// types, sockets, widget values, properties.
+pub fn graph_json(g: &Graph) -> Value {
+    let mut links: Vec<&Link> = g.links.values().collect();
+    links.sort_by_key(|l| l.id);
+    let nodes: Vec<Value> = g
+        .nodes
+        .iter()
+        .map(|n| {
+            let mut v = fresh_node_json(n);
+            for (iv, i) in v["inputs"].as_array_mut().into_iter().flatten().zip(&n.inputs) {
+                if let Some(l) = &i.label {
+                    iv["label"] = Value::from(l.as_str());
+                }
+            }
+            if !n.properties.is_null() {
+                v["properties"] = n.properties.clone();
+            }
+            if let Some(t) = &n.title {
+                v["title"] = Value::from(t.as_str());
+            }
+            v
+        })
+        .collect();
+    let links: Vec<Value> = links.iter().map(|l| link_json(l)).collect();
+    serde_json::json!({ "nodes": nodes, "links": links })
+}
+
+pub fn link_json(l: &Link) -> Value {
+    let idv = |id: &str| id.parse::<i64>().map_or_else(|_| Value::from(id), Value::from);
+    serde_json::json!({"id": l.id, "origin_id": idv(&l.origin_id), "origin_slot": l.origin_slot,
+                       "target_id": idv(&l.target_id), "target_slot": l.target_slot, "type": l.ty})
+}
+
+/// Take what extension hooks changed (the implant's `{nodes, links: {add, remove}}`
+/// delta) into the graph: whole socket lists, single widget values, wires.
+pub fn apply_hooks(g: &mut Graph, v: &Value) {
+    for nv in v["nodes"].as_array().into_iter().flatten() {
+        let Some(id) = id_of(&nv["id"]) else { continue };
+        let Some(n) = g.nodes.iter_mut().find(|n| n.id == id) else { continue };
+        if nv.get("inputs").is_some() {
+            if let Some(p) = parse_node(nv) {
+                n.inputs = p.inputs;
+                n.outputs = p.outputs;
+            }
+        }
+        for o in nv["options"].as_array().into_iter().flatten() {
+            let (Some(name), Some(vals)) = (o[1].as_str(), o[2].as_array()) else { continue };
+            n.options.insert(name.to_owned(), vals.iter().map(str_of).collect());
+        }
+        for w in nv["widgets"].as_array().into_iter().flatten() {
+            let (Some(i), Some(val)) = (w[0].as_u64(), w.get(1)) else { continue };
+            if !n.widgets_values.is_array() {
+                n.widgets_values = Value::Array(Vec::new());
+            }
+            let a = n.widgets_values.as_array_mut().expect("just made an array");
+            if a.len() <= i as usize {
+                a.resize(i as usize + 1, Value::Null);
+            }
+            a[i as usize] = val.clone();
+        }
+    }
+    for id in v["links"]["remove"].as_array().into_iter().flatten().filter_map(Value::as_i64) {
+        g.links.remove(&id);
+    }
+    for l in v["links"]["add"].as_array().into_iter().flatten().filter_map(parse_link) {
+        g.links.insert(l.id, l);
+    }
+}
+
 /// Serialise a node that has no counterpart in the loaded JSON (created in the editor).
 fn fresh_node_json(n: &Node) -> Value {
     let idv = |id: &str| id.parse::<i64>().map_or_else(|_| Value::from(id), Value::from);
@@ -669,6 +743,7 @@ fn parse_node(n: &Value) -> Option<Node> {
         collapsed: n["flags"]["collapsed"].as_bool().unwrap_or(false),
         pinned: n["flags"]["pinned"].as_bool().unwrap_or(false),
         shape: n["shape"].as_i64().unwrap_or(0),
+        options: Default::default(),
     })
 }
 

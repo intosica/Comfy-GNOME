@@ -8,6 +8,8 @@ mod dasiwa;
 mod erenodes;
 mod graph_view;
 mod imgtools;
+mod implant;
+mod lora_view;
 mod maskedit;
 mod model_preview;
 mod nodesearch;
@@ -113,6 +115,21 @@ fn build_window(app: &adw::Application) {
             app.quit();
             adw::glib::Propagation::Proceed
         });
+    }
+    {
+        // Files dropped anywhere on the window (not just over a canvas): the canvas targets
+        // are children, so this one only sees drops that missed them.
+        let ws = ws.clone();
+        let drop = adw::gtk::DropTarget::new(adw::glib::Type::INVALID, adw::gtk::gdk::DragAction::COPY);
+        drop.set_types(&[adw::gtk::gdk::FileList::static_type(), adw::gtk::gdk::Texture::static_type(), String::static_type()]);
+        drop.connect_drop(move |_, v, _, _| {
+            let Ok(list) = v.get::<adw::gtk::gdk::FileList>() else { return ws.drop_value(v, (0.0, 0.0)) };
+            for f in list.files() {
+                ws.drop_file(&f);
+            }
+            true
+        });
+        window.add_controller(drop);
     }
     {
         // `kill`/`pkill`/logout deliver SIGTERM/SIGHUP/SIGINT: GTK ignores them by default, so

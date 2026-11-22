@@ -15,7 +15,7 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 
 fn socket(io: &[SubgraphIo]) -> Vec<Slot> {
-    io.iter().map(|i| Slot { label: i.name.clone(), ty: i.ty.clone() }).collect()
+    io.iter().map(|i| Slot { label: i.name.clone(), ty: i.ty.clone(), ..Default::default() }).collect()
 }
 
 /// Canvas widget kind for a registry input (what the web frontend would draw).
@@ -448,7 +448,15 @@ pub fn build_widgets(wf: &Workflow, graph: &Graph, n: &workflow::Node, reg: &Reg
         }
     }
 
-    let Some(def) = reg.get(&n.ty) else { return Vec::new() };
+    let Some(def) = reg.get(&n.ty) else {
+        // Node class not installed on the server: still let plain string values be edited.
+        return vals
+            .into_iter()
+            .flatten()
+            .enumerate()
+            .filter_map(|(i, v)| v.as_str().map(|t| Widget::new("text", i.to_string(), WKind::Text { multiline: t.len() > 40 || t.contains('\n') || n.ty.to_lowercase().contains("multiline") }, v.clone())))
+            .collect();
+    };
     if vals.is_none() {
         // Object-style / extension layouts: show values, don't edit.
         return prompt::widget_map(n, def).into_iter().map(|(k, v)| Widget::new(&k, k.clone(), WKind::ReadOnly, v)).collect();
@@ -482,7 +490,59 @@ pub fn build_widgets(wf: &Workflow, graph: &Graph, n: &workflow::Node, reg: &Reg
         }
         out.push(w);
     }
+    apply_options(n, &mut out);
     out
+}
+
+thread_local!(static LM_PAGE: std::cell::Cell<bool> = const { std::cell::Cell::new(true) });
+
+/// LoRA Manager rows: the extension's own editor in the node (default, like native ComfyUI)
+/// or Comfy-GNOME's plain canvas list.
+pub fn set_lm_page(on: bool) {
+    LM_PAGE.with(|c| c.set(on));
+}
+
+/// On the canvas, an extension's DOM widgets replace our stand-in rows for them: the implant
+/// page draws the real element (LoRA Manager's row editor, trigger-word tags …) on a row of
+/// its min height. Same name → same row; LoRA Manager's `loras` also covers our `lm:` rows.
+/// The property panel keeps the stand-ins, so the values stay editable without the page.
+fn dom_rows(n: &workflow::Node, def: Option<&crate::registry::NodeDef>, mut ws: Vec<Widget>) -> Vec<Widget> {
+    let dom = crate::implant::dom_widgets(&n.id, &n.ty);
+    if dom.is_empty() {
+        return ws;
+    }
+    let lm = lm_indices(n).is_some();
+    if lm && !LM_PAGE.with(std::cell::Cell::get) {
+        return ws; // ComfyGNOME.LoraRows = canvas: keep our own rows, the page's editor stays off-canvas
+    }
+    // The page draws these widgets itself: drop the canvas stand-in (same name, or same
+    // widget index — keys of plain rows are the `widgets_values` index).
+    ws.retain(|w| !dom.iter().any(|(name, _, i)| *name == w.label || w.key == i.to_string()) && !(lm && (w.key == "lm+" || w.key.starts_with("lm:"))));
+    // The saved value rides along: below zoom 0.5 the page is hidden and the canvas draws it itself.
+    // `source` carries the input's placeholder ("Search LoRAs to add...") for an empty value.
+    ws.extend(dom.into_iter().map(|(name, h, i)| {
+        let mut w = Widget::new(&name, format!("dom:{name}"), WKind::Dom(h), n.widgets_values.get(i).cloned().unwrap_or(Value::Null));
+        w.source = def.and_then(|d| d.inputs.iter().find(|x| x.name == name)).and_then(|x| x.opts["placeholder"].as_str()).unwrap_or_default().to_owned();
+        w
+    }));
+    ws
+}
+
+/// Combos whose choices the web UI computes at runtime (Impact's wildcard databank,
+/// Civitai lists …): the implant reports `widget.options.values`, replay them here so the
+/// canvas lists exactly what native ComfyUI would list.
+fn apply_options(n: &workflow::Node, ws: &mut [Widget]) {
+    if n.options.is_empty() {
+        return;
+    }
+    for w in ws.iter_mut() {
+        let WKind::Combo(o) = &mut w.kind else { continue };
+        if let Some(v) = n.options.get(&w.label).or_else(|| n.options.get(&w.key)) {
+            if !v.is_empty() {
+                *o = v.clone();
+            }
+        }
+    }
 }
 
 /// Interior widgets of a subgraph instance that are not promoted to its sockets: the
@@ -717,6 +777,10 @@ pub fn apply_widget(wf: &mut Workflow, path: &[String], node_id: &str, key: &str
         // matches LoraManager (an inactive row keeps its tag).
         if key == ti.to_string() {
             let text = v.as_str().unwrap_or_default().to_owned();
+            if crate::implant::live() {
+                set_at(&mut node.widgets_values, ti, json!(text)); // LoRA Manager's own callback merges the rows
+                return true;
+            }
             let existing = node.widgets_values.get(lm_indices(node).unwrap().1).and_then(Value::as_array).cloned().unwrap_or_default();
             let entries = lm_merge_entries(&text, &existing);
             lm_store(node, &entries, Some(text));
@@ -747,6 +811,10 @@ pub fn apply_widget(wf: &mut Workflow, path: &[String], node_id: &str, key: &str
                     }
                 }
                 _ => return true,
+            }
+            if crate::implant::live() {
+                lm_store(node, &entries, None); // its row callback rewrites the text
+                return true;
             }
             // Replace/remove/add changes the text; toggling does not.
             let text = lm_text_apply(&entries, &old_text);
@@ -882,7 +950,7 @@ pub fn scene(
         add(SUBGRAPH_OUTPUT_ID, &d.outputs, d.output_node, true);
         // The always-present "plug a new input here" socket below the last one.
         if let Some(&i) = index.get(SUBGRAPH_INPUT_ID) {
-            nodes[i].outputs.push(Slot { label: String::new(), ty: String::new() });
+            nodes[i].outputs.push(Slot { label: String::new(), ty: String::new(), ..Default::default() });
         }
     }
 
@@ -897,15 +965,21 @@ pub fn scene(
             .unwrap_or_else(|| n.ty.clone());
         let reroute = n.ty == "Reroute";
         let mut images = Vec::new();
-        let widgets = build_widgets(wf, graph, n, reg, &mut images);
+        let widgets = dom_rows(n, node_def, build_widgets(wf, graph, n, reg, &mut images));
         // Saved sizes can be tiny/garbage in old files; `Node::relayout` grows the height to fit.
-        let size = if reroute { (60.0, 26.0) } else { (n.size.0.max(120.0), n.size.1.max(40.0)) };
+        // A GNOME-shrunk node keeps its size only while the file still holds the size we wrote.
+        let kept = n.properties["ComfyGNOME.size"].as_array().and_then(|a| {
+            let f: Vec<f64> = a.iter().filter_map(|v| v.as_f64()).collect();
+            (f.len() == 4 && (f[2], f[3]) == n.size).then(|| (f[0], f[1]))
+        });
+        let size = if reroute { (60.0, 26.0) } else { let s = kept.unwrap_or(n.size); (s.0.max(120.0), s.1.max(40.0)) };
         let mut inputs: Vec<Slot> = n
             .inputs
             .iter()
             .map(|i| Slot {
                 label: i.widget.clone().filter(|w| *w != i.name).unwrap_or_else(|| i.name.clone()),
                 ty: i.ty.clone(),
+                opt: node_def.is_some_and(|d| d.inputs.iter().any(|x| x.optional && x.name == i.name.as_str())),
             })
             .collect();
         let base = inputs.len();
@@ -914,7 +988,7 @@ pub fn scene(
         if let Some(d) = node_def {
             for i in d.inputs.iter().filter(|i| i.is_widget()) {
                 if !inputs.iter().any(|s| s.label == i.name) {
-                    inputs.push(Slot { label: i.name.clone(), ty: i.type_name().to_owned() });
+                    inputs.push(Slot { label: i.name.clone(), ty: i.type_name().to_owned(), opt: i.optional });
                 }
             }
         }
@@ -931,7 +1005,7 @@ pub fn scene(
             pos: n.pos,
             size,
             inputs,
-            outputs: n.outputs.iter().map(|o| Slot { label: o.name.clone(), ty: o.ty.clone() }).collect(),
+            outputs: n.outputs.iter().map(|o| Slot { label: o.name.clone(), ty: o.ty.clone(), ..Default::default() }).collect(),
             widgets,
             images,
             overlay,
@@ -942,6 +1016,16 @@ pub fn scene(
             pinned: n.pinned,
             subgraph: wf.subgraphs.contains_key(&n.ty),
             shape: n.shape,
+            label: (n.ty == "Label (rgthree)").then(|| {
+                let p = &n.properties;
+                canvas::Label {
+                    size: p["fontSize"].as_f64().unwrap_or(12.0),
+                    color: p["fontColor"].as_str().and_then(parse_color).unwrap_or(0xffffff),
+                    bg: p["backgroundColor"].as_str().and_then(parse_color),
+                    align: match p["textAlign"].as_str() { Some("center") => 0.5, Some("right") => 1.0, _ => 0.0 },
+                    pad: p["padding"].as_f64().unwrap_or(0.0),
+                }
+            }),
             ..Node::default()
         };
         // A widget sits on the socket whose name it carries, so its dot is on that row.
@@ -1005,7 +1089,7 @@ fn grow_widget_slots(n: &mut Node) {
         let idx = match n.inputs.iter().position(|s| s.label == name) {
             Some(i) => i,
             None => {
-                n.inputs.push(Slot { label: name, ty: "*".to_owned() });
+                n.inputs.push(Slot { label: name, ty: "*".to_owned(), ..Default::default() });
                 n.inputs.len() - 1
             }
         };
@@ -1020,7 +1104,21 @@ pub fn sync(graph: &mut Graph, nodes: &[Node], links: &[Link], groups: &[Group])
     for (i, n) in nodes.iter().enumerate() {
         if let Some(w) = graph.nodes.iter_mut().find(|w| w.id == n.id) {
             w.pos = n.pos;
-            w.size = n.size;
+            // ComfyUI never clamps on load, so a node smaller than its computeSize overlaps its
+            // widgets there. Write the clamped size; keep ours in a property for GNOME round-trips.
+            let rows = n.inputs.len().saturating_sub(n.widgets.iter().filter(|x| x.input.is_some()).count()).max(n.outputs.len()).max(1) as f64;
+            let mw = (30.0 + n.title.chars().count() as f64 * 8.4 + 10.0).max(if n.widgets.is_empty() { 140.0 } else { 210.0 });
+            let mh = rows * 20.0 + if n.widgets.is_empty() { 0.0 } else { n.widgets.len() as f64 * 24.0 + 8.0 } + 6.0;
+            let big = if n.reroute || n.collapsed { n.size } else { (n.size.0.max(mw), n.size.1.max(mh)) };
+            if let Some(o) = w.properties.as_object_mut().filter(|_| big == n.size) {
+                o.remove("ComfyGNOME.size");
+            } else if big != n.size {
+                if w.properties.is_null() {
+                    w.properties = serde_json::json!({});
+                }
+                w.properties["ComfyGNOME.size"] = serde_json::json!([n.size.0, n.size.1, big.0, big.1]);
+            }
+            w.size = big;
             w.collapsed = n.collapsed;
             // A wire on a JS-built widget socket (LoRA rows) needs a real input, otherwise
             // the prompt and the saved file would drop it.
@@ -1409,6 +1507,7 @@ mod tests {
             collapsed: false,
             pinned: false,
             shape: 0,
+            options: Default::default(),
         };
         let lora = "Select the LoRA to add to the text";
         n.widgets_values[1] = json!("MOSS/x.safetensors");

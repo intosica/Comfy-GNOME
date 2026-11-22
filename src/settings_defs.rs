@@ -48,6 +48,9 @@ pub struct Catalog {
     pub categories: Vec<String>,
     /// `(pack, extension name)` from `registerExtension({name})`, load order; pack "Core" = frontend.
     pub extensions: Vec<(String, String)>,
+    /// Core combos whose `options` is an imported binding (`options: Sr`, the locale list):
+    /// `(setting id, /assets/ chunk URL, export name)`, evaluated by the implant.
+    pub core_refs: Vec<(String, String, String)>,
 }
 
 /// Web UI labels that differ from the category key (`settingsCategories` in the i18n file).
@@ -200,6 +203,7 @@ struct Builder {
     /// First-seen order of categories, with "came from the frontend".
     cats: Vec<(String, bool)>,
     extensions: Vec<(String, String)>,
+    core_refs: Vec<(String, String, String)>,
 }
 
 impl Builder {
@@ -227,6 +231,11 @@ impl Builder {
                 self.hidden.insert(d.id);
                 continue;
             }
+            if frontend && d.kind == "combo" && d.options.is_empty() {
+                if let Some(r) = import_ref(src, &d.id) {
+                    self.core_refs.push((d.id.clone(), r.0, r.1));
+                }
+            }
             let c = d.category().to_owned();
             if !self.cats.iter().any(|(x, _)| *x == c) {
                 self.cats.push((c, frontend));
@@ -246,8 +255,59 @@ impl Builder {
         if has("Other") {
             categories.push("Other".into());
         }
-        Catalog { defs: self.defs, hidden: self.hidden, categories, extensions: self.extensions }
+        Catalog { defs: self.defs, hidden: self.hidden, categories, extensions: self.extensions, core_refs: self.core_refs }
     }
+}
+
+/// `{id:`X`,…,options:Sr}` with `import{…,p as Sr,…}from"./i18n-….js"` → (`/assets/i18n-….js`, `p`).
+fn import_ref(src: &str, id: &str) -> Option<(String, String)> {
+    let re = regex::Regex::new(&format!(r#"id:[`"']{}[`"'][^{{}}]*?options:(?:Object\.values\()?([A-Za-z_$][\w$]*)\)?[,}}]"#, regex::escape(id))).ok()?;
+    let local = re.captures(src)?.get(1)?.as_str().to_owned();
+    let imp = regex::Regex::new(r#"import\{([^}]*)\}from"\./([^"]+\.js)""#).unwrap();
+    let found = imp.captures_iter(src).find_map(|c| {
+        c[1].split(',').find_map(|b| {
+            let (ex, loc) = b.trim().split_once(" as ").unwrap_or((b.trim(), b.trim()));
+            (loc == local).then(|| (format!("/assets/{}", &c[2]), ex.to_owned()))
+        })
+    });
+    found
+}
+
+/// The implant's view of every extension setting (live, so computed `options` resolve)
+/// laid over the static catalog: same id replaces in place, new ids append.
+pub fn overlay(cat: &Catalog, settings: &[Value], core_options: &Map<String, Value>) -> Catalog {
+    let mut out = cat.clone();
+    for v in settings {
+        let Some(o) = v.as_object() else { continue };
+        let mut p: HashMap<String, Option<Value>> = o.iter().map(|(k, v)| (k.clone(), (!v.is_null()).then(|| v.clone()))).collect();
+        if !matches!(p.get("category"), Some(Some(Value::Array(_)))) {
+            p.remove("category");
+        }
+        let Some(d) = to_def(&p) else { continue };
+        if d.kind == "hidden" {
+            out.defs.retain(|x| x.id != d.id);
+            out.hidden.insert(d.id);
+            continue;
+        }
+        let c = d.category().to_owned();
+        if !out.categories.contains(&c) {
+            let at = out.categories.iter().position(|x| x == "Other").unwrap_or(out.categories.len());
+            out.categories.insert(at, c);
+        }
+        match out.defs.iter_mut().find(|x| x.id == d.id) {
+            Some(x) => *x = d,
+            None => out.defs.push(d),
+        }
+    }
+    for d in &mut out.defs {
+        if let Some(Value::Array(a)) = core_options.get(&d.id) {
+            let p = HashMap::from([("id".to_owned(), Some(Value::from(d.id.clone()))), ("type".to_owned(), Some(Value::from("combo"))), ("name".to_owned(), None), ("options".to_owned(), Some(Value::Array(a.clone())))]);
+            if let Some(x) = to_def(&p) {
+                d.options = x.options;
+            }
+        }
+    }
+    out
 }
 
 // ---------------------------------------------------------------------------------------

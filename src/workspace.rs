@@ -70,6 +70,7 @@ pub struct Workspace {
     collapse: gtk::ToggleButton,
     /// `Comfy.LinkRenderMode` for every canvas (-1 hidden, 0 straight, 1 linear, 2 spline).
     link_mode: Rc<std::cell::Cell<i32>>,
+    last_link: Rc<std::cell::Cell<i32>>,
     /// `Comfy.Execution.PreviewMethod` sent as `extra_data.preview_method`.
     preview_method: Rc<RefCell<String>>,
     /// Thin sampler-progress strip under the workspace tabs.
@@ -194,6 +195,11 @@ fn row_title(row: &gtk::ListBoxRow) -> String {
 }
 
 /// The graph the tab is currently showing (root or the drilled-into subgraph).
+/// Which graph the implant mirrors: the tab and the subgraph level shown.
+fn mirror_key(doc: &DocRef, d: &Doc) -> String {
+    format!("{:p}/{}", Rc::as_ptr(doc), d.path.join("/"))
+}
+
 fn graph_ref(d: &Doc) -> &workflow::Graph {
     d.path.last().and_then(|p| d.wf.subgraphs.get(p)).map(|s| &s.graph).unwrap_or(&d.wf.root)
 }
@@ -626,8 +632,12 @@ impl Workspace {
         bottom_bar.add_css_class("dock-bar");
         bottom_bar.append(&bottom_switcher);
         bottom_bar.append(&gap);
+        let link_btn = gtk::Button::builder().icon_name("cg-insert-link-symbolic").tooltip_text("Link render mode").css_classes(["flat"]).build();
         bottom_bar.append(&clear_log);
+        bottom_bar.append(&link_btn);
         bottom_bar.append(&collapse);
+        settings::register_link_button(&link_btn, &collapse);
+        collapse.connect_toggled(|_| settings::link_refresh());
         let bottom_page = gtk::Box::new(gtk::Orientation::Vertical, 0);
         bottom_page.append(&bottom_bar);
         bottom_page.append(&bottom);
@@ -877,6 +887,19 @@ impl Workspace {
         });
         canvas_overlay.add_controller(motion);
         {
+            // Extension DOM widgets: the implant page sits over the canvas, taking the pointer
+            // only over its own elements.
+            crate::implant::attach(&canvas_overlay);
+            let m = gtk::EventControllerMotion::new();
+            m.set_propagation_phase(gtk::PropagationPhase::Capture);
+            m.connect_motion(|c, x, y| crate::implant::pointer(x, y, c.current_event_state().contains(gtk::gdk::ModifierType::BUTTON1_MASK)));
+            m.connect_enter(|_, x, y| crate::implant::pointer(x, y, false));
+            canvas_overlay.add_controller(m);
+            let c = gtk::GestureClick::builder().button(0).propagation_phase(gtk::PropagationPhase::Capture).build();
+            c.connect_pressed(|_, _, _, _| crate::implant::outside_click());
+            tabs.add_controller(c); // not an ancestor of the page: sees canvas presses only
+        }
+        {
             let tg = toggle.clone();
             bar.connect_clicked(move |_| tg.set_active(true));
             let b = bar.clone();
@@ -928,6 +951,7 @@ impl Workspace {
             media: Rc::default(),
             collapse: collapse.clone(),
             link_mode: Rc::new(std::cell::Cell::new(2)),
+            last_link: Rc::new(std::cell::Cell::new(2)),
             preview_method: Rc::new(RefCell::new("default".into())),
             progress: progress.clone(),
             interrupt_btn: interrupt.clone(),
@@ -941,6 +965,21 @@ impl Workspace {
             pinned,
         };
         {
+            // Middle-drag pans even when the pointer is over an extension page element (which
+            // gets the press and would otherwise swallow it): capture on the ancestor.
+            let drag = gtk::GestureDrag::builder().button(gtk::gdk::BUTTON_MIDDLE).propagation_phase(gtk::PropagationPhase::Capture).build();
+            let start = Rc::new(Cell::new(None));
+            let (me, st) = (ws.clone(), start.clone());
+            drag.connect_drag_begin(move |_, _, _| st.set(me.active_canvas().map(|c| c.view())));
+            let me = ws.clone();
+            drag.connect_drag_update(move |_, dx, dy| {
+                if let (Some((z, (ox, oy))), Some(c)) = (start.get(), me.active_canvas()) {
+                    c.set_view(z, (ox + dx, oy + dy));
+                }
+            });
+            canvas_overlay.add_controller(drag);
+        }
+        {
             let me = ws.clone();
             let n = Cell::new(0u32);
             canvas_overlay.add_tick_callback(move |_, _| {
@@ -952,6 +991,8 @@ impl Workspace {
             });
         }
         {
+            let me = ws.clone();
+            link_btn.connect_clicked(move |b| me.link_button_clicked(b));
             let me = ws.clone();
             run.connect_clicked(move |_| me.queue_prompt(tabmenu::shift_down()));
             let me = ws.clone();
@@ -1377,6 +1418,7 @@ impl Workspace {
         self.tabs.connect_selected_page_notify(move |_| {
             if let Some(doc) = me.active_doc() {
                 me.show_trail(&doc);
+                me.mirror(&doc);
             }
         });
 
@@ -1473,6 +1515,9 @@ impl Workspace {
             return;
         }
         let prev = std::mem::replace(&mut d.snap, now);
+        drop(d);
+        self.mirror(doc);
+        let mut d = doc.borrow_mut();
         d.undo.push(prev);
         if d.undo.len() > UNDO_MAX {
             d.undo.remove(0);
@@ -1507,6 +1552,7 @@ impl Workspace {
             d.dirty = true;
             tabmenu::retitle(&d);
         }
+        crate::implant::forget(); // a whole other graph: reload rather than replay
         self.refresh_doc(&doc);
     }
 
@@ -1980,6 +2026,7 @@ impl Workspace {
                                 tools.set_visible(false);
                                 stack.set_visible_child_name("video");
                                 video.set_file(Some(&gio::File::for_path(path)));
+                                sync_video_audio(&video);
                                 return;
                             }
                             stack.set_visible_child_name("pic");
@@ -2050,17 +2097,21 @@ impl Workspace {
         scrim.append(&col);
         col.set_hexpand(true);
 
+        // Compare / Crop / Paint work on the picture on show.
+        let win = self.root.root().and_downcast::<gtk::Window>();
+        let win_keys: Rc<std::cell::RefCell<Option<gtk::EventControllerKey>>> = Rc::default();
         let close: Rc<dyn Fn()> = {
             let (host, scrim, gen, video) = (host.clone(), scrim.clone(), gen.clone(), video.clone());
+            let (win, win_keys) = (win.clone(), win_keys.clone());
             Rc::new(move || {
                 gen.set(gen.get().wrapping_add(1)); // stops a running animation
                 video.set_file(None::<&gio::File>);
+                if let (Some(w), Some(k)) = (win.as_ref(), win_keys.borrow_mut().take()) {
+                    w.remove_controller(&k);
+                }
                 host.remove_overlay(&scrim)
             })
         };
-
-        // Compare / Crop / Paint work on the picture on show.
-        let win = self.root.root().and_downcast::<gtk::Window>();
         let tool = |label: &str, tip: &str| {
             let b = gtk::Button::builder().label(label).tooltip_text(tip).css_classes(["osd"]).build();
             tools.append(&b);
@@ -2145,9 +2196,11 @@ impl Workspace {
         scrim.add_controller(click);
 
         let keys = gtk::EventControllerKey::new();
-        {
+        // Capture: the video's own transport controls get the focus and consume Esc there.
+        keys.set_propagation_phase(gtk::PropagationPhase::Capture);
+        let on_key: Rc<dyn Fn(gtk::gdk::Key) -> glib::Propagation> = {
             let (step, close) = (step.clone(), close.clone());
-            keys.connect_key_pressed(move |_, key, _, _| match key {
+            Rc::new(move |key| match key {
                 gtk::gdk::Key::Left | gtk::gdk::Key::Page_Up => {
                     step(-1);
                     glib::Propagation::Stop
@@ -2161,9 +2214,19 @@ impl Workspace {
                     glib::Propagation::Stop
                 }
                 _ => glib::Propagation::Proceed,
-            });
-        }
+            })
+        };
+        let k1 = on_key.clone();
+        keys.connect_key_pressed(move |_, key, _, _| k1(key));
         scrim.add_controller(keys);
+        // And on the window: a click on the video moves the focus out of the scrim's subtree.
+        let wkeys = gtk::EventControllerKey::new();
+        wkeys.set_propagation_phase(gtk::PropagationPhase::Capture);
+        wkeys.connect_key_pressed(move |_, key, _, _| on_key(key));
+        if let Some(w) = win.as_ref() {
+            w.add_controller(wkeys.clone());
+        }
+        win_keys.replace(Some(wkeys));
         host.add_overlay(&scrim);
         scrim.grab_focus();
         load();
@@ -2327,7 +2390,7 @@ impl Workspace {
         // dragged inside the app (see [`image_drag_payload`]). Two separate targets let the
         // String one swallow the drop before the FileList one saw it.
         let drop = gtk::DropTarget::new(glib::Type::INVALID, gtk::gdk::DragAction::COPY);
-        drop.set_types(&[gtk::gdk::FileList::static_type(), String::static_type()]);
+        drop.set_types(&[gtk::gdk::FileList::static_type(), gtk::gdk::Texture::static_type(), String::static_type()]);
         let (me2, c2) = (self.clone(), canvas.clone());
         drop.connect_drop(move |_, v, x, y| {
             let (zoom, off) = c2.view();
@@ -2336,6 +2399,9 @@ impl Workspace {
                 for f in list.files() {
                     me2.open_dropped_at(&f, pos);
                 }
+                return true;
+            }
+            if me2.drop_value(v, pos) {
                 return true;
             }
             let Ok(text) = v.get::<String>() else { return false };
@@ -2440,6 +2506,33 @@ impl Workspace {
         self.render_doc(&doc);
         self.tabs.set_selected_page(&page);
         self.schedule_session();
+    }
+
+    /// Show the extensions' mirror (the implant) this tab's graph if it's the one on
+    /// screen, so their hooks see every edit as in the web UI.
+    fn mirror(&self, doc: &DocRef) {
+        if self.active_doc().is_some_and(|a| Rc::ptr_eq(&a, doc)) {
+            let d = doc.borrow();
+            crate::implant::sync(&mirror_key(doc, &d), workflow::graph_json(graph_ref(&d)));
+        }
+    }
+
+    /// Extension hooks changed nodes of the mirrored tab (Impact's Switch grew `input2`,
+    /// LoRA Manager rewrote its list …): take that into the model and redraw.
+    fn on_hooks(&self, key: &str, delta: &Value) {
+        let Some(doc) = self.docs.borrow().iter().find(|d| mirror_key(d, &d.borrow()) == key).cloned() else { return };
+        let t0 = std::time::Instant::now();
+        self.checkpoint(&doc); // canvas state first; anything new goes to the mirror before this lands
+        {
+            let mut d = doc.borrow_mut();
+            workflow::apply_hooks(graph_mut(&mut d), delta);
+            crate::implant::applied(key, workflow::graph_json(graph_ref(&d)));
+        }
+        self.render_doc(&doc);
+        self.set_dirty(&doc, true);
+        if std::env::var_os("CG_IMPLANT_DEBUG").is_some() {
+            eprintln!("[implant] on_hooks took {:?}", t0.elapsed());
+        }
     }
 
     /// A canvas widget changed (or a button was pressed): write it to the model.
@@ -2869,6 +2962,7 @@ impl Workspace {
             }
         }
         self.load_images(doc);
+        self.mirror(doc); // new tab, subgraph level, undo: the mirror follows
     }
 
     /// Re-run `scene()` for every tab (after `/object_info` arrives) without
@@ -2888,7 +2982,7 @@ impl Workspace {
             .root()
             .and_downcast::<gtk::Window>()
             .and_then(|w| gtk::prelude::GtkWindowExt::focus(&w))
-            .is_some_and(|f| f.is::<gtk::Text>() || f.is::<gtk::Entry>() || f.is::<gtk::TextView>())
+            .is_some_and(|f| f.is::<gtk::Text>() || f.is::<gtk::Entry>() || f.is::<gtk::TextView>() || f.is::<webkit::WebView>())
     }
 
     fn with_selection(&self, f: impl Fn(&Self, &DocRef, &[String])) {
@@ -3588,45 +3682,15 @@ impl Workspace {
         settings::open(self);
     }
 
+    /// LoRA Manager is a web app (see [crate::lora_view]): the backend serves it at `/loras`.
     fn open_lora_manager(&self) {
         let Some(client) = self.client.borrow().clone() else {
             self.append_log("[lora] not connected");
             return;
         };
         let url = format!("{}/loras", client.base_url());
-        // Chromium-family app mode first; Firefox has no app mode, so a plain window.
-        // `xdg-open` is the last resort. Flatpak cannot see host browsers, so the
-        // lookup runs on the host side.
-        // Own profile per display: Chromium hands a URL to an already-running instance of the same
-        // profile, which opens it on *that* instance's display — a browser left on another X server
-        // (e.g. a headless test display) swallowed every window. Our profile is only ours.
-        let display = std::env::var("WAYLAND_DISPLAY").or_else(|_| std::env::var("DISPLAY")).unwrap_or_default();
-        let tag: String = display.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '_' }).collect();
-        let profile = glib::user_cache_dir().join("comfy-gnome").join(format!("browser-{tag}"));
-        let profile = profile.display();
-        let script = format!(
-            "for b in thorium-browser chromium chromium-browser google-chrome-stable google-chrome \
-                 brave-browser microsoft-edge; do \
-               command -v \"$b\" >/dev/null 2>&1 && exec \"$b\" --app='{url}' --new-window \
-                 --user-data-dir='{profile}' --no-first-run --no-default-browser-check; done; \
-             command -v firefox >/dev/null 2>&1 && exec firefox --new-window '{url}'; \
-             exec xdg-open '{url}'"
-        );
-        let mut argv: Vec<std::ffi::OsString> = Vec::new();
-        if backend::in_flatpak() {
-            argv.extend(["flatpak-spawn", "--host"].map(Into::into));
-        }
-        argv.extend(["sh", "-c", &script].map(Into::into));
-        let argv: Vec<&std::ffi::OsStr> = argv.iter().map(|s| s.as_os_str()).collect();
-        match gio::SubprocessLauncher::new(gio::SubprocessFlags::NONE).spawn(&argv) {
-            Ok(sub) => {
-                self.append_log(&format!("[lora] {url} → browser window"));
-                glib::spawn_future_local(async move {
-                    let _ = sub.wait_future().await;
-                });
-            }
-            Err(e) => self.append_log(&format!("[lora] could not open a window: {e}")),
-        }
+        crate::lora_view::open(self.root.root().and_downcast::<gtk::Window>().as_ref(), &url);
+        self.append_log(&format!("[lora] {url} → in-app viewer"));
     }
 
     pub fn append_log(&self, line: &str) {
@@ -3724,6 +3788,29 @@ impl Workspace {
         self.load_registry();
         self.refresh_workflows();
         install_model_previews(client.clone());
+        let c = client.clone();
+        let me = self.clone();
+        glib::spawn_future_local(async move {
+            let base = c.base_url().to_owned();
+            if let Ok(cat) = gtk::gio::spawn_blocking(move || crate::settings_defs::catalog(&c)).await {
+                crate::implant::start(&base, &cat.core_refs);
+                let m = me.clone();
+                crate::implant::on_change(move |key, delta| m.on_hooks(key, delta));
+                let m2 = me.clone();
+                crate::implant::on_dom(move || {
+                    if let Some(doc) = m2.active_doc() {
+                        m2.sync_doc(&doc); // keep unsaved moves, then rebuild the rows
+                        m2.render_doc(&doc);
+                    }
+                });
+                if let Some(doc) = me.active_doc() {
+                    me.mirror(&doc); // loaded once the extensions are
+                }
+                if let Some(r) = crate::implant::ready().await {
+                    me.install_extension_commands(&r);
+                }
+            }
+        });
 
         let (tx, rx) = async_channel::unbounded();
         client.spawn_ws(tx);
@@ -3744,10 +3831,81 @@ impl Workspace {
     }
 
     /// `Comfy.LinkRenderMode` for every canvas, present and future.
+    /// Rows changed shape (a setting that adds or drops canvas rows): rebuild every tab.
+    pub fn refresh_rows(&self) {
+        for d in self.docs.borrow().iter() {
+            self.render_doc(d);
+        }
+    }
+
     pub fn redraw_canvases(&self) {
         for d in self.docs.borrow().iter() {
             d.borrow().canvas.area.queue_draw();
         }
+    }
+
+    /// Extension commands: listed in the canvas menu, keybindings become window shortcuts.
+    fn install_extension_commands(&self, r: &crate::implant::Ready) {
+        let side = r.sidebars.iter().filter_map(|c| Some((format!("panel:{}", c["id"].as_str()?), c["title"].as_str()?.to_owned())));
+        menus::set_extension_commands(r.commands.iter().filter_map(|c| Some((c["id"].as_str()?.to_owned(), c["label"].as_str()?.to_owned()))).chain(side).collect());
+        let keys = gtk::ShortcutController::new();
+        for k in &r.keybindings {
+            let (Some(id), Some(key)) = (k["id"].as_str(), k["key"].as_str()) else { continue };
+            let flag = |n: &str, m: &'static str| if k[n].as_bool() == Some(true) { m } else { "" };
+            let combo = format!("{}{}{}{}", flag("ctrl", "<Control>"), flag("alt", "<Alt>"), flag("shift", "<Shift>"), if key.chars().count() == 1 { key.to_lowercase() } else { key.to_owned() });
+            let Some(trigger) = gtk::ShortcutTrigger::parse_string(&combo) else { continue };
+            let (id, me) = (id.to_owned(), self.clone());
+            keys.add_shortcut(gtk::Shortcut::new(
+                Some(trigger),
+                Some(gtk::CallbackAction::new(move |_, _| {
+                    if me.typing() {
+                        return glib::Propagation::Proceed;
+                    }
+                    crate::implant::run_command(&id);
+                    glib::Propagation::Stop
+                })),
+            ));
+        }
+        self.root.add_controller(keys);
+    }
+
+    /// Persist `Comfy.LinkRenderMode` (server-wide) and apply it.
+    fn save_link_mode(&self, mode: i32) {
+        self.set_link_mode(mode);
+        if let Some(c) = self.client.borrow().clone() {
+            glib::spawn_future_local(async move {
+                let _ = gio::spawn_blocking(move || c.set_setting("Comfy.LinkRenderMode", Value::from(mode))).await;
+            });
+        }
+    }
+
+    fn link_button_clicked(&self, b: &gtk::Button) {
+        let cur = self.link_mode.get();
+        if settings::link_behaviour() == "toggle" {
+            let last = self.last_link.get();
+            if cur == -1 {
+                self.save_link_mode(last);
+            } else {
+                self.last_link.set(cur);
+                self.save_link_mode(-1);
+            }
+            return;
+        }
+        let pop = gtk::Popover::new();
+        let col = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        for (m, name) in [(0, "Straight"), (1, "Linear"), (2, "Spline"), (-1, "Hidden")] {
+            let r = gtk::ToggleButton::builder().label(name).css_classes(["flat"]).active(cur == m).build();
+            let (me, p) = (self.clone(), pop.clone());
+            r.connect_clicked(move |_| {
+                me.save_link_mode(m);
+                p.popdown();
+            });
+            col.append(&r);
+        }
+        pop.set_child(Some(&col));
+        pop.set_parent(b);
+        pop.connect_closed(|p| p.unparent());
+        pop.popup();
     }
 
     fn set_link_mode(&self, mode: i32) {
@@ -3779,6 +3937,9 @@ impl Workspace {
             me.set_snap(always, grid);
             // Litegraph's enum: -1 hidden, 0 straight, 1 linear, 2 spline (the default).
             me.set_link_mode(v.get("Comfy.LinkRenderMode").and_then(Value::as_i64).map_or(2, |m| m as i32));
+            for k in [settings::LINK_BTN, settings::LINK_SHOW, settings::RESIZE_SIDE, settings::LORA_ROWS] {
+                settings::apply_gnome(k, v.get(k).unwrap_or(&Value::Null));
+            }
             canvas::set_minimap(v.get("Comfy.Minimap.Visible").and_then(Value::as_bool).unwrap_or(true));
             *me.preview_method.borrow_mut() = v
                 .get("Comfy.Execution.PreviewMethod")
@@ -3858,6 +4019,7 @@ impl Workspace {
     fn on_ws_event(&self, ev: api::WsEvent) {
         use api::WsEvent::*;
         match ev {
+            Js(raw) => crate::implant::ws(&raw),
             Connected => {
                 let base = self.client.borrow().as_ref().map(|c| c.base_url().to_owned()).unwrap_or_default();
                 self.title.set_subtitle(&format!("Connected · {base}"));
@@ -3989,6 +4151,20 @@ fn fetch_media(client: Option<&api::Client>, q: &str) -> Result<Vec<u8>, String>
         (None, Some(c)) => c.view_query(q),
         (None, None) => Err("not connected".into()),
     }
+}
+
+// Mute / volume the video lightbox's own transport controls were last left at. Every
+// `set_file` builds a fresh media stream, which would reset them, so they are re-applied.
+thread_local!(static VID_AUDIO: Cell<(bool, f64)> = const { Cell::new((false, 1.0)) });
+
+/// Apply the remembered mute / volume to `video`'s stream and record whatever the user picks.
+fn sync_video_audio(video: &gtk::Video) {
+    let Some(stream) = video.media_stream() else { return };
+    let (muted, volume) = VID_AUDIO.with(Cell::get);
+    stream.set_muted(muted);
+    stream.set_volume(volume);
+    stream.connect_muted_notify(|s| VID_AUDIO.with(|c| c.set((s.is_muted(), c.get().1))));
+    stream.connect_volume_notify(|s| VID_AUDIO.with(|c| c.set((c.get().0, s.volume()))));
 }
 
 /// Play a multi-frame gif/webp/apng on `pic`; false when it is a still (or undecodable) and

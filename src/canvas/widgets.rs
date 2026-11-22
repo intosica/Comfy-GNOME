@@ -17,6 +17,26 @@ pub const GAP: f64 = 4.0;
 pub const MULTI_MIN: f64 = 60.0;
 /// Multiline text metrics, shared by `draw` and the scroll math in `mod.rs`.
 pub const LINE_H: f64 = 14.0;
+
+thread_local!(static TEXT_SCALE: Cell<f64> = const { Cell::new(1.0) });
+
+/// Multiline prompt font scale (Ctrl+wheel over such a row — a convenience the web UI
+/// does not have). Applies to every multiline text widget and its inline editor.
+pub fn text_scale() -> f64 {
+    TEXT_SCALE.with(Cell::get)
+}
+
+/// Steps the scale by `dir` (positive = larger), clamped to a readable range.
+pub fn bump_text_scale(dir: f64) -> f64 {
+    let v = (text_scale() + dir * 0.1).clamp(0.6, 2.5);
+    TEXT_SCALE.with(|c| c.set(v));
+    v
+}
+
+/// Line pitch of a multiline widget at the current scale.
+pub fn line_h() -> f64 {
+    LINE_H * text_scale()
+}
 const TEXT_TOP: f64 = 15.0;
 const TEXT_INSET: f64 = 8.0;
 
@@ -44,6 +64,9 @@ pub enum WKind {
     Seed,
     /// Value we cannot edit safely (unknown extension widgets, objects).
     ReadOnly,
+    /// An extension's DOM widget (`addDOMWidget`): the row is reserved at this height and the
+    /// implant page draws the real element over it (`implant::layout`).
+    Dom(f64),
 }
 
 #[derive(Clone, Debug)]
@@ -211,9 +234,16 @@ fn scratch() -> Context {
     SCRATCH.with(|c| c.clone())
 }
 
+/// `scratch` set to the multiline text size, so wrapping matches what `draw` paints.
+fn scratch_text() -> Context {
+    let cr = scratch();
+    cr.set_font_size(12.0 * text_scale());
+    cr
+}
+
 /// Wrapped lines of a multiline text widget `rw` wide, exactly as `draw` lays them out.
 pub fn text_lines(text: &str, rw: f64) -> Vec<String> {
-    wrap(&scratch(), text, (rw - 2.0 * TEXT_INSET).max(24.0))
+    wrap(&scratch_text(), text, (rw - 2.0 * TEXT_INSET).max(24.0))
 }
 
 /// Total height of a multiline text widget's wrapped text, `draw`'s geometry.
@@ -221,13 +251,14 @@ pub fn text_content_h(text: &str, rw: f64) -> f64 {
     if text.is_empty() {
         return 0.0;
     }
-    (text_lines(text, rw).len() as f64 - 1.0) * LINE_H + TEXT_TOP + 6.0
+    (text_lines(text, rw).len() as f64 - 1.0) * line_h() + TEXT_TOP + 6.0
 }
 
 /// Pill rects (relative to the row origin) and total height for a cloud of `width`.
 pub fn cloud_layout(w: &Widget, width: f64) -> (Vec<Pill>, f64) {
     let WKind::Cloud(mode) = &w.kind else { return (vec![], ROW_H) };
     let cr = scratch();
+    cr.set_font_size(12.0);
     let mode = *mode;
     let tags = w.value.as_array().cloned().unwrap_or_default();
     let mut out = vec![];
@@ -281,6 +312,7 @@ pub fn cloud_layout(w: &Widget, width: f64) -> (Vec<Pill>, f64) {
 pub fn row_height(w: &Widget, width: f64) -> f64 {
     match w.kind {
         WKind::Cloud(..) => cloud_layout(w, width).1,
+        WKind::Dom(h) => h,
         _ => ROW_H,
     }
 }
@@ -442,6 +474,40 @@ fn wrap(cr: &Context, text: &str, max: f64) -> Vec<String> {
 
 /// Paint one widget into absolute rect `r`. `linked`: its input socket is wired;
 /// `scroll`: the text offset of a multiline widget, in canvas pixels.
+/// A DOM widget while the implant page is hidden (zoom < 0.5): its saved value as plain lines
+/// (prompt text, or `name  strength` per LoRA row), so the node is not an empty box.
+pub fn draw_dom_fallback(cr: &Context, w: &Widget, r: [f64; 4]) {
+    let [x, y, rw, rh] = r;
+    pill(cr, r, 0x222222);
+    let lines: Vec<String> = match &w.value {
+        Value::String(t) => text_lines(t, rw - 16.0),
+        Value::Array(a) => a
+            .iter()
+            .map(|e| format!("{}  {}", if e["active"] == false { "○" } else { "●" }, e["name"].as_str().or_else(|| e["lora"].as_str()).map_or(String::new(), |n| format!("{n}  {}", e["strength"].as_f64().map_or(String::new(), |s| format!("{s:.2}"))))))
+            .collect(),
+        _ => Vec::new(),
+    };
+    rgb(cr, 0x999999);
+    let lh = line_h();
+    for (i, l) in lines.iter().enumerate().take((((rh - 8.0) / lh) as usize).max(1)) {
+        cr.move_to(x + 8.0, y + 4.0 + lh * (i as f64 + 0.8));
+        super::text::show(cr, &fit(cr, l, rw - 16.0));
+    }
+    if lines.is_empty() {
+        // What the empty element shows: LoRA Manager's list says "No LoRAs added", a text box its placeholder.
+        if matches!(w.value, Value::Array(_)) || w.label == "loras" {
+            let t = "No LoRAs added";
+            rgb(cr, 0x888888);
+            cr.move_to(x + (rw - width(cr, t)) / 2.0, y + 26.0);
+            super::text::show(cr, t);
+        } else {
+            rgb(cr, 0x777777);
+            cr.move_to(x + 8.0, y + 4.0 + lh * 0.8);
+            super::text::show(cr, &fit(cr, &w.source, rw - 16.0));
+        }
+    }
+}
+
 pub fn draw(cr: &Context, w: &Widget, r: [f64; 4], linked: bool, scroll: f64) {
     let [x, y, rw, rh] = r;
     let pal = crate::theme::current();
@@ -498,6 +564,7 @@ pub fn draw(cr: &Context, w: &Widget, r: [f64; 4], linked: bool, scroll: f64) {
             cr.save().ok();
             cr.rectangle(x + 2.0, y + 2.0, rw - 4.0, rh - 4.0);
             cr.clip();
+            cr.set_font_size(12.0 * text_scale());
             if text.is_empty() {
                 rgb(cr, 0x666666);
                 cr.move_to(x + TEXT_INSET, y + TEXT_TOP);
@@ -505,11 +572,11 @@ pub fn draw(cr: &Context, w: &Widget, r: [f64; 4], linked: bool, scroll: f64) {
             } else {
                 rgb(cr, txt);
                 for (i, line) in text_lines(text, rw).iter().enumerate() {
-                    let ly = y + TEXT_TOP + i as f64 * LINE_H - off;
-                    if ly > y + rh + LINE_H {
+                    let ly = y + TEXT_TOP + i as f64 * line_h() - off;
+                    if ly > y + rh + line_h() {
                         break;
                     }
-                    if ly < y + TEXT_TOP - LINE_H {
+                    if ly < y + TEXT_TOP - line_h() {
                         continue;
                     }
                     cr.move_to(x + TEXT_INSET, ly);
@@ -566,7 +633,7 @@ pub fn draw(cr: &Context, w: &Widget, r: [f64; 4], linked: bool, scroll: f64) {
             cr.move_to(x + rw - 26.0, ty);
             super::text::show(cr, "🎲");
         }
-        WKind::Cloud(..) => {}
+        WKind::Cloud(..) | WKind::Dom(_) => {} // own draw functions
         WKind::ReadOnly => {
             rgb(cr, 0x888888);
             let v = show(&w.value);
@@ -1187,8 +1254,8 @@ pub fn finish_inline_text() {
 
 /// Multiline text edited in place, like the web's `<textarea>` over the canvas: a text view in
 /// the canvas page's overlay that follows the row through pans and zooms. Commits when it loses
-/// focus, on Esc / Ctrl+Enter, or on a click elsewhere on the canvas. Autocomplete shows in a
-/// popover under the cursor that never takes focus. `false` = no overlay (use `edit_text`).
+/// focus, on Esc / Ctrl+Enter, or on a click elsewhere on the canvas. Autocomplete lists under
+/// the row in an overlay child that never takes focus or the pointer. `false` = no overlay.
 pub fn edit_text_inline(area: &gtk::DrawingArea, place: PlaceFn, text: &str, completion: Option<TextCompletion>, commit: impl Fn(String) + 'static) -> bool {
     let Some(ov) = area.parent().and_downcast::<gtk::Overlay>() else { return false };
     if place().is_none() {
@@ -1209,9 +1276,15 @@ pub fn edit_text_inline(area: &gtk::DrawingArea, place: PlaceFn, text: &str, com
     let css = gtk::CssProvider::new();
     gtk::style_context_add_provider_for_display(&tv.display(), &css, gtk::STYLE_PROVIDER_PRIORITY_APPLICATION + 1);
 
-    // Suggestions: a popover that never grabs focus, so typing stays in the text view.
-    let sug = gtk::Popover::builder().autohide(false).has_arrow(false).can_focus(false).position(gtk::PositionType::Bottom).build();
-    sug.set_parent(&tv);
+    // Suggestions sit in the same overlay instead of a popover: a popover grabs the pointer,
+    // so the first click outside only dismissed it and the editor stayed open. An overlay
+    // child never takes focus, so typing stays in the text view and clicks reach their target.
+    let sug = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    sug.add_css_class("inline-suggest");
+    sug.set_halign(gtk::Align::Start);
+    sug.set_valign(gtk::Align::Start);
+    sug.set_visible(false);
+    ov.add_overlay(&sug);
     let list = gtk::ListBox::builder().selection_mode(gtk::SelectionMode::Single).focusable(false).build();
     let lsc = gtk::ScrolledWindow::builder().child(&list).hscrollbar_policy(gtk::PolicyType::Never).build();
     // A hard size: the popover's surface is measured while the list is still empty.
@@ -1220,21 +1293,10 @@ pub fn edit_text_inline(area: &gtk::DrawingArea, place: PlaceFn, text: &str, com
     let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     row.append(&lsc);
     row.append(&pic);
-    sug.set_child(Some(&row));
+    sug.append(&row);
     if let Some(comp) = completion {
-        let (sug2, tv2) = (sug.clone(), tv.clone());
-        attach_completion(&tv, comp, &list, &pic, Rc::new(move |on| {
-            if !on {
-                sug2.popdown();
-                return;
-            }
-            // Point at the cursor, in the text view's own coordinates.
-            let buf = tv2.buffer();
-            let (strong, _) = tv2.cursor_locations(Some(&buf.iter_at_mark(&buf.get_insert())));
-            let (x, y) = tv2.buffer_to_window_coords(gtk::TextWindowType::Widget, strong.x(), strong.y());
-            sug2.set_pointing_to(Some(&gdk::Rectangle::new(x, y, 1, strong.height())));
-            sug2.popup();
-        }));
+        let sug2 = sug.clone();
+        attach_completion(&tv, comp, &list, &pic, Rc::new(move |on| sug2.set_visible(on)));
     }
 
     let old = text.to_owned();
@@ -1250,8 +1312,8 @@ pub fn edit_text_inline(area: &gtk::DrawingArea, place: PlaceFn, text: &str, com
             INLINE_OPEN.with(|o| o.borrow_mut().take());
             let b = tv.buffer();
             let new = b.text(&b.start_iter(), &b.end_iter(), false).to_string();
-            sug.popdown();
-            sug.unparent();
+            sug.set_visible(false);
+            ov.remove_overlay(&sug);
             gtk::style_context_remove_provider_for_display(&tv.display(), &css);
             area.remove_controller(&press);
             ov.remove_overlay(&sc);
@@ -1310,7 +1372,8 @@ pub fn edit_text_inline(area: &gtk::DrawingArea, place: PlaceFn, text: &str, com
     // Follow the row every frame; the overlay cannot place children at negative margins,
     // so the rect is clipped to the canvas.
     let last = Cell::new([i32::MIN; 5]);
-    let (area2, tv2, f) = (area.clone(), tv.clone(), finish.clone());
+    let sug_pos = Cell::new((i32::MIN, i32::MIN));
+    let (area2, tv2, sug2, f) = (area.clone(), tv.clone(), sug.clone(), finish.clone());
     sc.add_tick_callback(move |sc, _| {
         let Some(([x, y, w, h], zoom)) = place() else {
             f();
@@ -1318,7 +1381,7 @@ pub fn edit_text_inline(area: &gtk::DrawingArea, place: PlaceFn, text: &str, com
         };
         let (aw, ah) = (area2.width() as f64, area2.height() as f64);
         let (x0, y0, x1, y1) = (x.max(0.0), y.max(0.0), (x + w).min(aw), (y + h).min(ah));
-        let font = (11.0 * zoom).clamp(6.0, 64.0);
+        let font = (11.0 * zoom * text_scale()).clamp(6.0, 64.0);
         let now = [x0 as i32, y0 as i32, (x1 - x0) as i32, (y1 - y0) as i32, (font * 4.0) as i32];
         if now != last.get() {
             sc.set_visible(now[2] >= 24 && now[3] >= 16);
@@ -1330,9 +1393,23 @@ pub fn edit_text_inline(area: &gtk::DrawingArea, place: PlaceFn, text: &str, com
                 tv2.set_left_margin(pad);
                 tv2.set_right_margin(pad);
                 tv2.set_top_margin((4.0 * zoom).round() as i32);
-                css.load_from_string(&format!("textview.inline-editor, textview.inline-editor text {{ font-size: {font:.1}px; }}"));
+                css.load_from_string(&format!(
+                    "textview.inline-editor, textview.inline-editor text {{ font-size: {font:.1}px; }}\n\
+                     .inline-suggest {{ background-color: #26262b; border: 1px solid #3d3d45; border-radius: 8px; }}"
+                ));
             }
             last.set(now);
+        }
+        // Under the row, or above it when the row sits near the bottom edge.
+        if sug2.get_visible() {
+            let sh = sug2.height().max(168);
+            let top = if (y1 + 4.0 + sh as f64) <= ah { y1 + 4.0 } else { (y0 - sh as f64 - 4.0).max(0.0) };
+            let pos = (x0 as i32, top as i32);
+            if pos != sug_pos.get() {
+                sug2.set_margin_start(pos.0);
+                sug2.set_margin_top(pos.1);
+                sug_pos.set(pos);
+            }
         }
         gtk::glib::ControlFlow::Continue
     });

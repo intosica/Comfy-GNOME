@@ -395,6 +395,17 @@ impl<'a> Flattener<'a> {
 
     fn node_inputs(&mut self, c: usize, node: &Node, def: &NodeDef) -> Map<String, Value> {
         let mut m = widget_map(node, def);
+        // Picker combos ("Select the Wildcard to add to the text", Impact & co.): the node's JS fills
+        // the list client-side and snaps it back to the placeholder; the server list holds only that
+        // placeholder, so a saved pick would fail validation ("Value not in list").
+        for i in &def.inputs {
+            if let (Kind::Combo(o), Some(v)) = (&i.kind, m.get(&i.name)) {
+                let l = o.first().map(|x| x.to_lowercase()).unwrap_or_default();
+                if l.contains("select") && l.contains("add") && v.as_str().is_some_and(|v| !o.iter().any(|x| x == v)) {
+                    m.insert(i.name.clone(), json!(o[0]));
+                }
+            }
+        }
         for (idx, inp) in node.inputs.iter().enumerate() {
             if inp.link.is_none() {
                 continue;

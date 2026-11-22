@@ -110,7 +110,7 @@ impl Workspace {
 
     /// Same as [`open_dropped`](Self::open_dropped) but lands images at `pos`.
     pub(super) fn open_dropped_at(&self, f: &gio::File, pos: (f64, f64)) {
-        let Some(path) = f.path() else { return };
+        let Some(path) = f.path() else { return self.open_dropped_url(&f.uri(), pos) };
         let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "dropped".into());
         if matches!(path.extension().and_then(|e| e.to_str()).map(str::to_lowercase).as_deref(), Some("mp4" | "webm" | "mkv" | "mov" | "webp" | "gif")) {
             return self.open_media_workflow(&path, &name);
@@ -125,6 +125,71 @@ impl Workspace {
             Ok(wf) => self.open_temp(&name, wf),
             Err(e) => self.append_log(&format!("[drop] {name}: {e}")),
         }
+    }
+
+    /// Browser drop: an `http(s)` picture/workflow. Fetched on a worker, then handled like a file
+    /// (pictures go to the backend's `input/` through `open_image_bytes`; nothing touches /tmp).
+    pub(crate) fn open_dropped_url(&self, uri: &str, pos: (f64, f64)) {
+        let uri = uri.trim().to_owned();
+        if !uri.starts_with("http://") && !uri.starts_with("https://") {
+            return self.append_log(&format!("[drop] unsupported source {uri}"));
+        }
+        let last = uri.split(['?', '#']).next().unwrap_or("").rsplit('/').next().unwrap_or("");
+        let mut name = glib::Uri::unescape_string(last, None).map(|s| s.to_string()).unwrap_or_default();
+        if !name.contains('.') {
+            name = "dropped.png".into();
+        }
+        let me = self.clone();
+        glib::spawn_future_local(async move {
+            let u = uri.clone();
+            let got = gio::spawn_blocking(move || -> Result<Vec<u8>, String> {
+                let r = ureq::get(&u).timeout(std::time::Duration::from_secs(30)).call().map_err(|e| e.to_string())?;
+                let mut b = Vec::new();
+                std::io::Read::read_to_end(&mut std::io::Read::take(r.into_reader(), 64 << 20), &mut b).map_err(|e| e.to_string())?;
+                Ok(b)
+            })
+            .await;
+            match got {
+                Ok(Ok(b)) if b.first() == Some(&b'{') => match serde_json::from_slice(&b).map_err(|e| e.to_string()).and_then(|v| workflow::Workflow::from_json(v).map_err(|e| e.to_string())) {
+                    Ok(wf) => me.open_temp(&stem_of(&name), wf),
+                    Err(e) => me.append_log(&format!("[drop] {name}: {e}")),
+                },
+                Ok(Ok(b)) => me.open_image_bytes(&name, b, pos),
+                Ok(Err(e)) => me.append_log(&format!("[drop] {uri}: {e}")),
+                Err(_) => me.append_log(&format!("[drop] {uri}: download failed")),
+            }
+        });
+    }
+
+    /// Everything a drop can carry that is not a file: a URL string (browser link) or raw picture data.
+    pub(crate) fn drop_value(&self, v: &glib::Value, pos: (f64, f64)) -> bool {
+        if let Ok(t) = v.get::<gtk::gdk::Texture>() {
+            self.open_image_bytes("dropped.png", t.save_to_png_bytes().to_vec(), pos);
+            return true;
+        }
+        match v.get::<String>() {
+            Ok(s) if s.trim_start().starts_with("http") => {
+                for l in s.lines().filter(|l| !l.starts_with('#')) {
+                    self.open_dropped_url(l, pos);
+                }
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// A drop that landed outside any canvas (sidebar, header, empty tab strip, splash):
+    /// treat it as if it had landed in the middle of the active tab, so the window accepts
+    /// files as a whole instead of only over a graph.
+    pub(crate) fn drop_file(&self, f: &gio::File) {
+        let pos = match self.active_canvas() {
+            Some(c) => {
+                let (zoom, off) = c.view();
+                ((c.area.width() as f64 / 2.0 - off.0) / zoom, (c.area.height() as f64 / 2.0 - off.1) / zoom)
+            }
+            None => (0.0, 0.0),
+        };
+        self.open_dropped_at(f, pos);
     }
 
     /// Video/animation dropped: use its embedded `workflow`, else rebuild one from the API `prompt`.

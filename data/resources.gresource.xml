@@ -5,6 +5,7 @@
     <file preprocess="xml-stripblanks">icons/scalable/actions/cg-applications-graphics-symbolic.svg</file>
     <file preprocess="xml-stripblanks">icons/scalable/actions/cg-audio-x-generic-symbolic.svg</file>
     <file preprocess="xml-stripblanks">icons/scalable/actions/cg-avatar-default-symbolic.svg</file>
+    <file preprocess="xml-stripblanks">icons/scalable/actions/cg-insert-link-symbolic.svg</file>
     <file preprocess="xml-stripblanks">icons/scalable/actions/cg-document-edit-symbolic.svg</file>
     <file preprocess="xml-stripblanks">icons/scalable/actions/document-edit-symbolic.svg</file>
     <file preprocess="xml-stripblanks">icons/scalable/actions/cg-document-open-symbolic.svg</file>

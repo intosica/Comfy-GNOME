@@ -75,9 +75,9 @@ Each phase ends with a runnable build, updated `AGENT-HANDOFF.md`, and screensho
 - [x] Batch count spin (1–100) → N prompt copies per Run; `[run] queued N prompt(s)` in the log
 - [x] Backend we started is killed with the app (SIGTERM → 3 s → SIGKILL on the group); a backend we did *not* start is never touched
 - [x] DaSiWa: seed panel (`🎲 Random` / `📌 Fixed` + roll, `seed_control_state` + `recent`), status switches (mute/bypass targets, chained), LTX2 LoRA stack rows (toggle/name/strength/➕) synced with `stack_data`
-- [x] LoRA Manager in a chrome-less host-browser window (`flatpak-spawn --host` inside the sandbox)
+- [x] LoRA Manager in a chrome-less host-browser window (`flatpak-spawn --host` inside the sandbox) — superseded in session 35 by the in-app WebKitGTK viewer (`src/lora_view.rs`)
 - [ ] DaSiWa node UIs still stock: WildcardPresetPromptBuilder, Minimax H3 director, EnhancedVideoCombine video preview
-- [ ] LoRA Manager window is the browser's app mode — no in-app webview (host has no WebKit dev headers)
+- [x] LoRA Manager window is in-app now: `src/lora_view.rs` on the `webkit6` crate (session 35)
 
 ## Phase 4d — Extension node UIs, Settings, job-workflow cache ✅ (session 10)
 - [x] Bypassed-node passthrough drawn under node bodies (dashed wire no longer crosses nodes)
@@ -114,7 +114,7 @@ Each phase ends with a runnable build, updated `AGENT-HANDOFF.md`, and screensho
 ## Phase 5 — Performance & Polish
 - [ ] GPU path (`gsk` render nodes or snapshot cache per node) if cairo profiling demands it; target 60 fps @ 500 nodes on X11
 - [ ] Reroutes, minimap, preferences (persist splash config via GSettings/keyfile)
-- [ ] Custom-node frontend extensions: document unsupported cases, graceful fallbacks
+- [x] Custom-node frontend extensions run through the implant (`src/implant/`, session 35); [ ] still open: their DOM widgets inside canvas nodes, sidebars/commands/keybindings
 
 ## Phase 6 — Packaging & Release
 - [ ] Offline Flatpak sources (`flatpak-cargo-generator` → `cargo-sources.json`), AppStream metainfo, icon
@@ -172,3 +172,23 @@ Each phase ends with a runnable build, updated `AGENT-HANDOFF.md`, and screensho
 - [x] The same lock is the single-instance guard: a second UI is refused with "another instance is already running", because two UIs would otherwise share one backend and the first exit would tear it down under the other (`GApplication` alone does **not** make this app single-instance — verified under `dbus-run-session`)
 - [x] Verified: `kill -9` of the app → backend gone in 1 s ("UI is gone" in the log); ✕ → app and backend gone, pid file removed; `TERM`-trapping backend → gone at 4 s; second instance → refused; paths identical on host and inside the Flatpak sandbox
 - [x] `AGENT-HANDOFF.md` carries the standing rule in the director's terms: leaving the backend open when the UI is closed is unacceptable and one step short of a critical issue, with the "verify a UI exit" checklist agents must run
+
+## Phase 4n — Extension hook runtime, extension drop-downs, in-app LoRA Manager ✅ (session 35)
+- [x] `src/implant/`: a hidden WebKitGTK page (`shim.js`) loads every custom node pack's `web/` JS against a shim of the frontend API (`app`, `api`, `ComfyWidgets`, `LGraphNode`, `clientId`, WS) and mirrors the active tab's graph into it; canvas edits are replayed (`cg.sync(key, pre, post)`), extension changes come back as `changed` and are applied by `workflow::apply_hooks`
+- [x] Custom-node Settings sections are the extension's own widgets: Language (`Comfy.Locale`) and the EreNodes `.csv` autocomplete are drop-downs, and any pack that registers a combo inherits it — no per-node code here
+- [x] Runtime-computed combo choices (`options.values` getters) are mirrored into the canvas combo: Impact Pack wildcard databanks list the real wildcards and insert through the node's own callback
+- [x] Impact Pack `Switch (Any)` grows its optional input when a socket is connected
+- [x] LoRA Manager prompt edits propagate: `/api/lm/loras/get_trigger_words` → `trigger_word_update` WS → TriggerWord Toggle tags + LoRA rows, applied to the workflow
+- [x] LoRA Manager opens in an in-app WebKitGTK window (`src/lora_view.rs`, single reused window) instead of a host browser — Flatpak-safe
+- [x] Drops land anywhere in the window (sidebar, header, tab strip, splash) through a window-level drop target routed to the active tab; images still upload to ComfyUI's `input/`
+- [ ] DOM widgets drawn inside the canvas (LoRA Manager's row editor still renders as the native list; values and hooks are live, the look is not identical)
+- [ ] The rest of `app.registerExtension` surface: extension sidebars, commands, keybindings, canvas toolbar buttons
+- [ ] Audit of remaining core `Comfy.*` settings whose widget is a JS function (still read-only)
+
+## Phase 4o — Canvas text ergonomics, video audio, honest settings ✅ (session 36)
+- [x] Ctrl+wheel over a multiline/stretchy text row scales the text (0.6×–2.5×, 0.1 per notch, wheel down = smaller); wrap, row pitch, text height and the in-place editor's font all read one `widgets::text_scale()`, so nothing desyncs; the scale lives in a `thread_local` and resets on restart by design
+- [x] The prompt editor's suggestion list is an overlay child of the editor, not a `gtk::Popover`: a popover grabs the pointer, so the first click outside only popped it down and left the editor open (reproduced: sidebar click → list gone, editor alive; second click → commit). Rows now insert and keep typing, one click elsewhere closes everything
+- [x] The video preview carries mute + volume into the next clip (`sync_video_audio` on each `set_file`, notify handlers record user changes) — verified: wheel-down to 0 volume → next clip opens already muted
+- [x] Escape closes the video preview even after a click on the video: the transport controls take the focus and ate the key, so the controller is installed on the scrim *and* on the window in the capture phase, and removed on close
+- [x] `Comfy.VueNodes.Enabled` ("Modern Node Design (Nodes 2.0)") is filtered out of the settings dialog — it switches the web frontend's Vue renderer and means nothing here
+- [x] Ctrl+A in text boxes confirmed working on the system build (inline editor selects its text; elsewhere it selects the nodes) — the suspected breakage did not reproduce

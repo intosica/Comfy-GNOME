@@ -209,7 +209,11 @@ pub(super) fn open(ws: &Workspace) {
         })
         .await;
         // A worker panic used to leave "Loading…" up forever; show the stored keys instead.
-        let (merged, values) = res.unwrap_or_else(|_| (settings_defs::merge(&Catalog::default(), &BTreeMap::new()), Err("settings scan failed".into())));
+        let (mut merged, values) = res.unwrap_or_else(|_| (settings_defs::merge(&Catalog::default(), &BTreeMap::new()), Err("settings scan failed".into())));
+        // Live definitions from the extensions themselves (computed options, onChange).
+        if let Some(r) = crate::implant::ready().await {
+            merged = settings_defs::overlay(&merged, &r.settings, &r.core_options);
+        }
         match values {
             Ok(v) => {
                 dlg.values.replace(v);
@@ -356,6 +360,20 @@ fn show(d: &Rc<Dlg>, page: &Page) {
             let g = group(d, "Editing");
             text_editor_row(d, &g);
             caption_row(d, &g);
+            let g = group(d, "Canvas");
+            let rows: [(&str, &str, &str, &[&str], &[&str]); 4] = [
+                (LINK_BTN, "Link render button", "Next to the Log/Preview toggle. Menu: pick a link style. Toggle: just hide/show links like ComfyUI", &["Link style menu", "Hide/show only", "Hidden"], &["menu", "toggle", "hidden"]),
+                (LINK_SHOW, "Show link button", "Keep it visible, or only while the Log/Preview dock is collapsed", &["Always", "Only when dock collapsed"], &["always", "collapsed"]),
+                (RESIZE_SIDE, "Resize corner side", "Node and group resize grips; the link slot stays on its side", &["Right", "Left"], &["right", "left"]),
+                (LORA_ROWS, "LoRA Manager rows", "Lora Loader (LoraManager): the extension's own editor in the node, or our simpler canvas list", &["Extension's editor", "Canvas list"], &["page", "canvas"]),
+            ];
+            for (key, title, sub, opts, vals) in rows {
+                let cur = d.values.borrow().get(key).and_then(Value::as_str).and_then(|c| vals.iter().position(|v| *v == c)).unwrap_or(0);
+                let r = adw::ComboRow::builder().title(title).subtitle(sub).model(&gtk::StringList::new(opts)).selected(cur as u32).build();
+                let dd = d.clone();
+                r.connect_selected_notify(move |c| commit(&dd, key, Value::from(vals[c.selected() as usize])));
+                g.add(&r);
+            }
             let g = group(d, "Sidebar");
             side_theme_row(d, &g);
             let r = adw::SwitchRow::builder()
@@ -377,7 +395,7 @@ fn show(d: &Rc<Dlg>, page: &Page) {
                 palette_row(d);
             }
             let Some(cat) = cat else { return loading(d, "") };
-            let defs: Vec<&SettingDef> = cat.defs.iter().filter(|s| s.category() == c && !OURS.contains(&s.id.as_str())).collect();
+            let defs: Vec<&SettingDef> = cat.defs.iter().filter(|s| s.category() == c && !skip(&s.id)).collect();
             let mut sections: Vec<&str> = Vec::new();
             for s in &defs {
                 if !sections.contains(&s.section()) {
@@ -409,7 +427,7 @@ fn matches(d: &Rc<Dlg>, q: &str) {
     title(d, "Matches");
     let Some(cat) = d.cat.borrow().clone() else { return loading(d, "") };
     let hit = |s: &SettingDef| [&s.name, &s.id, &s.tooltip].iter().any(|t| t.to_lowercase().contains(q));
-    let hits: Vec<&SettingDef> = cat.defs.iter().filter(|s| hit(s) && !OURS.contains(&s.id.as_str())).take(200).collect();
+    let hits: Vec<&SettingDef> = cat.defs.iter().filter(|s| hit(s) && !skip(&s.id)).take(200).collect();
     note(d, &format!("{} setting(s) for “{q}”", hits.len()));
     for c in &cat.categories {
         let in_cat: Vec<&&SettingDef> = hits.iter().filter(|s| s.category() == c).collect();
@@ -522,6 +540,13 @@ fn commit(d: &Rc<Dlg>, key: &str, v: Value) {
         crate::theme::set(v.as_str().unwrap_or("dark"));
         d.ws.redraw_canvases();
     }
+    apply_gnome(key, &v);
+    if key == RESIZE_SIDE {
+        d.ws.redraw_canvases();
+    }
+    if key == LORA_ROWS {
+        d.ws.refresh_rows();
+    }
     if key == CAPTION {
         set_caption_above(v.as_str() == Some("above"));
     }
@@ -548,6 +573,7 @@ fn commit(d: &Rc<Dlg>, key: &str, v: Value) {
         drop(values);
         d.ws.set_snap(always, grid);
     }
+    crate::implant::apply_setting(key, &v);
     let Some(c) = d.ws.client.borrow().clone() else { return };
     let (k, status) = (key.to_owned(), d.status.clone());
     let key = k.clone();
@@ -640,6 +666,12 @@ fn extensions(d: &Rc<Dlg>, cat: &Catalog) {
 
 /// Settings the web UI also has, which we render ourselves (as a real picker).
 const OURS: [&str; 2] = ["Comfy.ColorPalette", "Comfy.CustomColorPalettes"];
+/// Settings that make no sense without the web UI's DOM node renderer: the canvas is drawn
+/// natively, so "Nodes 2.0" would be a switch that changes nothing here.
+const HIDDEN: [&str; 1] = ["Comfy.VueNodes.Enabled"];
+fn skip(id: &str) -> bool {
+    OURS.contains(&id) || HIDDEN.contains(&id)
+}
 /// The web UI's own key: the chosen palette's id (`dark`, `light`, `nord`, a file stem in the themes folder, …).
 pub const PALETTE: &str = "Comfy.ColorPalette";
 
@@ -651,6 +683,46 @@ pub const CAPTION: &str = "ComfyGNOME.PreviewCaption";
 /// Server setting: `true` paints the left sidebar in the palette's menu colours.
 pub const PIN_TOGGLE: &str = "ComfyGNOME.PinSidebarToggle";
 pub const SIDE_THEME: &str = "ComfyGNOME.SidebarTheme";
+
+/// Link-render button beside the dock toggle: behaviour (`menu`|`toggle`|`hidden`) and
+/// visibility (`always`|`collapsed` = only while the dock is collapsed).
+pub const LINK_BTN: &str = "ComfyGNOME.LinkButton";
+pub const LINK_SHOW: &str = "ComfyGNOME.LinkButtonShow";
+/// `left`|`right`: side of the node/group resize corner (and the grip).
+pub const RESIZE_SIDE: &str = "ComfyGNOME.ResizeSide";
+pub const LORA_ROWS: &str = "ComfyGNOME.LoraRows";
+
+thread_local! {
+    static LINK_CFG: std::cell::RefCell<(String, String)> = std::cell::RefCell::new(("menu".into(), "always".into()));
+    static LINK_W: std::cell::RefCell<Option<(gtk::Button, gtk::ToggleButton)>> = const { std::cell::RefCell::new(None) };
+}
+pub fn link_behaviour() -> String {
+    LINK_CFG.with(|c| c.borrow().0.clone())
+}
+pub fn register_link_button(b: &gtk::Button, collapse: &gtk::ToggleButton) {
+    LINK_W.with(|w| *w.borrow_mut() = Some((b.clone(), collapse.clone())));
+    link_refresh();
+}
+pub fn link_refresh() {
+    let (mode, show) = LINK_CFG.with(|c| c.borrow().clone());
+    LINK_W.with(|w| {
+        if let Some((b, col)) = &*w.borrow() {
+            b.set_visible(mode != "hidden" && (show == "always" || col.is_active()));
+        }
+    });
+}
+/// Apply a Comfy-GNOME setting that changes widgets/canvas behaviour (startup + live edits).
+pub fn apply_gnome(key: &str, v: &Value) {
+    let s = v.as_str().unwrap_or("");
+    match key {
+        LINK_BTN => LINK_CFG.with(|c| c.borrow_mut().0 = if s.is_empty() { "menu".into() } else { s.into() }),
+        LINK_SHOW => LINK_CFG.with(|c| c.borrow_mut().1 = if s.is_empty() { "always".into() } else { s.into() }),
+        RESIZE_SIDE => crate::canvas::set_resize_left(s == "left"),
+        LORA_ROWS => crate::graph_view::set_lm_page(s != "canvas"),
+        _ => return,
+    }
+    link_refresh();
+}
 
 thread_local!(static CAPTION_ABOVE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) });
 pub fn set_caption_above(on: bool) {

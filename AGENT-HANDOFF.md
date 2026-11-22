@@ -1,6 +1,6 @@
 # AGENT HANDOFF
 
-_Last updated: session 34 (context menus, quick-search dismissal, group snapping, workflow folders, sidebar rail; session 33 was palettes/settings). Earlier: session 32 (the properties panel behaves, not just looks: selection follows the canvas, the subgraph editor keeps its state, colour/properties save, legacy proxy order matches 1.60; version 0.2.0-beta.1 tagged and pushed. The backend lock from session 28c is unchanged).
+_Last updated: session 36 (canvas text ergonomics: Ctrl+wheel text scale, overlay suggestion list that a single click dismisses, video preview keeps mute/volume across clips, Escape closes the video preview, "Nodes 2.0" setting hidden. Session 35 was the implant: extensions' own JS runs and drives the canvas, in-app LoRA Manager, window-wide drops; session 34 context menus, quick-search dismissal, group snapping.)
 
 Project: **Comfy-GNOME** at `/home/montel/Documents/Comfy-GNOME` (renamed from `GNOME-Comfyu` → `GNOME-ComfyUI` → this).
 Crate/binary `comfy-gnome`, app id `io.github.comfygnome.ComfyGnome` (`APP_ID` in `src/main.rs`).
@@ -1440,3 +1440,134 @@ Seven items from the director, all live-tested under Xvfb against the demo mock 
   a `pkill -f mock_backend` in the same shell also kills the shell (use `setsid` + a pattern that cannot match the
   command line).
 - `cargo test`: 65 passed, 4 ignored. Backend mock, Xvfb and scratch dirs removed afterwards.
+
+## Session 35 — the implant: custom-node JS runs and drives the canvas (2026-11-20)
+
+Director's report (verbatim intent, m00001): LoRA Loader (LoraManager) still doesn't behave like native ComfyUI
+("we basically need the hooks so that it can"), Language and EreNodes `.csv` are text boxes instead of drop-downs,
+Impact Pack's `Switch (Any)` never grows its optional input, ImpactWildcard nodes have no databanks, the LoRA
+Manager button opens Thorium, and file drops half-work on X11. Standing requirement: **node developers must never
+need a Comfy-GNOME branch** — so the answer had to be the frontend's own extension API, not another per-node shim.
+
+### What the implant is
+
+`src/implant/` (new): `mod.rs` + `shim.js`. A WebKitGTK `WebView` (crate `webkit = { package = "webkit6", features
+= ["v2_42"] }`, the same trick as the preview path; hardware acceleration off) loads a tiny HTML page whose script
+is the shim. The shim provides `app`, `api` (fetch through the page origin, `clientId`/`initialClientId`,
+`addEventListener` incl. WS events), `ComfyWidgets` (real widgets with `inputEl`, `options`, `callback`),
+`LGraphNode`/`LGraph`, extension registration, and then loads every `/extensions/**/*.js` the backend serves.
+`mod.rs` pipes the backend's WS frames into it, so extensions see `executed`, `progress`, `trigger_word_update`, …
+
+Sync is bidirectional, both directions delta-based:
+- Rust → page: `cg.sync(key, pre, post)` replays the tab's nodes/links diff; widget writes go through the same
+  litegraph path (`w.value = v` then `w.callback(v)`), which is why extension callbacks fire as they would upstream.
+- Page → Rust: postMessage `{t:"changed", key, nodes:[{id, inputs, outputs, widgets, options}], links:{…}}` →
+  `workspace.rs` `on_hooks` → `workflow::apply_hooks` (nodes/links/widget values/`options`) → `checkpoint`,
+  `implant::applied`, `render_doc`, `set_dirty`.
+
+### Session 35 changes (all on disk, release build green, `cargo test` 67 passed)
+
+- `src/implant/mod.rs`, `src/implant/shim.js` — as above. Tab switches re-load the page key; one page serves the
+  active tab.
+- Extension drop-downs: anything an extension registers as a combo shows up with its own list (Language, EreNodes
+  `.csv`), and runtime-computed lists are mirrored: `shim.js` reports `widget.options.values` when it is a getter
+  (`computed()` + a `"!"` sentinel in the base snapshot), `Node.options` in `src/workflow.rs` stores them
+  (never serialised), `graph_view::apply_options` overrides `WKind::Combo` by widget name.
+- `src/lora_view.rs` (new): `open(parent, url)` → one cached WebKitGTK window titled "LoRA Manager";
+  `Workspace::open_lora_manager` just calls it with `{base}/loras`. The thorium/chromium/chrome/firefox spawn and
+  the `browser-{tag}` profile dir are gone.
+- Window-wide drops: `DropTarget` on the window (`src/main.rs`) → `Workspace::drop_file` (`tabmenu.rs`, centre of the
+  active canvas) → the existing `open_dropped_at` (PNG with `workflow` → temp tab, picture → `input/` + `LoadImage`,
+  else JSON → temp tab). Before this, only `canvas.area` had a target, so "dropping into the app as a whole" did
+  nothing — that was the user's report, not a Flatpak regression.
+
+### Traps discovered (keep them in mind)
+
+- The base snapshot the shim takes right after `nodeCreated` swallows first-time values: anything an extension sets
+  during creation must be reported deliberately (`"!"` sentinel), otherwise the diff is empty and the canvas misses it.
+- `widget.inputEl` is not optional: pysssss `TextAreaAutoComplete` (`common/autocomplete.js`) and the LoRA Manager
+  prompt do `this.el.addEventListener` on it — a STRING widget without a real `<textarea>` throws
+  `undefined is not an object (evaluating 'this.el.addEventListener')`.
+- LoRA Manager's `workflow_registry.js` posts `clientId` from `api.clientId ?? api.initialClientId`; without it,
+  `/api/lm/register-nodes` answers "Bad Request" and the node list stays empty.
+- `mergeLoras` (lora-manager `web/comfyui/utils.js`) prefers an existing row's strength over the number typed in the
+  prompt text, and `isUpdating` suppresses `scheduleInputSync` — that is native behaviour, not a bug.
+- gtk4 0.10 `DropTarget` only exposes `set_types`/`builder().formats()`; `GdkFileList` already covers
+  `text/uri-list`, so a browser drop depends on the portal offering that list.
+- Impact's wildcard combo fills itself through `Object.defineProperty(node.widgets[i].options, "values", {get})` and
+  keeps the real value in `node._wildcard_value` with `serializeValue` returning the placeholder — so the canvas must
+  show the computed list while serialising the placeholder, which is exactly what the `options` mirror does.
+
+### Verified under Xvfb (mock + real backend, both removed afterwards)
+
+Trigger words end to end (prompt edit → `inputWidget.callback` → `/api/lm/loras/get_trigger_words` →
+`trigger_word_update` → TriggerWord Toggle tags + LoRA rows applied to the workflow); Impact wildcard list populated
+with `__detail__` … and inserting through the node's callback; `Switch (Any)` optional input appearing on connect;
+Language and EreNodes `.csv` as drop-downs; LoRA Manager SPA inside the app (`wmctrl` title "LoRA Manager").
+
+### Still open (do not claim these)
+
+- ~~DOM widgets inside the canvas~~ — done in session 37, see `docs/WEBKITGTK.md` (hub for all WebKitGTK work). Still not surfaced: extensions' toolbar buttons; sidebars open as windows.
+- ~~LoRA Manager lag / missing autocomplete~~ — session 38: no canvas re-render while a pointer is held (drag 0.80 → 0.98, 13 syncs); LM's autocomplete dropdown + preview card shown inside the graph (`watchShow`); node text boxes styled like canvas rows; `ComfyGNOME.LoraRows` (page|canvas) restores the plain row list. Verified live on Xvfb; the dropdown is page-scale, not zoomed.
+- Browser/portal drops are unverifiable headless; needs one manual test on the director's desktop (Flatpak too).
+- Existing non-fatal shim load errors worth fixing later: KJNodes perf hooks (`_origDraw`/`_origRenderInfo` TDZ),
+  VideoHelperSuite `videoinfo.js` (`fileInput.accept` null), cg-use-everywhere (`nd.inputs.find(...).localized_name`).
+
+## Session 36 — text ergonomics, video audio, honest settings (2026-11-20)
+
+Five small items, four of them code, all verified in the GUI (Xvfb :99 + the real backend on 8188).
+
+### Ctrl+wheel scales the prompt text (`src/canvas/widgets.rs`, `src/canvas/mod.rs`)
+
+`widgets::text_scale()` / `bump_text_scale(dir)` keep a `thread_local` factor (0.6–2.5, 0.1 per notch), and
+`line_h()` returns `LINE_H * text_scale()`. Everything that measures or draws a multiline row reads them: the
+scratch context's font (`scratch_text()`), `text_lines`, `text_content_h`, `cloud_layout` (which resets to 12.0 for
+cloud rows), the multiline branch of `draw`, and the in-place editor's CSS font. `Canvas::scroll_text(dy, ctrl)`
+bumps the scale with Ctrl held over a multiline row and consumes the wheel; without Ctrl the text scrolls as
+before. Deliberately **not** persisted — a restart goes back to 1.0.
+
+### The suggestion list must not grab the pointer (`widgets::edit_text_inline`)
+
+It was a `gtk::Popover` with `autohide(false)` parented to the text view. A popover takes the pointer grab, so the
+first click outside only popped the list down while the editor stayed open — exactly the "tags don't go away when I
+click away" complaint. It is now a plain `gtk::Box` (`inline-suggest` CSS) added as an overlay child of the canvas
+page and positioned by the existing tick callback (below the row, or above when there is no room). The editor's
+`finish` hides it, and `attach_completion`'s `shown` callback drives visibility. Lesson: inside an in-place editor,
+never hand the pointer to a popover — the editor's own "click elsewhere commits" logic assumes it keeps the grab.
+
+### Video preview keeps mute/volume (`src/workspace.rs`)
+
+`sync_video_audio(&video)` runs right after `set_file` in `show_lightbox`: it applies the remembered
+`(muted, volume)` to `video.media_stream()` and subscribes `connect_muted_notify` / `connect_volume_notify` to record
+what the user does. Every `set_file` builds a fresh `GtkMediaStream`, which is why the state used to reset.
+
+Testing note: `GtkVolumeButton` only responds to the **scroll wheel** (a click opens a scale popup that lands
+off-screen on a 1280×800 window). `xdotool click --repeat 20 5` over the speaker icon is the reliable way.
+
+### Escape closes the video preview (`src/workspace.rs`)
+
+The key controller lived only on the scrim, and a click on the video moves the focus into the video's transport
+controls, which ate `Escape`; and because for videos the whole video widget counts as "inside", no scrim click could
+close it either — the preview became unclosable. The handler is now an `Rc<dyn Fn(Key) -> Propagation>` used by both
+a scrim controller and a **window-level capture-phase** controller that is removed in `close()` (a controller can
+only belong to one widget, hence two of them).
+
+### Settings that cannot do anything are hidden (`src/workspace/settings.rs`)
+
+`const HIDDEN: [&str; 1] = ["Comfy.VueNodes.Enabled"]` joined `OURS` behind `fn skip(id)` at both filter sites:
+"Modern Node Design (Nodes 2.0)" switches the web frontend's Vue renderer, which has no meaning in this canvas.
+
+### Not changed
+
+Ctrl+A in text boxes already works here (inline editor selects its text; elsewhere it selects nodes) — the suspected
+breakage did not reproduce on the system build, so the Flatpak-only theory stands. No code was touched for it.
+
+## Session 39 — "LoRA Manager Lora Loader broken" audit
+
+Re-tested on the system release build (Xvfb, user's backend): LoRA Manager nodes (loraholicsSimpleTo_v12, MiniMax H3 Style LoRAs) render prompt + rows at zoom >= 0.5 and the toolbar LoRA Manager button opens the in-app viewer (`src/lora_view.rs`) fine. Nothing functionally broken was found. The only visible fault: zoom 0.4–0.5 showed an empty dark box → fixed with `draw_dom_fallback` (`src/canvas/widgets.rs`, hook in `src/canvas/mod.rs`, value in `graph_view::dom_rows`). The "Go to .../loras to apply LoRAs" text is inside the user's saved July workflow. Unfixed/cosmetic: rgthree Label nodes with colour `#fff0` draw opaque white (4-digit hex alpha). The installed Flatpak is stale (14:16, pre-implant) — rebuild with launch-flatpak.sh if the user runs that. Zoom<0.5 fallback was built but not visually confirmed (Xvfb screenshots lag 60s+).
+
+### Session 39b — DOM widgets slid off their rows
+
+User report (twice): LoRA Manager's "Search LoRAs to add" box and "No LoRAs added" list slipped out of their rows on pan/zoom. Cause: the page (other process) positions elements a few frames after the canvas draws. Round 1 (opacity-hide + settle timer) was "reduced but still bad". Round 2 (final): `Shift` widget in `src/implant/mod.rs` transforms the page at snapshot time (see docs/WEBKITGTK.md Known gaps for mechanism: XFORM, SENT/PAINTED, pixel stamp `#cg-seq` read via software CairoRenderer, 150 ms settle, `redraw_area` idle rule). Canvas stand-ins (`draw_dom_fallback`, `dom_rows` in `src/graph_view.rs`) cover node drags and zoom < 0.5. Verified in Xvfb: pan/zoom bursts stay aligned, drag shows only stand-ins, typing in LM box works. Observed, not ours: KJNodes `graphContainer?.contains is not a function`, LM `triggerImmediately` ReferenceError after typing (unchecked).
+Also: rgthree `Label (rgthree)` nodes render as free text (`canvas::Label`, built in `graph_view.rs`), verified with artfatMOSSBboxStudioGenerateEdit_v10.
+Note: testing launched a backend through the splash's "Launch ComfyUI"; killing the test UI took it down (standing rule holds). `s1.png`…`s5.png` in the repo root are from an earlier session (18:51), not ignored by git.

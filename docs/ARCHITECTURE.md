@@ -362,3 +362,27 @@ always wins and auto-fit only happens for graphs without one.
   reach a portal; `rename` is retried as `copy` + `remove_file` when the target is on another filesystem.
 - The bottom `GtkPaned` end child hides only its switcher and page: the bar holding the `▼` toggle stays, which is
   what makes the panel re-openable.
+
+## Session 35 additions: the implant, in-app LoRA Manager, window-wide drops
+
+- **`src/implant/mod.rs` + `src/implant/shim.js`** — the extension runtime. A `webkit::WebView` on a hidden page
+  loads `shim.js`, which implements the slice of the ComfyUI frontend API extensions actually use (`app.registerExtension`,
+  `api` with `clientId`/`initialClientId`/WS event listeners, `ComfyWidgets.STRING`/`INT`/`FLOAT`/`BOOLEAN`/`COMBO`,
+  `LGraphNode`, `LGraph`), then `import()`s every `/extensions/**/*.js` the backend lists and calls their
+  `setup()`/`beforeRegisterNodeDef()`/`nodeCreated()`/`loadedGraphNode()`. Backend WS frames are forwarded into the
+  page, so extension listeners (`executed`, `progress`, `trigger_word_update`, …) fire.
+- **Sync loop.** Rust→page: `cg.sync(key, pre, post)` replays the graph diff, writing widgets through the litegraph
+  order (`w.value = v; w.callback(v)`), so extension callbacks run exactly when upstream would. Page→Rust:
+  `{t:"changed", key, nodes:[{id, inputs, outputs, widgets, options}], links}` → `Workspace::on_hooks` →
+  `workflow::apply_hooks`. `implant::live()` gates the Rust widget handlers that the extension now owns (the LoRA
+  Manager prompt), so the two sides never fight over one value.
+- **Runtime combo choices.** `shim.js` reports `widget.options.values` when it is a getter (Impact Pack's wildcard
+  databank), tagged with a `"!"` sentinel so the first report is not swallowed by the base snapshot. They land in
+  `workflow::Node::options` (`BTreeMap<String, Vec<String>>`, never serialised) and `graph_view::apply_options`
+  overrides the corresponding `WKind::Combo` list.
+- **`src/lora_view.rs`** — one cached `adw::Window` with a `WebView` on `{base}/loras`; closed windows are destroyed
+  and the slot cleared. LoRA Manager is web content only, so it does not need canvas integration.
+- **Drops.** The per-canvas `DropTarget` (`src/workspace.rs`, `open_doc`) only covers the drawing area; a second
+  target on the window (`src/main.rs`) routes everything else to `Workspace::drop_file`, which picks the active
+  canvas centre and calls the same `open_dropped_at` (workflow JSON → temp tab, PNG with `workflow` → that graph,
+  picture → `/upload/image` + `LoadImage`).

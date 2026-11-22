@@ -6,6 +6,80 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 The project is in **beta**: the `0.x` versions may change saved behaviour between releases, `1.0.0` is the first
 version that promises stability.
 
+## [0.2.0-beta.9] — 2026-11-22
+
+### Fixed
+- **Canvas died on workflows with an Impact Wildcard Processor** (middle-drag pan, node drag and left-drag pan all
+  stopped): its computed combo list was reported to the app as "changed" on every page sync (hundreds of times,
+  each one re-rendering the canvas and cancelling the drag, and marking the tab modified). The list is now sent once.
+- Middle-drag pans even when the pointer is over an extension page element (LoRA Manager rows).
+- **Text boxes for nodes the backend doesn't provide** (e.g. WAS `Text Multiline` while the pack failed to import):
+  saved string values stay visible and editable instead of the node having no widgets.
+- **Run rejected with "Value not in list"** for picker combos like Impact's "Select to add Wildcard": the saved pick
+  is replaced by the placeholder the web UI sends, so the prompt validates.
+
+- LoRA Manager loaders (and every other page-drawn DOM widget) no longer slide off their rows while panning, zooming or dragging a node: the WebView now lives in a `Shift` widget that, at snapshot time, scales/translates the last page frame the page actually painted onto the current canvas view (like a browser compositor), so it tracks motion in the same GTK frame. During node drags and below zoom 0.5 the canvas draws each row's saved value (prompt / "Search LoRAs to add..." placeholder, LoRA rows / "No LoRAs added") instead; the page re-lays out ~150 ms after motion stops.
+- rgthree `Label` nodes draw as free text (fontSize / fontColor / backgroundColor / textAlign / padding) instead of opaque white boxes from their `#fff0` colour.
+
+### Added (unreleased, not yet visually verified)
+- **LoRA Manager in the node, tuned:** node text boxes now use the canvas' own font/inset/background instead of the page's; the LoRA autocomplete dropdown and its preview card show inside the graph (still at page scale, not zoomed); scrubbing a LoRA strength no longer re-renders the canvas on every mouse move, so it stops stuttering and no stale number is left behind.
+- **`ComfyGNOME.LoraRows`** (Settings → Comfy-GNOME → Canvas): `page` keeps the extension's own editor in Lora Loader (LoraManager) like native ComfyUI; `canvas` restores Comfy-GNOME's simpler LoRA row list.
+- DOM widgets inside canvas nodes: LoRA Manager's own prompt box + LoRA list now run in the node via a transparent WebKitGTK overlay (live-tested on Xvfb with the real backend). See `docs/WEBKITGTK.md`.
+
+- Extension action-bar buttons/bottom panels as canvas-menu commands; outside-click replay closes extension menus; WebKit context menu hidden; mirror widgets get `widget.node` (Easy-Use lists work); DOM rows grow with the node and scroll internally.
+- Link-render button beside the Log/Preview toggle (settings `ComfyGNOME.LinkButton`, `LinkButtonShow`).
+- Resize grips: 16 px triangle on nodes and groups, `ComfyGNOME.ResizeSide` left/right, socket hover ring.
+- Saved node sizes clamped to ComfyUI's minimum; the small GNOME size is kept in `ComfyGNOME.size`.
+- LoRA strength scrubbing, Copy/Paste (Clipspace) on preview nodes, hollow dot on optional sockets.
+- Browser drops: `http(s)` URLs, link text and raw picture data are accepted on the canvas and the window; the
+  picture is fetched on a worker (ureq now built with `tls`) and goes to the backend's `input/` — no temp files.
+- Extension sidebar tabs (`registerSidebarTab`) and nodes' DOM widgets (LoRA Manager's row editor) open from the
+  canvas menus ("Extension commands", "Open node UI…") in a window that hosts the implant page.
+- Extension commands and keybindings (`app.registerExtension`) exposed as shortcuts and a canvas-menu submenu.
+
+### Added
+
+- **Extension hook runtime (`src/implant/`)**: a hidden WebKitGTK page loads every custom node pack's `web/`
+  JavaScript against a shim of the ComfyUI frontend API (`app`, `api`, `ComfyWidgets`, `LGraphNode`, extension
+  registration), registers the backend's node definitions there, and mirrors the active tab's graph into it. Canvas
+  edits are replayed into that page and whatever the extensions' own code changes comes back as a `changed`
+  payload that is applied to the workflow — so extension behaviour is the extension's code, not a Rust copy of it.
+- Custom-node **Settings sections come from their own code**: the Language selector and the EreNodes `.csv`
+  autocomplete are real drop-downs with the node's own list, and any pack that registers a combo gets the same
+  treatment without knowing Comfy-GNOME exists.
+- Choices an extension computes **at runtime** are mirrored too: when it defines `options.values` as a getter
+  (Impact Pack's wildcard databank), the canvas combo lists those entries. ImpactWildcard en/decoder show the real
+  wildcards and insert them through the node's own callback.
+- **LoRA Manager opens in the app** (`src/lora_view.rs`): a WebKitGTK window on `{base}/loras` replaces the
+  Thorium/Chromium/Firefox launch and its per-display browser profile directory. Works under Flatpak.
+- **Ctrl+wheel grows or shrinks the text in prompt widgets** (0.6×–2.5×, one notch = 0.1, wheel down = smaller).
+  It applies to multiline/stretchy text rows only — the wrap, the row heights and the in-place editor all follow the
+  same scale, and it resets when the app restarts.
+- Files dropped anywhere on the window are accepted — sidebar, header, tab strip, splash — not only over an open
+  canvas; they land where the active tab puts them, and images still upload into ComfyUI's `input/`.
+
+### Changed
+
+- Text widgets are live `<textarea>`s carrying `widget.inputEl`, so extensions that attach to the element
+  (`TextAreaAutoComplete` in pysssss' custom-scripts, LoRA Manager's prompt box) work unchanged.
+- The `api` shim implements `clientId` / `initialClientId`, which LoRA Manager's node registration requires.
+- The video preview **keeps its mute state and volume** from one clip to the next: the setting is applied to each new
+  media stream, and the transport bar records what the user changes.
+- The autocomplete list in the in-place prompt editor is an **overlay child instead of a popover**, so the first
+  click anywhere else now dismisses the suggestions and commits the text (a popover grabbed the pointer and only
+  swallowed that click).
+
+### Fixed
+
+- Impact Pack's `Switch (Any)` grows an optional input when one of its inputs is connected.
+- Escape closes the video preview even after a click on the video (the key handler now also sits on the window in
+  the capture phase — the transport controls took the focus and ate the key).
+- Settings no longer show **Modern Node Design (Nodes 2.0)**: it switches the web frontend's Vue renderer, which has
+  no effect here, so offering it only invited confusion.
+- Editing a LoRA Manager prompt in the canvas refreshes the LoRA rows and the TriggerWord Toggle node: the prompt
+  callback posts to `/api/lm/loras/get_trigger_words`, the backend emits `trigger_word_update`, and the tag widget's
+  value comes back into the workflow.
+
 ## [0.2.0-beta.8] — 2026-11-17
 
 ### Changed
