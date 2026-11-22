@@ -5,6 +5,19 @@ _Last updated: session 36 (canvas text ergonomics: Ctrl+wheel text scale, overla
 Project: **Comfy-GNOME** at `/home/montel/Documents/Comfy-GNOME` (renamed from `GNOME-Comfyu` → `GNOME-ComfyUI` → this).
 Crate/binary `comfy-gnome`, app id `io.github.comfygnome.ComfyGnome` (`APP_ID` in `src/main.rs`).
 
+## Release checklist — do ALL of this on every version bump / release
+
+1. Bump the version in `Cargo.toml` **and** `Cargo.lock` (`name = "comfy-gnome"`), and add a `CHANGELOG.md` section.
+2. **Update the version line at the top of `README.md`** (`<b>0.2.0-beta.N</b> …`). This is what GitHub shows as the
+   repo's front-page header; it has gone stale before (showed beta.7 when beta.9 shipped). Mention new headline
+   features in the README feature list too.
+3. **Push to `main`** — the GitHub default branch (`git push origin master:main` if working on local `master`).
+   Pushing only `master` leaves the GitHub page unchanged.
+4. Tag `vX.Y.Z-beta.N`, build the Flatpak (`flatpak-builder --user --install --force-clean --install-deps-from=flathub flatpak-build build-aux/io.github.comfygnome.ComfyGnome.json`, then `flatpak build-bundle`) and attach it to the GitHub release.
+5. **Publish the release as "Latest", NOT "Pre-release"** (`gh release create … ` without `--prerelease`, or
+   `gh release edit TAG --prerelease=false --latest`). The user always flips it manually otherwise.
+6. Don't commit `lab/`, `s*.png` or other scratch files.
+
 ## Standing rule — the backend dies with the UI. No exceptions, no excuses.
 
 **Read this twice. It is the one rule in this repo that is not a preference.**
