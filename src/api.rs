@@ -653,6 +653,12 @@ mod tests {
     use super::*;
 
     #[test]
+    fn executed_carries_text() {
+        let ev = parse_text(r#"{"type":"executed","data":{"node":"457","output":{"text":["a","b"]}}}"#);
+        assert!(matches!(ev, Some(WsEvent::Executed { ref text, .. }) if text == &["a", "b"]));
+    }
+
+    #[test]
     fn parses_ws_messages() {
         let ev = parse_text(r#"{"type":"progress","data":{"value":3,"max":20,"node":"5"}}"#);
         assert!(matches!(ev, Some(WsEvent::Progress { value: 3, max: 20, node: Some(ref n) }) if n == "5"));
