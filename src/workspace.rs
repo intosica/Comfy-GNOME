@@ -4005,6 +4005,21 @@ impl Workspace {
     }
 
     /// Remember a root node's output images and show them on its canvas node.
+    /// Text a node reported (Preview Any, ShowText|pysssss) goes into its read-only box.
+    fn show_text(&self, node: Option<&str>, text: &[String]) {
+        let doc = self.run_doc.borrow().as_ref().and_then(|w| w.upgrade());
+        let (Some(d), Some(id)) = (doc, node.filter(|n| !n.contains(':'))) else { return };
+        if text.is_empty() || !d.borrow().path.is_empty() {
+            return;
+        }
+        {
+            let mut doc = d.borrow_mut();
+            let Some(n) = doc.wf.root.nodes.iter_mut().find(|n| n.id == id && matches!(n.ty.as_str(), "PreviewAny" | "ShowText|pysssss")) else { return };
+            n.widgets_values = if n.ty == "PreviewAny" { serde_json::json!([text.join("\n")]) } else { serde_json::json!([text]) };
+        }
+        self.render_doc(&d);
+    }
+
     fn show_outputs(&self, node: Option<&str>, images: &[api::OutputImage]) {
         let doc = self.run_doc.borrow().as_ref().and_then(|w| w.upgrade());
         let (Some(d), Some(id)) = (doc, node.filter(|n| !n.contains(':'))) else { return };
@@ -4097,7 +4112,8 @@ impl Workspace {
                 self.show_live_preview(display_node.as_deref(), &bytes);
                 self.show_image(bytes, "live preview")
             }
-            Executed { node, images } => {
+            Executed { node, images, text } => {
+                self.show_text(node.as_deref(), &text);
                 self.append_log(&format!("[ws] executed {}: {} images", node.clone().unwrap_or_default(), images.len()));
                 self.show_outputs(node.as_deref(), &images);
                 *self.preview_items.borrow_mut() =

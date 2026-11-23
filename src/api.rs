@@ -26,7 +26,7 @@ pub enum WsEvent {
     /// wants it shown on (`display_node_id`: subgraph/custom-sampler frames bubble to the host).
     Preview { bytes: Vec<u8>, display_node: Option<String> },
     /// `executed`: output images of a finished node (`filename/subfolder/type` → `/view`).
-    Executed { node: Option<String>, images: Vec<OutputImage> },
+    Executed { node: Option<String>, images: Vec<OutputImage>, text: Vec<String> },
     /// Anything else (custom-node events, executed, progress_state, …): raw type + data.
     Other { kind: String, data: Value },
     /// Every text frame verbatim, for the implant's `api` event listeners.
@@ -599,6 +599,8 @@ pub fn parse_text(t: &str) -> Option<WsEvent> {
         "executed" => WsEvent::Executed {
             node: s("node"),
             images: outputs(&d["output"]),
+            // PreviewAny / ShowText|pysssss report their text as `output.text`.
+            text: d["output"]["text"].as_array().into_iter().flatten().filter_map(|t| t.as_str().map(str::to_owned)).collect(),
         },
         "execution_start" => WsEvent::ExecutionStart { prompt_id: s("prompt_id").unwrap_or_default() },
         "execution_error" => WsEvent::ExecutionError {

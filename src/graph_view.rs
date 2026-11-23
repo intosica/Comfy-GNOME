@@ -269,7 +269,7 @@ pub fn build_widgets(wf: &Workflow, graph: &Graph, n: &workflow::Node, reg: &Reg
             w.structural = true;
             return vec![w];
         }
-        "ShowText|pysssss" => {
+        "ShowText|pysssss" | "PreviewAny" => {
             // The web UI swaps the widget for one read-only box per text the node received;
             // the file keeps that as a list of lists.
             let mut out = Vec::new();
